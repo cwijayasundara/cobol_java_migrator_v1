@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from dotenv import load_dotenv
+from neo4j import GraphDatabase
+
+from cobol_modernizer import schema
+
+
+class Neo4jClient:
+    """Thin wrapper around the Neo4j Python driver for code graph operations."""
+
+    def __init__(
+        self,
+        uri: str | None = None,
+        user: str | None = None,
+        password: str | None = None,
+    ) -> None:
+        load_dotenv()
+        self.uri = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
+        self.user = user or os.getenv("NEO4J_USER", "neo4j")
+        self.password = password or os.getenv("NEO4J_PASSWORD", "")
+        # Suppress UNRECOGNIZED notifications: Neo4j warns whenever a query
+        # references a label/relationship/property the DB has not yet seen
+        # (e.g. HAS_BRD before the first BRD is written). They are cosmetic
+        # and spam the log on every poll until the first write happens.
+        self.driver = GraphDatabase.driver(
+            self.uri,
+            auth=(self.user, self.password),
+            notifications_disabled_classifications=["UNRECOGNIZED"],
+        )
+
+    def close(self) -> None:
+        self.driver.close()
+
+    def __enter__(self) -> Neo4jClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def apply_schema(self) -> None:
+        with self.driver.session() as session:
+            for stmt in schema.CONSTRAINTS:
+                session.run(stmt)
+            for stmt in schema.INDEXES:
+                try:
+                    session.run(stmt)
+                except Exception:
+                    pass
+
+    def clear(self) -> None:
+        with self.driver.session() as session:
+            session.run(schema.CLEAR_GRAPH)
+
+    def run(self, query: str, **params: Any) -> list[dict[str, Any]]:
+        with self.driver.session() as session:
+            result = session.run(query, **params)
+            return [record.data() for record in result]
+
+    def merge_entity(self, qualified_name: str, label: str, props: dict[str, Any]) -> None:
+        query = schema.MERGE_ENTITY % {"label": label}
+        self.run(query, qualified_name=qualified_name, props=props)
+
+    def merge_relationship(
+        self,
+        source_qname: str,
+        target_qname: str,
+        rel_type: str,
+        props: dict[str, Any] | None = None,
+        allow_unresolved: bool = True,
+    ) -> None:
+        template = schema.MERGE_RELATIONSHIP_TO_UNRESOLVED if allow_unresolved else schema.MERGE_RELATIONSHIP
+        query = template % {"rel_type": rel_type}
+        self.run(query, source_qname=source_qname, target_qname=target_qname, props=props or {})
+
+    def merge_author(self, name: str, email: str, commit_count: int) -> None:
+        self.run(schema.MERGE_AUTHOR, name=name, email=email, commit_count=commit_count)
+
+    def merge_authored_by(self, file_path: str, email: str, rank: int) -> None:
+        self.run(schema.MERGE_AUTHORED_BY, file_path=file_path, email=email, rank=rank)
+
+    def merge_co_change(
+        self, qname_a: str, qname_b: str, times: int, confidence: float
+    ) -> None:
+        self.run(
+            schema.MERGE_CO_CHANGE,
+            qname_a=qname_a,
+            qname_b=qname_b,
+            times=times,
+            confidence=confidence,
+        )
+
+    def stats(self) -> dict[str, int]:
+        node_count = self.run("MATCH (n) RETURN count(n) AS count")[0]["count"]
+        rel_count = self.run("MATCH ()-[r]->() RETURN count(r) AS count")[0]["count"]
+        return {"nodes": node_count, "relationships": rel_count}
