@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Modernization Workbench UI and Agentic Architecture</title>
+  <style>
+    :root {
+      --ink: #172026;
+      --muted: #5b6870;
+      --line: #d7dee2;
+      --soft: #f6f8f9;
+      --accent: #176b87;
+      --green: #39745a;
+      --purple: #7b548b;
+      --amber: #9a6218;
+      --red: #9d3f3f;
+      --blue-soft: #eef6f8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: white;
+      line-height: 1.48;
+    }
+    main { max-width: 1200px; margin: 0 auto; padding: 36px 24px 72px; }
+    h1, h2, h3 { margin: 0 0 12px; line-height: 1.15; }
+    h1 { font-size: 38px; }
+    h2 { font-size: 25px; margin-top: 42px; padding-top: 10px; border-top: 2px solid var(--line); }
+    h3 { font-size: 18px; margin-top: 20px; }
+    p { margin: 0 0 12px; }
+    ul, ol { margin: 8px 0 18px; padding-left: 24px; }
+    li { margin: 6px 0; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #edf2f4;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    a { color: var(--accent); }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 28px;
+      align-items: stretch;
+      padding-bottom: 28px;
+      border-bottom: 1px solid var(--line);
+    }
+    .subtitle { font-size: 18px; color: var(--muted); max-width: 860px; }
+    .meta {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+      padding: 18px;
+      font-size: 14px;
+    }
+    .meta strong { display: block; margin-top: 8px; }
+    .meta strong:first-child { margin-top: 0; }
+    .grid { display: grid; gap: 14px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      padding: 16px;
+    }
+    .card h3 { margin-top: 0; }
+    .callout {
+      background: var(--blue-soft);
+      border-left: 4px solid var(--accent);
+      padding: 14px 16px;
+      margin: 18px 0;
+    }
+    .diagram {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+      padding: 18px;
+      margin: 18px 0;
+      overflow-x: auto;
+    }
+    .journey {
+      display: grid;
+      grid-template-columns: repeat(11, minmax(125px, 1fr));
+      gap: 10px;
+      min-width: 1400px;
+    }
+    .step {
+      border: 1px solid #b8c4ca;
+      border-top: 5px solid var(--accent);
+      border-radius: 8px;
+      background: white;
+      padding: 10px;
+      min-height: 112px;
+      position: relative;
+    }
+    .step:nth-child(3n) { border-top-color: var(--green); }
+    .step:nth-child(4n) { border-top-color: var(--purple); }
+    .step b { display: block; margin-bottom: 5px; }
+    .step small { color: var(--muted); display: block; }
+    .workbench {
+      display: grid;
+      grid-template-columns: 220px 1fr 320px;
+      grid-template-rows: 68px 340px 118px;
+      gap: 10px;
+      min-width: 980px;
+    }
+    .pane {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      padding: 12px;
+      overflow: hidden;
+    }
+    .pane b { display: block; margin-bottom: 6px; }
+    .nav { grid-row: 1 / 4; background: #f5f8f9; }
+    .top { grid-column: 2 / 4; }
+    .main { grid-column: 2; }
+    .agent { grid-column: 3; grid-row: 2 / 4; background: #fbfcfd; }
+    .bottom { grid-column: 2; }
+    .pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      background: #edf2f4;
+      color: #39464d;
+      margin: 2px 3px 2px 0;
+    }
+    .pill.good { background: #e7f3ed; color: var(--green); }
+    .pill.warn { background: #fbf0de; color: var(--amber); }
+    .pill.bad { background: #fae9e9; color: var(--red); }
+    .agent-arch {
+      display: grid;
+      grid-template-columns: 1fr 1.1fr 1fr;
+      gap: 14px;
+      min-width: 980px;
+      align-items: stretch;
+    }
+    .stack {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      padding: 14px;
+    }
+    .stack h3 { margin-top: 0; }
+    .toolbox {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .tool {
+      background: #f5f8f9;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 9px;
+      font-size: 13px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0 24px;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #edf2f4; }
+    .footer {
+      margin-top: 44px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+    @media (max-width: 820px) {
+      main { padding: 24px 16px 56px; }
+      h1 { font-size: 30px; }
+      .hero, .grid.two, .grid.three { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <div>
+      <h1>Modernization Workbench UI and Agentic Architecture</h1>
+      <p class="subtitle">A guided app experience for COBOL-to-Java modernization, backed by one user-visible agentic system with graph tools, OS workspace tools, build tools, validation gates, and auditable evidence.</p>
+    </div>
+    <aside class="meta">
+      <strong>Recommendation</strong>
+      Build on the existing Next.js + React + FastAPI + Neo4j project.
+      <strong>Frontend choice</strong>
+      Next.js App Router, React 19, TypeScript, Tailwind, lucide icons.
+      <strong>Alternative</strong>
+      Vite only if this becomes a pure SPA with no server-rendered artifacts or app-level routing needs.
+      <strong>Date</strong>
+      2026-05-30
+    </aside>
+  </section>
+
+  <section>
+    <h2>Framework Decision</h2>
+    <p><strong>Use Next.js, not Vite, for the product app.</strong> The current reusable source-graph UI is already on Next.js 15.3, React 19.1, Tailwind 4, and Turbopack. The product needs persistent route-based journeys, server-rendered HTML artifact pages, deep links into graph/artifact views, auth-ready layouts, and deployment flexibility. Those are Next.js strengths.</p>
+    <table>
+      <thead><tr><th>Option</th><th>Fit</th><th>Decision</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Next.js App Router</td>
+          <td>Best fit for a product workbench with layouts, nested routes, server/client component boundaries, artifact pages, and existing reuse.</td>
+          <td><strong>Recommended.</strong> Continue from <code>source_graphs_v1.0/web</code> and evolve it into the modernization workbench.</td>
+        </tr>
+        <tr>
+          <td>Vite + React Router</td>
+          <td>Excellent for fast pure-SPA development, especially if all backend work stays in FastAPI and the frontend is only a client shell.</td>
+          <td>Good fallback for a lighter prototype, but it discards useful existing Next.js structure.</td>
+        </tr>
+        <tr>
+          <td>TanStack Start</td>
+          <td>Promising full-stack React alternative, but less aligned with the existing codebase and still more moving-target risk for an enterprise product.</td>
+          <td>Do not pick for v1 unless there is a strong team preference.</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <strong>Practical architecture:</strong> keep FastAPI as the agent/job/graph backend. Use Next.js for the app shell, guided workflow, artifact views, graph explorer, and real-time job status. Avoid pushing agent execution into Next.js server functions.
+    </div>
+  </section>
+
+  <section>
+    <h2>Guided Journey UI</h2>
+    <p>The app should feel like a modernization cockpit. The user is guided through stages, but can always inspect evidence, ask the agent questions, and jump into graph exploration.</p>
+    <div class="diagram">
+      <div class="journey">
+        <div class="step"><b>0. Outcome</b><small>Why modernize, business goals, constraints, approval model</small></div>
+        <div class="step"><b>1. Intake</b><small>Repos, copybooks, JCL, schemas, logs, fixtures, docs</small></div>
+        <div class="step"><b>2. Parse</b><small>COBOL parser coverage, dialect issues, source inventory</small></div>
+        <div class="step"><b>3. Graph</b><small>Neo4j schema, entities, relationships, lineage density</small></div>
+        <div class="step"><b>4. Explore</b><small>Graph navigation, source slices, ask-codebase, Cypher cards</small></div>
+        <div class="step"><b>5. Blueprint</b><small>Functional BRD, business rules, evidence map, judge score</small></div>
+        <div class="step"><b>6. Seams</b><small>Ranked seams, transition patterns, risk and testability</small></div>
+        <div class="step"><b>7. Plan</b><small>Epics, stories, dependencies, release increments</small></div>
+        <div class="step"><b>8. Design</b><small>Modular monolith, macroservices, microservices, APIs, ADRs</small></div>
+        <div class="step"><b>9. Build</b><small>TDD codegen, compile, static analysis, repair loops</small></div>
+        <div class="step"><b>10. Verify</b><small>COBOL-vs-Java equivalence, deploy, smoke, observe</small></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Workbench Layout</h2>
+    <p>Use a stable app shell so every stage feels consistent. The user should always know what stage they are in, what evidence supports the current result, what the agent is doing, and what gate blocks the next step.</p>
+    <div class="diagram">
+      <div class="workbench">
+        <div class="pane nav">
+          <b>Journey Rail</b>
+          <span class="pill good">Outcome</span>
+          <span class="pill good">Intake</span>
+          <span class="pill warn">Parse</span>
+          <span class="pill">Graph</span>
+          <span class="pill">Blueprint</span>
+          <span class="pill">Seams</span>
+          <span class="pill">Plan</span>
+          <span class="pill">Design</span>
+          <span class="pill">Build</span>
+          <span class="pill">Verify</span>
+        </div>
+        <div class="pane top">
+          <b>Stage Header and Gates</b>
+          <span class="pill good">Graph loaded</span>
+          <span class="pill warn">22 parse warnings</span>
+          <span class="pill bad">BRD not approved</span>
+          <span class="pill">Cost: $18.42</span>
+        </div>
+        <div class="pane main">
+          <b>Main Workspace</b>
+          Graph view, BRD preview, seam matrix, story dependency board, service design canvas, code generation run, or equivalence report depending on stage.
+        </div>
+        <div class="pane agent">
+          <b>Agent Console</b>
+          User asks the modernization agent to investigate, generate, explain, repair, or run gates. The console shows tool calls, evidence, plans, and approval requests.
+        </div>
+        <div class="pane bottom">
+          <b>Evidence Drawer</b>
+          Source spans, graph nodes, JCL steps, copybooks, test fixtures, runtime observations, judge feedback, and generated artifact lineage.
+        </div>
+      </div>
+    </div>
+    <h3>Core Screens</h3>
+    <div class="grid three">
+      <div class="card"><h3>Portfolio Dashboard</h3><p>All modernization workspaces, ingest status, graph health, active agent jobs, risks, and cost.</p></div>
+      <div class="card"><h3>Repository Intake</h3><p>Local path/Git clone, copybook/JCL mapping, dialect settings, schema/log upload, run inventory.</p></div>
+      <div class="card"><h3>Graph Explorer</h3><p>Existing graph canvas plus COBOL filters, source slice panel, lineage view, path finder, and seam overlay.</p></div>
+      <div class="card"><h3>Blueprint Studio</h3><p>Generated functional blueprint/BRD in HTML, section scores, evidence coverage, judge feedback, and approve/regenerate controls.</p></div>
+      <div class="card"><h3>Seam Studio</h3><p>Ranked seam candidates, transition pattern recommendation, testability score, blast radius, and migration strategy.</p></div>
+      <div class="card"><h3>Increment Planner</h3><p>Epics, user stories, dependencies, acceptance tests, delivery waves, and unresolved blockers.</p></div>
+      <div class="card"><h3>Design Studio</h3><p>Service/module options, API contracts, domain objects, data ownership, ADRs, and architecture judge.</p></div>
+      <div class="card"><h3>Build Lab</h3><p>Story-cluster codegen, TDD loop, compile logs, static analysis, generated tests, and repair history.</p></div>
+      <div class="card"><h3>Equivalence Lab</h3><p>Golden-master runs, COBOL-vs-Java diffs, tolerance rules, performance baseline, deploy readiness.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Single Agentic System</h2>
+    <p>The user should see one agent: <strong>the Modernization Agent</strong>. Internally it has a planner, memory, tool router, phase policies, and task-scoped workers, but the product experience is one agentic system operating inside a controlled workspace, like Claude Code or Codex for modernization.</p>
+    <div class="diagram">
+      <div class="agent-arch">
+        <div class="stack">
+          <h3>User Surface</h3>
+          <ul>
+            <li>Agent console</li>
+            <li>Run buttons per stage</li>
+            <li>Approval gates</li>
+            <li>Artifact comments</li>
+            <li>Evidence explanations</li>
+          </ul>
+        </div>
+        <div class="stack">
+          <h3>Modernization Agent Runtime</h3>
+          <ul>
+            <li><strong>Planner:</strong> creates a stage plan and checkpoints.</li>
+            <li><strong>Tool router:</strong> selects graph, OS, build, parser, judge, or deploy tools.</li>
+            <li><strong>Context manager:</strong> compresses graph traversals and preserves lineage.</li>
+            <li><strong>Policy engine:</strong> controls read/write/build/deploy permissions by phase.</li>
+            <li><strong>Verifier:</strong> runs hard gates before marking work complete.</li>
+            <li><strong>Audit recorder:</strong> stores tool calls, model, prompts, costs, approvals.</li>
+          </ul>
+        </div>
+        <div class="stack">
+          <h3>Controlled Workspace</h3>
+          <div class="toolbox">
+            <div class="tool"><b>OS tools</b><br>read files, grep, find, patch, shell</div>
+            <div class="tool"><b>Graph tools</b><br>Neo4j queries, source slices, paths</div>
+            <div class="tool"><b>Parser tools</b><br>COBOL extractor, JCL scanner, coverage</div>
+            <div class="tool"><b>Artifact tools</b><br>BRD, stories, designs, reports</div>
+            <div class="tool"><b>Build tools</b><br>Java 25, Maven/Gradle, Spring tests</div>
+            <div class="tool"><b>Judge tools</b><br>LLM judges, groundedness, rubrics</div>
+            <div class="tool"><b>Runtime tools</b><br>COBOL runner, Java runner, diff harness</div>
+            <div class="tool"><b>Deploy tools</b><br>Docker, CI, smoke, observability</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <h3>Important Distinction</h3>
+    <p>Use one user-visible agent, but allow internal scoped workers for parallel map/reduce jobs. For example, one BRD subsystem worker per graph cluster is fine if all workers are spawned by the Modernization Agent, share the same policy engine, write structured outputs, and cannot bypass gates.</p>
+  </section>
+
+  <section>
+    <h2>Codex-Inspired Runtime</h2>
+    <p>Use <a href="https://github.com/openai/codex">openai/codex</a> as a strong design reference for the agent substrate. Codex is a local coding agent with a terminal/app workflow, workspace tools, approvals, sandboxing, MCP, skills, subagents, hooks, and configuration through project/user context. The modernization app should adopt those product mechanics, while replacing generic coding goals with COBOL-modernization stages and graph-grounded evidence gates.</p>
+    <div class="grid two">
+      <div class="card">
+        <h3>Conversation plus workspace</h3>
+        <p>The agent conversation is not separate from the project. Every message, plan, command, patch, generated artifact, build log, graph query, and approval belongs to a workspace snapshot.</p>
+      </div>
+      <div class="card">
+        <h3>Permission profiles</h3>
+        <p>Mirror Codex-style profiles: read-only investigation, workspace-write generation, build/test execution, network-restricted retrieval, and deploy-capable mode. The active profile should be visible in the UI at all times.</p>
+      </div>
+      <div class="card">
+        <h3>Approval overlay</h3>
+        <p>When the agent wants to write files, run expensive jobs, access network, execute generated code, or deploy, surface a specific approval request with command, path, risk, and expected result.</p>
+      </div>
+      <div class="card">
+        <h3>Policy inheritance</h3>
+        <p>Internal workers inherit the parent run's sandbox and approval policy. A BRD subsystem worker or codegen repair worker cannot silently gain broader permissions than the main agent.</p>
+      </div>
+      <div class="card">
+        <h3>Project instructions</h3>
+        <p>Support a project-scoped modernization instruction file, similar in spirit to <code>AGENTS.md</code>, for coding standards, target architecture, model routing, migration constraints, and client-specific glossary.</p>
+      </div>
+      <div class="card">
+        <h3>Tool transparency</h3>
+        <p>Expose tool calls in the UI as readable events: graph query, source search, parser run, patch, compile, judge, equivalence run. Hide raw noise by default, but make full logs inspectable.</p>
+      </div>
+    </div>
+    <h3>Runtime Components</h3>
+    <table>
+      <thead><tr><th>Component</th><th>Codex-inspired behavior</th><th>Modernization-specific behavior</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Session manager</td>
+          <td>Maintains conversation state, current workspace, active permissions, and resumable runs.</td>
+          <td>Pins every run to graph snapshot, source snapshot, artifact versions, and modernization stage.</td>
+        </tr>
+        <tr>
+          <td>Plan loop</td>
+          <td>Turns user intent into a visible plan, updates status while tools run, and reports completion evidence.</td>
+          <td>Plans are stage-aware: parse plan, blueprint plan, seam plan, story plan, build plan, verify plan.</td>
+        </tr>
+        <tr>
+          <td>Tool broker</td>
+          <td>Routes shell, patch, MCP, browser, and other tools through one permissioned interface.</td>
+          <td>Adds graph, COBOL parser, artifact, judge, Java build, and equivalence harness tools.</td>
+        </tr>
+        <tr>
+          <td>Sandbox executor</td>
+          <td>Runs commands under filesystem/network policy and refuses unsupported policies instead of silently bypassing them.</td>
+          <td>Separates source-read workspace, generated-code workspace, build workspace, and deployment workspace.</td>
+        </tr>
+        <tr>
+          <td>Subagent runner</td>
+          <td>Spawns specialized workers only for explicitly parallel work and consolidates results into one response.</td>
+          <td>Uses workers for subsystem analysis, seam scoring, story cluster generation, and test generation.</td>
+        </tr>
+        <tr>
+          <td>Audit recorder</td>
+          <td>Stores tool calls, approvals, command outputs, diffs, and result summaries.</td>
+          <td>Adds lineage: requirement-to-source, seam-to-graph, test-to-business-rule, code-to-story.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Agent Operating Model</h2>
+    <table>
+      <thead><tr><th>Mode</th><th>Allowed tools</th><th>Typical model</th><th>Human gate</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Read-only investigation</td>
+          <td>Graph queries, source slices, grep/find, repo inventory, runtime logs</td>
+          <td>Sonnet 4.6</td>
+          <td>No approval needed for read-only actions</td>
+        </tr>
+        <tr>
+          <td>Artifact generation</td>
+          <td>Graph tools, artifact writer, judge tools, prompt-cache context</td>
+          <td>Sonnet 4.6 map, Opus 4.8 reduce/judge</td>
+          <td>Approve BRD, seams, stories, and designs before codegen</td>
+        </tr>
+        <tr>
+          <td>Workspace mutation</td>
+          <td>Patch files, create generated Java modules, update tests, run formatters</td>
+          <td>Sonnet 4.6, escalate repair loops to Opus 4.8</td>
+          <td>Require stage approval and scoped workspace</td>
+        </tr>
+        <tr>
+          <td>Build and verification</td>
+          <td>Maven/Gradle, static analysis, test runners, COBOL-vs-Java diff harness</td>
+          <td>Sonnet 4.6 for triage; Opus 4.8 for hard failures</td>
+          <td>Gate cannot be overridden without explicit risk acceptance</td>
+        </tr>
+        <tr>
+          <td>Deployment</td>
+          <td>Docker, CI/CD, smoke tests, environment checks</td>
+          <td>Sonnet 4.6</td>
+          <td>Explicit deployment approval required</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3>Tool Policy</h3>
+    <ul>
+      <li>Default all graph and source investigation tools to read-only.</li>
+      <li>Allow shell-style OS tools, but wrap them with workspace scope, command allowlists, timeout limits, log capture, and artifact linkage.</li>
+      <li>Separate <code>inspect</code>, <code>write</code>, <code>build</code>, and <code>deploy</code> permissions so the UI can show exactly what the agent is allowed to do.</li>
+      <li>Require every generated artifact to include graph snapshot ID, source refs, model, prompt version, token usage, and judge report.</li>
+      <li>Use checkpointed sessions so a long modernization run can resume with the same graph snapshot and artifact state.</li>
+    </ul>
+    <h3>Suggested Permission Profiles</h3>
+    <table>
+      <thead><tr><th>Profile</th><th>Filesystem</th><th>Network</th><th>Use</th></tr></thead>
+      <tbody>
+        <tr><td><code>modernize:read-only</code></td><td>Read source snapshots and artifacts only</td><td>Off by default</td><td>Inventory, graph exploration, BRD inspection</td></tr>
+        <tr><td><code>modernize:workspace</code></td><td>Write only generated artifacts and sandboxed workspaces</td><td>Off by default</td><td>BRD, seam report, story map, design docs</td></tr>
+        <tr><td><code>modernize:build</code></td><td>Write generated Java workspace and build cache</td><td>Dependency allowlist only</td><td>Maven/Gradle compile, tests, static checks</td></tr>
+        <tr><td><code>modernize:equivalence</code></td><td>Read COBOL inputs, write run outputs</td><td>Local services only if approved</td><td>COBOL-vs-Java execution and diffing</td></tr>
+        <tr><td><code>modernize:deploy</code></td><td>Write deployment manifests and CI config</td><td>Deployment targets only after approval</td><td>Containers, CI/CD, smoke tests</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Backend Services</h2>
+    <table>
+      <thead><tr><th>Service</th><th>Responsibility</th><th>Reuse from source_graphs_v1.0</th></tr></thead>
+      <tbody>
+        <tr><td>API Gateway / Control Plane</td><td>Repos, jobs, stages, artifacts, approvals, status, auth</td><td>Extend existing FastAPI app</td></tr>
+        <tr><td>Graph Service</td><td>Neo4j schema, safe Cypher, graph tools, graph snapshots</td><td>Reuse <code>Neo4jClient</code>, queries, graph MCP tools</td></tr>
+        <tr><td>Agent Runtime</td><td>Claude Agent SDK sessions, tool policy, OS tools, context compression, audit</td><td>Extend current <code>SdkAgentRunner</code> and graph MCP server</td></tr>
+        <tr><td>Artifact Service</td><td>HTML reports, JSON schemas, versioning, lineage maps, judge reports</td><td>Extend current BRD renderer/storage</td></tr>
+        <tr><td>Build Lab Service</td><td>Generated Java projects, compile/test/static analysis, repair loops</td><td>New service, isolated workspaces</td></tr>
+        <tr><td>Equivalence Service</td><td>COBOL execution harness, Java execution harness, diff and tolerance reports</td><td>New service, stage-gated</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Data Model Additions</h2>
+    <div class="grid three">
+      <div class="card"><h3>Workspace</h3><p>Modernization project, source snapshots, stage status, policy, approvals.</p></div>
+      <div class="card"><h3>JourneyStage</h3><p>Outcome, intake, parse, graph, explore, blueprint, seams, plan, design, build, verify.</p></div>
+      <div class="card"><h3>AgentRun</h3><p>Goal, plan, tool calls, model, token usage, cost, result, failure state.</p></div>
+      <div class="card"><h3>Artifact</h3><p>BRD, seam report, story map, service design, code bundle, test report.</p></div>
+      <div class="card"><h3>Gate</h3><p>Required checks, current result, threshold, override policy, approver.</p></div>
+      <div class="card"><h3>LineageRef</h3><p>Source span, graph node, runtime observation, SME note, generated artifact link.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Build Sequence</h2>
+    <ol>
+      <li>Rename/re-skin the existing app shell into <strong>Modernization Workbench</strong> while keeping the current graph UI working.</li>
+      <li>Add workspace and journey-stage routes: <code>/workspaces</code>, <code>/workspaces/[id]/journey/[stage]</code>, <code>/workspaces/[id]/artifacts/[artifactId]</code>.</li>
+      <li>Add the persistent journey rail, stage header/gates, agent console, and evidence drawer.</li>
+      <li>Promote current repo ingest, graph, ask-codebase, and BRD panel into journey stages.</li>
+      <li>Add AgentRun storage and live status events so the UI can show plans, tool calls, costs, and results.</li>
+      <li>Add seam studio and blueprint approval before code/design generation.</li>
+      <li>Add isolated codegen/build workspaces only after the blueprint and seam artifacts are stable.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>References</h2>
+    <ul>
+      <li>OpenAI Codex source: <a href="https://github.com/openai/codex">https://github.com/openai/codex</a></li>
+      <li>Codex documentation: <a href="https://developers.openai.com/codex">https://developers.openai.com/codex</a></li>
+      <li>Codex permissions: <a href="https://developers.openai.com/codex/permissions">https://developers.openai.com/codex/permissions</a></li>
+      <li>Codex subagents: <a href="https://developers.openai.com/codex/subagents">https://developers.openai.com/codex/subagents</a></li>
+      <li>Next.js App Router docs: <a href="https://nextjs.org/docs/app">https://nextjs.org/docs/app</a></li>
+      <li>Next.js Server and Client Components docs: <a href="https://nextjs.org/docs/app/building-your-application/rendering/server-components">https://nextjs.org/docs/app/building-your-application/rendering/server-components</a></li>
+      <li>Vite guide: <a href="https://vite.dev/guide/">https://vite.dev/guide/</a></li>
+      <li>TanStack Start docs: <a href="https://tanstack.com/start/latest">https://tanstack.com/start/latest</a></li>
+      <li>Local reference project: <code>/Users/chamindawijayasundara/Documents/applying_agents_2026/source_graphs_v1.0</code></li>
+    </ul>
+  </section>
+
+  <section class="footer">
+    <p>This design assumes a single user-visible agentic system and a Next.js product UI backed by FastAPI, Neo4j, Claude Agent SDK, parser/build/runtime tools, and strict stage gates.</p>
+  </section>
+</main>
+</body>
+</html>

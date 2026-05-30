@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>COBOL to Java 25 / Spring Boot Modernization Platform</title>
+  <style>
+    :root {
+      --ink: #172026;
+      --muted: #5c6b73;
+      --line: #d7dee2;
+      --panel: #f7f9fa;
+      --accent: #176b87;
+      --accent-2: #6f8f3f;
+      --accent-3: #8a4f7d;
+      --warn: #9a6218;
+      --bad: #a33a3a;
+      --good: #39745a;
+      --bg: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.5;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 36px 24px 72px; }
+    h1, h2, h3 { line-height: 1.15; margin: 0 0 12px; }
+    h1 { font-size: 38px; letter-spacing: 0; }
+    h2 { font-size: 26px; margin-top: 44px; padding-top: 8px; border-top: 2px solid var(--line); }
+    h3 { font-size: 18px; margin-top: 24px; }
+    p { margin: 0 0 12px; }
+    a { color: var(--accent); }
+    ul, ol { margin: 8px 0 18px; padding-left: 24px; }
+    li { margin: 6px 0; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #eef3f5;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 28px;
+      align-items: stretch;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 28px;
+      margin-bottom: 28px;
+    }
+    .subtitle { font-size: 18px; color: var(--muted); max-width: 850px; }
+    .meta {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      font-size: 14px;
+    }
+    .meta strong { display: block; margin-bottom: 4px; }
+    .grid { display: grid; gap: 14px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: #fff;
+    }
+    .card h3 { margin-top: 0; }
+    .tag {
+      display: inline-block;
+      font-size: 12px;
+      color: #fff;
+      background: var(--accent);
+      padding: 2px 8px;
+      border-radius: 999px;
+      margin-right: 6px;
+      white-space: nowrap;
+    }
+    .tag.green { background: var(--good); }
+    .tag.purple { background: var(--accent-3); }
+    .tag.warn { background: var(--warn); }
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: #eef6f8;
+      padding: 14px 16px;
+      margin: 18px 0;
+    }
+    .risk { border-left-color: var(--bad); background: #fbf0ef; }
+    .diagram {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      background: #fbfcfd;
+      margin: 18px 0;
+      overflow-x: auto;
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      gap: 12px;
+      min-width: 980px;
+    }
+    .flow .node, .swim .node {
+      border: 1px solid #b8c4ca;
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+      min-height: 88px;
+      position: relative;
+    }
+    .flow .node:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -18px;
+      top: 36px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .node b { display: block; margin-bottom: 4px; }
+    .node small { color: var(--muted); display: block; }
+    .swim {
+      display: grid;
+      grid-template-columns: 160px repeat(5, minmax(160px, 1fr));
+      gap: 10px;
+      min-width: 1040px;
+    }
+    .lane {
+      background: #e9f1f4;
+      border-radius: 8px;
+      padding: 12px;
+      font-weight: 700;
+      border: 1px solid var(--line);
+    }
+    .edge {
+      color: var(--muted);
+      text-align: center;
+      font-size: 22px;
+      align-self: center;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0 24px;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th { background: #eef3f5; }
+    .score {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .score span {
+      background: #eef3f5;
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 13px;
+      text-align: center;
+    }
+    .schema {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(180px, 1fr));
+      gap: 12px;
+      min-width: 860px;
+    }
+    .schema .entity {
+      border: 1px solid #b8c4ca;
+      border-top: 5px solid var(--accent);
+      border-radius: 8px;
+      background: #fff;
+      padding: 12px;
+    }
+    .entity:nth-child(2n) { border-top-color: var(--accent-2); }
+    .entity:nth-child(3n) { border-top-color: var(--accent-3); }
+    .entity b { display: block; margin-bottom: 8px; }
+    .entity small { display: block; color: var(--muted); }
+    .footer {
+      margin-top: 48px;
+      border-top: 1px solid var(--line);
+      padding-top: 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    @media (max-width: 800px) {
+      main { padding: 24px 16px 56px; }
+      .hero, .grid.two, .grid.three { grid-template-columns: 1fr; }
+      h1 { font-size: 30px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <div>
+      <h1>COBOL to Java 25 / Spring Boot 4 Modernization Platform</h1>
+      <p class="subtitle">A graph-first, agent-driven migration platform that turns COBOL estates into validated business requirements, seams, user-story clusters, service designs, generated Spring Boot code, and equivalence-tested deployments.</p>
+    </div>
+    <aside class="meta">
+      <strong>Prepared for</strong>
+      COBOL modernization product planning
+      <strong>Target stack</strong>
+      Python orchestration, Neo4j context graph, Claude Agent SDK, Java 25, Spring Boot 4.x
+      <strong>Local reuse candidate</strong>
+      <code>/Users/chamindawijayasundara/Documents/applying_agents_2026/source_graphs_v1.0</code>
+      <strong>Date</strong>
+      2026-05-30
+    </aside>
+  </section>
+
+  <section>
+    <h2>Executive Recommendation</h2>
+    <p>Build this as a <strong>deterministic analysis core plus bounded Claude agents</strong>, not as a pure code-generation agent. The context graph should be the product’s source of truth. Agents should read through graph tools, write structured artifacts, and pass judge/linter/runtime gates before downstream stages can run.</p>
+    <div class="grid three">
+      <div class="card">
+        <h3>1. Graph-first comprehension</h3>
+        <p>Parse COBOL into AST/ASG-derived entities, data lineage, transaction boundaries, file/DB/CICS/JCL touchpoints, and runtime traces. Store this in Neo4j with source spans and evidence pointers.</p>
+      </div>
+      <div class="card">
+        <h3>2. Seam-led delivery planning</h3>
+        <p>Detect external seams, data seams, batch seams, API/CICS seams, copybook/domain seams, and co-change seams. Use them to form modernization increments and story clusters.</p>
+      </div>
+      <div class="card">
+        <h3>3. Gate every generated artifact</h3>
+        <p>BRDs, stories, designs, tests, and Java code must have evidence coverage, LLM-as-judge scores, compile gates, architecture rules, and COBOL-vs-Java regression harness results.</p>
+      </div>
+    </div>
+    <div class="callout">
+      <strong>Model note:</strong> Anthropic’s current docs list Claude Opus 4.8 and Claude Sonnet 4.6 as latest models, with Opus 4.8 recommended for complex reasoning and long-horizon agentic coding. Use Opus 4.8 for planning, judging, and hard decomposition; use Sonnet 4.6 for high-throughput extraction, summarization, and code/test generation unless a gate fails.
+    </div>
+  </section>
+
+  <section>
+    <h2>Thoughtworks Modernization Doctrine</h2>
+    <p>The platform should encode the Thoughtworks/Fowler approach as product behavior, not as background reading. The north star is not automated feature parity. It is validated understanding, business-outcome-led decomposition, and incremental displacement through well-chosen seams and transitional architecture.</p>
+    <div class="grid two">
+      <div class="card">
+        <h3>Outcomes before technology</h3>
+        <p>Legacy displacement begins by clarifying the business outcome: lower cost of change, better process, retirement risk, regulatory pressure, or faster product change. “Java 25 and Spring Boot 4” are implementation choices, not sufficient reasons to modernize.</p>
+      </div>
+      <div class="card">
+        <h3>Avoid feature-parity traps</h3>
+        <p>The platform must flag large “copy the current system exactly” plans as risky. Feature parity often drives big-bang migration and preserves obsolete business process constraints. BRDs should distinguish required behavior from accidental legacy behavior.</p>
+      </div>
+      <div class="card">
+        <h3>Reconstruct functional intent</h3>
+        <p>For each capability, combine code, data, screens, files, JCL, runtime traces, logs, and SME knowledge into a traceable functional specification. The BRD is a reviewed blueprint for forward engineering, not a prettified code summary.</p>
+      </div>
+      <div class="card">
+        <h3>Lineage is mandatory</h3>
+        <p>Every generated claim must carry lineage: source span, graph node, runtime observation, or SME confirmation. This directly counters hallucination and creates the confidence needed for business review.</p>
+      </div>
+      <div class="card">
+        <h3>Incremental displacement</h3>
+        <p>Modernization increments should be built around seams that let new behavior coexist with legacy behavior. Cutover patterns include dual run, fork on ingress, event interception, diverting flow, and legacy mimic adapters.</p>
+      </div>
+      <div class="card">
+        <h3>Macro first, then micro</h3>
+        <p>Generate larger services around vertical business capabilities first. Split into smaller microservices only when data ownership, release independence, observability, and operating model maturity are present.</p>
+      </div>
+    </div>
+    <h3>How This Changes the Product</h3>
+    <ul>
+      <li>The first-class artifact is a <strong>validated functional blueprint</strong>, not generated Java code.</li>
+      <li>The platform should include a <strong>business outcome capture step</strong> before parsing and planning.</li>
+      <li>The graph schema should include <code>Outcome</code>, <code>Capability</code>, <code>Observation</code>, <code>Lineage</code>, <code>TransitionPattern</code>, and <code>Approval</code> nodes.</li>
+      <li>The BRD judge should penalize requirements that lack lineage, preserve obsolete process constraints without justification, or skip user/SME validation.</li>
+      <li>The story planner should optimize for independently releasable increments, not just graph clusters.</li>
+      <li>The service designer should recommend a modular monolith or macroservice when microservice extraction would create distributed data coupling.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>End-to-End Platform Flow</h2>
+    <div class="diagram">
+      <div class="flow">
+        <div class="node"><b>1. Intake</b><small>Source, copybooks, JCL, DB schemas, test fixtures, execution logs</small></div>
+        <div class="node"><b>2. Parse</b><small>COBOL AST/ASG, control flow, data flow, IO, paragraphs, calls</small></div>
+        <div class="node"><b>3. Context Graph</b><small>Neo4j entities, relations, embeddings, summaries, provenance</small></div>
+        <div class="node"><b>4. Comprehend</b><small>Ask graph, BRD, rules, glossary, risk register</small></div>
+        <div class="node"><b>5. Plan</b><small>Seams, epics, user stories, dependency graph, service design</small></div>
+        <div class="node"><b>6. Build & Verify</b><small>TDD generation, compile/lint, equivalence tests, deploy automation</small></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Reference Architecture</h2>
+    <div class="diagram">
+      <div class="swim">
+        <div class="lane">User / UI</div>
+        <div class="node"><b>Repository intake</b><small>Upload/clone/local path</small></div>
+        <div class="node"><b>Graph explorer</b><small>Search, expand, Cypher assistant</small></div>
+        <div class="node"><b>Artifact workspace</b><small>BRD, epics, tests, design</small></div>
+        <div class="node"><b>Review cockpit</b><small>Judge scores, evidence, diffs</small></div>
+        <div class="node"><b>Delivery board</b><small>Story clusters and build status</small></div>
+
+        <div class="lane">API Layer</div>
+        <div class="node"><b>FastAPI control plane</b><small>Jobs, repos, artifacts, auth</small></div>
+        <div class="node"><b>Graph query service</b><small>Safe Cypher, graph tools</small></div>
+        <div class="node"><b>Artifact service</b><small>HTML, JSON, versions</small></div>
+        <div class="node"><b>Validation service</b><small>Judges, policy, quality gates</small></div>
+        <div class="node"><b>Build service</b><small>Maven/Gradle, containers</small></div>
+
+        <div class="lane">Agent Layer</div>
+        <div class="node"><b>Comprehension agents</b><small>Business rules, glossary, summaries</small></div>
+        <div class="node"><b>Seam agent</b><small>Boundary detection and scoring</small></div>
+        <div class="node"><b>BRD/story agents</b><small>Map/reduce, evidence maps</small></div>
+        <div class="node"><b>Design/code agents</b><small>TDD, SOLID, bounded context</small></div>
+        <div class="node"><b>Judge agents</b><small>Groundedness, completeness, compilability</small></div>
+
+        <div class="lane">Data Layer</div>
+        <div class="node"><b>Object store</b><small>Source snapshots, reports, artifacts</small></div>
+        <div class="node"><b>Neo4j</b><small>Code/context graph and provenance</small></div>
+        <div class="node"><b>Vector index</b><small>Semantic retrieval over graph docs</small></div>
+        <div class="node"><b>Build cache</b><small>Generated projects and test outputs</small></div>
+        <div class="node"><b>Audit log</b><small>Agent traces, approvals, costs</small></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>COBOL Parsing Strategy</h2>
+    <p>The existing local project already wraps a ProLeap-based Java extractor and maps JSON into graph entities. Keep that path for v1 because ProLeap exposes AST and ASG concepts, handles preprocessing, and has evidence of use on banking and insurance COBOL. Add a fast file-discovery and parallel execution layer around it rather than replacing it early.</p>
+    <table>
+      <thead><tr><th>Parser option</th><th>Fit</th><th>Recommendation</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>ProLeap ANTLR4 COBOL parser</td>
+          <td>Strong AST/ASG, COPY/REPLACE preprocessing, data/control-flow concepts, EXEC SQL/CICS text extraction.</td>
+          <td><strong>Primary v1 parser.</strong> Extend the existing extractor contract to emit data items, file IO, EXEC SQL, EXEC CICS, JCL linkages, and source spans.</td>
+        </tr>
+        <tr>
+          <td>Tree-sitter COBOL grammar</td>
+          <td>Fast, robust, incremental parsing style, but COBOL grammars are less semantically rich and may need custom queries.</td>
+          <td>Use as optional fast pre-scan for indexing, symbol hints, and editor features. Do not depend on it as the only semantic parser.</td>
+        </tr>
+        <tr>
+          <td>Koopa / other COBOL parsers</td>
+          <td>Useful fallback for difficult dialects or independent parse verification.</td>
+          <td>Add later as a parser adapter for parser disagreement detection and dialect coverage.</td>
+        </tr>
+        <tr>
+          <td>Custom Python parser</td>
+          <td>High risk for COBOL dialects, copybooks, fixed/free format, CICS, SQL, and production corner cases.</td>
+          <td>Avoid except for lightweight lexical scanning and JCL/control-card parsing.</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3>Extractor Contract Extensions</h3>
+    <ul>
+      <li><code>Program</code>, <code>Division</code>, <code>Section</code>, <code>Paragraph</code>, <code>Sentence</code>, <code>Statement</code>, <code>Copybook</code>, <code>DataItem</code>, <code>FileDescriptor</code>, <code>SQLBlock</code>, <code>CICSTransaction</code>, <code>JobStep</code>.</li>
+      <li>Relationships: <code>CONTAINS</code>, <code>PERFORMS</code>, <code>CALLS</code>, <code>COPIES</code>, <code>READS</code>, <code>WRITES</code>, <code>DECLARES</code>, <code>USES_DATA</code>, <code>MOVES_TO</code>, <code>EXECUTES_SQL</code>, <code>EXECUTES_CICS</code>, <code>SCHEDULES</code>.</li>
+      <li>Properties: source dialect, copybook resolution status, paragraph order, line span, cyclomatic estimate, IO mode, table/file name, transaction ID, confidence, parse errors.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Context Graph Schema</h2>
+    <div class="diagram">
+      <div class="schema">
+        <div class="entity"><b>Repository</b><small>slug, branch, snapshot, ingest stats</small></div>
+        <div class="entity"><b>SourceFile</b><small>path, language, checksum, format</small></div>
+        <div class="entity"><b>COBOLEntity</b><small>program, section, paragraph, data item, copybook</small></div>
+        <div class="entity"><b>IntegrationPoint</b><small>file, DB table, CICS, MQ, API, batch input</small></div>
+        <div class="entity"><b>BusinessRule</b><small>rule text, evidence, confidence, owner</small></div>
+        <div class="entity"><b>Seam</b><small>type, score, blast radius, replacement path</small></div>
+        <div class="entity"><b>BRDRequirement</b><small>FR/NFR, priority, evidence map</small></div>
+        <div class="entity"><b>UserStory</b><small>cluster, dependencies, acceptance tests</small></div>
+        <div class="entity"><b>ServiceDesign</b><small>bounded context, API, aggregate, repository</small></div>
+        <div class="entity"><b>GeneratedCode</b><small>commit, module, compile status, tests</small></div>
+        <div class="entity"><b>TestCase</b><small>golden input, expected output, source evidence</small></div>
+        <div class="entity"><b>JudgeReport</b><small>scores, feedback, failures, model, cost</small></div>
+      </div>
+    </div>
+    <h3>Graph Principles</h3>
+    <ul>
+      <li>Every generated requirement, story, design decision, and test must link back to source nodes or runtime evidence.</li>
+      <li>Store summaries as graph node properties, but keep raw source slices in object storage or repo snapshots to avoid graph bloat.</li>
+      <li>Generate Cypher on the fly only through a read-only query agent that validates labels, relationship types, limits, and forbidden clauses before execution.</li>
+      <li>Use graph traversal before vector retrieval for code relationships; use vector retrieval for business phrasing, summaries, and cross-cutting concepts.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Claude Agent SDK Design</h2>
+    <p>The SDK is a good fit because it supports Python, built-in tools, hooks, subagents, MCP, permissions, and sessions. The current local project already uses an in-process MCP graph server with read-only graph tools and structured JSON output; that should become the standard agent boundary.</p>
+    <table>
+      <thead><tr><th>Agent</th><th>Model</th><th>Tools</th><th>Output</th><th>Gate</th></tr></thead>
+      <tbody>
+        <tr><td>Graph Comprehension</td><td>Sonnet 4.6</td><td>Graph MCP read tools</td><td>Subsystem summaries, glossary, rule candidates</td><td>Evidence coverage and hallucinated-ref check</td></tr>
+        <tr><td>Seam Discovery</td><td>Opus 4.8 for hard systems, Sonnet 4.6 for batch</td><td>Graph traversal, Cypher templates</td><td>Ranked seams with rationale</td><td>Score explainability and human approval for top seams</td></tr>
+        <tr><td>BRD Generator</td><td>Sonnet 4.6 map, Opus 4.8 reduce if needed</td><td>Graph MCP, source slices</td><td>HTML BRD plus JSON evidence map</td><td>LLM judge, groundedness, section completeness</td></tr>
+        <tr><td>Story Planner</td><td>Opus 4.8</td><td>Seam graph, BRD graph, dependency queries</td><td>Epics, user stories, dependency DAG</td><td>INVEST/acceptance criteria judge</td></tr>
+        <tr><td>OO / Microservice Designer</td><td>Opus 4.8</td><td>Seam graph, domain graph, Spring rules</td><td>Service contracts, aggregates, ADRs</td><td>Architecture fitness judge</td></tr>
+        <tr><td>Code Generator</td><td>Sonnet 4.6, escalate failures to Opus 4.8</td><td>Repo write tools in sandbox, build tools</td><td>Spring Boot modules and tests</td><td>Compile, tests, static analysis, architecture rules</td></tr>
+        <tr><td>Equivalence Tester</td><td>Sonnet 4.6</td><td>COBOL runner, Java runner, diff tools</td><td>Regression reports</td><td>Golden-master pass thresholds</td></tr>
+      </tbody>
+    </table>
+    <h3>Prompt and Context Engineering</h3>
+    <ul>
+      <li>Stable system prompts, schema definitions, graph tool descriptions, and domain taxonomy should be cacheable prompt prefixes.</li>
+      <li>Use map/reduce for large codebases: subsystem agents produce compact structured summaries; reducer agents merge and preserve evidence maps.</li>
+      <li>Use subagents only when their scope is independent: one subsystem, one seam candidate, one story cluster, one service module.</li>
+      <li>Use prompt compression after each phase: raw graph traversals become signed summaries with source references and token budgets.</li>
+      <li>Record model, prompt version, graph snapshot, token usage, cache reads/creation, and judge outputs for reproducibility.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Seam Discovery Model</h2>
+    <p>Seams are modernization control points: places where behavior can be isolated, replaced, tested, or routed incrementally. Use multiple graph signals rather than asking an LLM to guess.</p>
+    <table>
+      <thead><tr><th>Seam type</th><th>Graph signals</th><th>Migration move</th></tr></thead>
+      <tbody>
+        <tr><td>Batch input/output</td><td>JCL steps, file descriptors, SORT/MERGE, READ/WRITE, external files</td><td>Replace batch step with Spring Batch job or adapter around file contract</td></tr>
+        <tr><td>API / CICS transaction</td><td>EXEC CICS, transaction IDs, screen maps, COMMAREA structures</td><td>Create API facade, route transaction by transaction ID</td></tr>
+        <tr><td>Database reader/writer</td><td>EXEC SQL, table access, CRUD direction, shared data items</td><td>Extract service around table ownership; introduce strangler read/write path</td></tr>
+        <tr><td>Copybook/domain record</td><td>COPY relationships, shared data structures, high fan-in copybooks</td><td>Define canonical DTO/value object and anti-corruption layer</td></tr>
+        <tr><td>Paragraph cluster</td><td>Dense PERFORM/CALL subgraph, low external coupling</td><td>Generate service component or domain method cluster</td></tr>
+        <tr><td>Co-change seam</td><td>Git files changed together, shared ownership, shared defects</td><td>Plan delivery increment with likely business cohesion</td></tr>
+      </tbody>
+    </table>
+    <h3>Score Formula</h3>
+    <div class="score">
+      <span>Business criticality</span>
+      <span>Isolation</span>
+      <span>Testability</span>
+      <span>Data ownership clarity</span>
+      <span>Replacement risk</span>
+    </div>
+    <p>Rank seams by weighted score: <code>0.25*business + 0.20*isolation + 0.20*testability + 0.20*data_ownership - 0.15*risk</code>. Keep the weights configurable per client and show the contributing evidence.</p>
+    <h3>Thoughtworks Seam Criteria</h3>
+    <p>Promote seams that are observable, externally divertable, usable without invasive legacy edits, and funnel-shaped. For mainframes, the platform should look first at external interfaces, batch file ingress, customer-facing APIs, database reader/writer boundaries, batch pipeline handoffs, downstream processing handoffs, and data-characteristic partitions.</p>
+    <table>
+      <thead><tr><th>Criterion</th><th>Platform signal</th><th>Why it matters</th></tr></thead>
+      <tbody>
+        <tr><td>Observable interface</td><td>Files, queues, CICS APIs, logs, DB changes, scheduler outputs</td><td>Allows probes, dual run, and equivalence testing.</td></tr>
+        <tr><td>Divertable flow</td><td>Router/proxy/scheduler/config point exists or can be introduced</td><td>Allows gradual cutover without changing every caller.</td></tr>
+        <tr><td>External enabling point</td><td>Behavior can be changed through configuration, adapter, or ingress routing</td><td>Reduces invasive mainframe edits and regression risk.</td></tr>
+        <tr><td>Funnel surface area</td><td>Many upstream jobs converge on one boundary, or one boundary fans out cleanly</td><td>Creates high leverage for transitional architecture.</td></tr>
+        <tr><td>Atomic business increment</td><td>Capability, customer segment, product line, or dataset can be moved independently</td><td>Supports useful delivery rather than technical-only decomposition.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Artifact Pipeline</h2>
+    <div class="grid two">
+      <div class="card">
+        <h3>BRD Generation</h3>
+        <p>Use graph map/reduce. Each subsystem agent produces requirements with evidence pointers. The reducer deduplicates and renders HTML. The judge scores completeness, accuracy, clarity, consistency, and actionability. A groundedness check fails hallucinated references before human review.</p>
+      </div>
+      <div class="card">
+        <h3>Epics and Stories</h3>
+        <p>Split the BRD by seam and dependency graph, not by arbitrary feature headings. Each story must include source evidence, acceptance tests, data dependencies, target service, migration toggle strategy, and rollback notes.</p>
+      </div>
+      <div class="card">
+        <h3>Service Design</h3>
+        <p>Generate bounded contexts from seams, data ownership, transaction boundaries, and business capability names. Prefer modular monolith or macroservices first when boundaries are weak; promote to microservices when data ownership, independent release, and operational autonomy are clear.</p>
+      </div>
+      <div class="card">
+        <h3>Code and Tests</h3>
+        <p>For each independent story cluster, run TDD: generate tests from BRD and golden-master data, generate Spring Boot code, compile, run tests, run architecture checks, then compare against COBOL behavior.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Validation and Quality Gates</h2>
+    <table>
+      <thead><tr><th>Stage</th><th>Hard gate</th><th>Soft gate</th><th>Failure handling</th></tr></thead>
+      <tbody>
+        <tr><td>Parse</td><td>No unresolved source snapshots; parse errors categorized</td><td>Coverage percentage by files/statements</td><td>Fallback parser, dialect config, human triage</td></tr>
+        <tr><td>Graph</td><td>Schema constraints pass; required relationships loaded</td><td>Graph density and orphan rate thresholds</td><td>Re-run extractor or mark confidence low</td></tr>
+        <tr><td>BRD</td><td>Evidence map has valid refs; judge score above threshold</td><td>Human SME approval</td><td>Targeted regeneration by weak section</td></tr>
+        <tr><td>Stories</td><td>Dependency DAG acyclic; acceptance criteria present</td><td>INVEST and delivery-size score</td><td>Re-cluster or split story</td></tr>
+        <tr><td>Design</td><td>Service owns data; APIs and schemas generated</td><td>Architecture review score</td><td>Fall back to modular monolith</td></tr>
+        <tr><td>Code</td><td>Java 25 compile; Spring Boot 4 tests pass</td><td>Static quality and SOLID judge</td><td>Agent repair loop with build logs</td></tr>
+        <tr><td>Equivalence</td><td>Golden-master tests match configured tolerances</td><td>Mutation/property test coverage</td><td>Generate defect ticket tied to source seam</td></tr>
+        <tr><td>Deploy</td><td>Smoke tests and health checks pass</td><td>Performance baseline within tolerance</td><td>Rollback and block promotion</td></tr>
+      </tbody>
+    </table>
+    <div class="callout risk">
+      <strong>Do not treat “compilable” as sufficient.</strong> The linter should be a full validation suite: JDK 25 toolchain check, Maven/Gradle compile, Spring context boot, dependency hygiene, ArchUnit rules, SpotBugs/Error Prone/Checkstyle or equivalent, OpenAPI/schema validation, generated-test pass, and COBOL equivalence status.
+    </div>
+  </section>
+
+  <section>
+    <h2>Implementation Roadmap</h2>
+    <ol>
+      <li><strong>Outcome and discovery foundation:</strong> capture modernization outcomes, system boundaries, known workarounds, source inventory, runtime evidence sources, and SME validation workflow.</li>
+      <li><strong>Graph foundation:</strong> fork/reuse the existing source graph project, preserve its FastAPI/Neo4j/Next.js/Claude Agent SDK structure, and add a product-level job/artifact model.</li>
+      <li><strong>COBOL graph depth:</strong> extend the extractor beyond programs/sections/paragraphs to data division, file IO, SQL/CICS, copybooks, JCL, runtime observations, and lineage.</li>
+      <li><strong>Blueprint v1:</strong> productionize the existing map/reduce BRD generator as a functional blueprint generator with HTML reports, evidence coverage, judge reports, prompt caching, and version history.</li>
+      <li><strong>Graph explorer:</strong> add COBOL-specific filters, seam overlays, source-slice panel, dependency paths, lineage views, and Cypher-assistant query cards.</li>
+      <li><strong>Seam engine:</strong> implement deterministic seam candidate queries and LLM explanations; attach scores, transition patterns, risk, cost, and business increment options.</li>
+      <li><strong>Increment planner:</strong> generate epics/stories/dependencies from blueprint plus seams; render HTML and graph view around independently releasable increments.</li>
+      <li><strong>Design generator:</strong> create modular monolith, macroservice, or microservice/API/domain/data designs with ADRs and verification gates.</li>
+      <li><strong>Codegen workbench:</strong> generate one approved story cluster at a time, with TDD, compile gates, repair loops, and traceability back to requirements.</li>
+      <li><strong>Equivalence lab:</strong> run COBOL and Java side by side with generated and captured test data; diff outputs, DB/file effects, and non-functional baselines.</li>
+      <li><strong>Deployment automation:</strong> generate transitional architecture components, containers, CI pipelines, smoke tests, observability, and promotion gates.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Reuse From Existing Source Graph Project</h2>
+    <table>
+      <thead><tr><th>Existing capability</th><th>Where found</th><th>How to reuse</th></tr></thead>
+      <tbody>
+        <tr><td>Python/FastAPI + Neo4j graph ingestion</td><td><code>src/code_context_graph</code></td><td>Use as the control-plane and graph-storage base.</td></tr>
+        <tr><td>COBOL parser subprocess wrapper</td><td><code>src/code_context_graph/cobol/parser.py</code></td><td>Extend extractor JSON rather than replacing the wrapper.</td></tr>
+        <tr><td>Graph MCP tools for Claude Agent SDK</td><td><code>src/code_context_graph/agent/graph_tools.py</code></td><td>Add COBOL/data/seam-specific read-only tools.</td></tr>
+        <tr><td>Map/reduce BRD generation</td><td><code>src/code_context_graph/agent/brd_orchestrator.py</code></td><td>Keep the pattern; improve section schema and source coverage metrics.</td></tr>
+        <tr><td>LLM-as-judge with groundedness checks</td><td><code>src/code_context_graph/agent/brd_judge.py</code></td><td>Generalize judge reports for stories, design, code, and tests.</td></tr>
+        <tr><td>Graph UI</td><td><code>web/src/components/GraphView.tsx</code></td><td>Add seam mode, artifact overlays, and drill-down paths.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Key Risks</h2>
+    <ul>
+      <li><strong>COBOL dialect variance:</strong> fixed/free format, copybook resolution, preprocessor directives, CICS, embedded SQL, vendor extensions, and JCL can break naive parsing.</li>
+      <li><strong>False confidence from LLM outputs:</strong> require evidence maps, graph refs, judge reports, and human review checkpoints for business artifacts.</li>
+      <li><strong>Microservice over-extraction:</strong> use seams and data ownership to decide service boundaries; default to modular monolith where boundaries are uncertain.</li>
+      <li><strong>Behavioral equivalence gaps:</strong> generated tests must include captured production-like inputs, edge cases, file layouts, numeric precision, dates, and persistence side effects.</li>
+      <li><strong>Cost and latency:</strong> map/reduce, prompt caching, model routing, batch jobs, and artifact reuse are mandatory for large estates.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Research Notes and Sources</h2>
+    <ul>
+      <li>Neo4j <em>create-context-graph</em> provides a scaffolded FastAPI/Next.js/Neo4j app with graph visualization, agent tools, MCP support, and framework choices including Claude Agent SDK: <a href="https://github.com/neo4j-labs/create-context-graph">https://github.com/neo4j-labs/create-context-graph</a></li>
+      <li>Claude Agent SDK supports Python installation, API-key auth, built-in tools, hooks, subagents, MCP, permissions, and sessions: <a href="https://code.claude.com/docs/en/agent-sdk/overview">https://code.claude.com/docs/en/agent-sdk/overview</a></li>
+      <li>Anthropic model docs currently list Claude Opus 4.8, Claude Sonnet 4.6, and Claude Haiku 4.5, with Opus 4.8 positioned for complex reasoning and long-horizon agentic coding: <a href="https://platform.claude.com/docs/en/about-claude/models/overview">https://platform.claude.com/docs/en/about-claude/models/overview</a></li>
+      <li>ProLeap COBOL parser is ANTLR4-based and generates AST/ASG with data/control-flow information and preprocessing support: <a href="https://github.com/uwol/proleap-cobol-parser">https://github.com/uwol/proleap-cobol-parser</a></li>
+      <li>Tree-sitter is fast, robust, incremental, dependency-light, and useful as a secondary parse/indexing layer: <a href="https://tree-sitter.github.io/tree-sitter/">https://tree-sitter.github.io/tree-sitter/</a></li>
+      <li>Spring Boot 4.0 was released with first-class Java 25 support while retaining Java 17 compatibility: <a href="https://spring.io/blog/2025/11/20/spring-boot-4-0-0-available-now/">https://spring.io/blog/2025/11/20/spring-boot-4-0-0-available-now/</a></li>
+      <li>Thoughtworks/Fowler modernization references support graph-backed comprehension, business-readable functional specs, black-box-to-blueprint workflows, and seam-based incremental modernization: <a href="https://martinfowler.com/articles/legacy-modernization-gen-ai.html">GenAI modernization</a>, <a href="https://martinfowler.com/articles/black-box-to-blueprint.html">Black Box to Blueprint</a>, <a href="https://martinfowler.com/articles/uncovering-mainframe-seams.html">Mainframe seams</a>.</li>
+    </ul>
+  </section>
+
+  <section class="footer">
+    <p>This artifact is intentionally architecture-level. The next useful artifact is an implementation plan broken into milestones and backlog items, with exact repository changes against the reusable source graph project.</p>
+  </section>
+</main>
+</body>
+</html>
