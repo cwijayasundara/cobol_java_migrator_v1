@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 2,
+  "files": [
+    {
+      "filePath": "app/cbl/CBACT01C.cbl",
+      "parseStatus": "ok",
+      "error": null,
+      "entities": [
+        {"kind":"Program","qualifiedName":"CBACT01C","simpleName":"CBACT01C","filePath":"app/cbl/CBACT01C.cbl","startLine":1,"endLine":200,"isExternal":false}
+      ],
+      "dataItems": [
+        {"kind":"DataItem","qualifiedName":"CBACT01C.WS-ACCT-ID","simpleName":"WS-ACCT-ID","filePath":"app/cbl/CBACT01C.cbl","startLine":40,"endLine":40,"isExternal":false,"level":5,"picture":"9(11)","usage":"DISPLAY","redefines":null,"occurs":0,"parentQname":"CBACT01C.WS-ACCT-REC"}
+      ],
+      "relationships": [
+        {"sourceQname":"CBACT01C","targetQname":"ACCTDAT","kind":"READS","filePath":"app/cbl/CBACT01C.cbl","line":120,"metadata":{"resource":"ACCTDAT","resourceType":"VSAM","mode":"random"}}
+      ]
+    }
+  ]
+}
