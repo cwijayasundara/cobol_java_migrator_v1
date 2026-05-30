@@ -27,20 +27,31 @@ class CostLedger:
         self._killed: dict[_Key, bool] = {}
 
     def set_cap(self, *, workspace_id: str, run_id: Optional[str], cap_usd: float) -> None:
+        if cap_usd < 0:
+            raise ValueError(f"cap_usd must be >= 0, got {cap_usd}")
         self._cap[(workspace_id, run_id)] = cap_usd
 
+    def has_cap(self, key: _Key) -> bool:
+        return key in self._cap
+
     def cap(self, key: _Key) -> float:
-        return self._cap.get(key, float("inf"))
+        # Fail-closed: an unconfigured cap denies spend (0.0), never allows it
+        # (inf). Both the run and workspace caps MUST be set before usage is
+        # recorded — a hard ceiling that defaults to "off" is not a ceiling.
+        return self._cap.get(key, 0.0)
 
     def spent(self, key: _Key) -> float:
         return self._spent.get(key, 0.0)
 
     def add(self, key: _Key, cost_usd: float, token_usage: dict[str, int]) -> None:
+        # Clamp non-positive deltas: a kill-switch must be sticky, so spend can
+        # only ever increase — a negative cost must not buy back headroom.
+        cost_usd = max(0.0, cost_usd)
         self._spent[key] = self._spent.get(key, 0.0) + cost_usd
         bucket = self._tokens.setdefault(
             key, {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0})
         for name, value in (token_usage or {}).items():
-            bucket[name] = bucket.get(name, 0) + value
+            bucket[name] = bucket.get(name, 0) + max(0, value)
 
     def trip(self, key: _Key) -> None:
         self._killed[key] = True
@@ -70,13 +81,19 @@ class CostPolicy:
         run_over = self._ledger.spent(run_key) >= self._ledger.cap(run_key)
         ws_over = self._ledger.spent(ws_key) >= self._ledger.cap(ws_key)
         if run_over or ws_over:
+            # Trip every scope that breached so the kill-switch reflects reality:
+            # a workspace breach must stop sibling runs, not just this one.
             self._ledger.trip(run_key)
+            if ws_over:
+                self._ledger.trip(ws_key)
             scope = "run" if run_over else "workspace"
             raise BudgetExceeded(
                 f"{scope} cap reached for workspace={workspace_id} run={run_id}")
 
     def is_killed(self, *, workspace_id: str, run_id: str) -> bool:
-        return self._ledger.killed((workspace_id, run_id))
+        # Killed if either this run OR its workspace tripped the switch.
+        return (self._ledger.killed((workspace_id, run_id))
+                or self._ledger.killed((workspace_id, None)))
 
     def remaining_usd(self, *, workspace_id: str) -> float:
         ws_key = (workspace_id, None)

@@ -24,3 +24,40 @@ def test_run_cap_trips_kill_switch():
     with pytest.raises(BudgetExceeded):
         p.check(workspace_id="w1", run_id="r1")
     assert p.is_killed(workspace_id="w1", run_id="r1") is True
+
+
+def test_missing_cap_fails_closed():
+    # No caps configured: any check denies (a hard ceiling defaults to "off"
+    # = deny, never allow).
+    p = CostPolicy(CostLedger())
+    p.record_usage(workspace_id="w1", run_id="r1", token_usage={}, cost_usd=0.0)
+    with pytest.raises(BudgetExceeded):
+        p.check(workspace_id="w1", run_id="r1")
+
+
+def test_workspace_cap_trips_sibling_runs():
+    l = CostLedger()
+    l.set_cap(workspace_id="w1", run_id=None, cap_usd=2.0)
+    l.set_cap(workspace_id="w1", run_id="r1", cap_usd=100.0)
+    p = CostPolicy(l)
+    p.record_usage(workspace_id="w1", run_id="r1", token_usage={}, cost_usd=3.0)
+    with pytest.raises(BudgetExceeded):
+        p.check(workspace_id="w1", run_id="r1")
+    # A different run in the same over-budget workspace is also killed.
+    assert p.is_killed(workspace_id="w1", run_id="r2") is True
+
+
+def test_negative_cost_cannot_buy_back_headroom():
+    p = CostPolicy(_ledger())
+    p.record_usage(workspace_id="w1", run_id="r1", token_usage={}, cost_usd=2.5)
+    # A negative "refund" must not lower spend below the cap.
+    p.record_usage(workspace_id="w1", run_id="r1", token_usage={"input": -10},
+                   cost_usd=-5.0)
+    with pytest.raises(BudgetExceeded):
+        p.check(workspace_id="w1", run_id="r1")
+
+
+def test_set_cap_rejects_negative():
+    l = CostLedger()
+    with pytest.raises(ValueError):
+        l.set_cap(workspace_id="w1", run_id=None, cap_usd=-1.0)
