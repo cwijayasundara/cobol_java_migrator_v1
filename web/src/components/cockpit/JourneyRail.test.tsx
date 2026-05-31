@@ -1,0 +1,15 @@
+import { describe, it, expect } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { JourneyRail } from "@/components/cockpit/JourneyRail";
+import { STAGES } from "@/test/fixtures/controlplane";
+
+describe("JourneyRail", () => {
+  it("renders all 11 stages and marks the active one", () => {
+    render(<JourneyRail workspaceId="ws-1" stages={STAGES} active="blueprint" />);
+    // all 11 canonical stages present
+    ["Outcome","Intake","Parse","Graph","Explore","Blueprint","Seams","Plan","Design","Build","Verify"]
+      .forEach((label) => expect(screen.getByText(label)).toBeInTheDocument());
+    const active = screen.getByText("Blueprint").closest("a");
+    expect(active?.getAttribute("aria-current")).toBe("step");
+  });
+});
