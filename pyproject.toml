@@ -28,6 +28,9 @@ dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "testcontainers>=4.8"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
+markers = [
+    "integration: integration tests requiring Docker/Neo4j",
+]
 
 [build-system]
 requires = ["hatchling"]
