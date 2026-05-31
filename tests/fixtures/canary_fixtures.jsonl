@@ -1,0 +1,3 @@
+{"key": "ACCT-00000000001", "request": {"acctId": "00000000001"}, "expected": {"acctId": "00000000001", "balance": "1000.00"}}
+{"key": "ACCT-00000000002", "request": {"acctId": "00000000002"}, "expected": {"acctId": "00000000002", "balance": "250.50"}}
+{"key": "ACCT-00000000003", "request": {"acctId": "00000000003"}, "expected": {"acctId": "00000000003", "balance": "0.00"}}
