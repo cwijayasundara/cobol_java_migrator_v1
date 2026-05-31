@@ -1,7 +1,11 @@
 import os
 from alembic import context
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from cobol_modernizer.persistence.tables import Base
+
+# Honor .env so `alembic upgrade head` picks up POSTGRES_URL without exporting it.
+load_dotenv()
 
 target_metadata = Base.metadata
 
