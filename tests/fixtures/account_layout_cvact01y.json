@@ -1,0 +1,15 @@
+[
+  {"simpleName":"ACCT-ID","picture":"9(11)","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-ACTIVE-STATUS","picture":"X(01)","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-CURR-BAL","picture":"S9(10)V99","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-CREDIT-LIMIT","picture":"S9(10)V99","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-CASH-CREDIT-LIMIT","picture":"S9(10)V99","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-OPEN-DATE","picture":"X(10)","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-EXPIRAION-DATE","picture":"X(10)","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-REISSUE-DATE","picture":"X(10)","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-CURR-CYC-CREDIT","picture":"S9(10)V99","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-CURR-CYC-DEBIT","picture":"S9(10)V99","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-ADDR-ZIP","picture":"X(10)","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"ACCT-GROUP-ID","picture":"X(10)","usage":"DISPLAY","occurs":0,"redefines":null},
+  {"simpleName":"FILLER","picture":"X(178)","usage":"DISPLAY","occurs":0,"redefines":null}
+]
