@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from cobol_modernizer.agent import graph_ops as ops
