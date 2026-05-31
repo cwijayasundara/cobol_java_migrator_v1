@@ -33,7 +33,15 @@ class CobolParser:
     ) -> None:
         self.repo_root = Path(repo_root)
         self.jar_path = jar_path
-        self.copybook_dirs = copybook_dirs
+        # Resolve copybook dirs to ABSOLUTE paths. The Java extractor resolves
+        # --copybook-dir against its OWN CWD, not against --source-dir/repo_root,
+        # so a relative dir (e.g. "app/cpy") silently fails to be found and every
+        # program that COPYs a member parses with errors — a false-positive
+        # "success". Anchor relative dirs to repo_root; leave absolute ones as-is.
+        self.copybook_dirs = tuple(
+            str(Path(d) if Path(d).is_absolute() else (self.repo_root / d))
+            for d in copybook_dirs
+        )
         self.source_format = source_format
         self.java_home = java_home
         self.timeout = timeout
@@ -107,7 +115,11 @@ class CobolParser:
                 logger.warning("COBOL parse error in %s: %s", f.get("filePath"), f.get("error"))
         return results
 
-    def _run_extractor(self, java: str = "java") -> dict:
+    def _build_command(self, java: str = "java") -> list[str]:
+        """Build the extractor argv. copybook_dirs are already absolute (see
+        __init__), so --copybook-dir always receives a path the JVM can resolve
+        regardless of its CWD. Extracted as a method so tests can inspect the
+        argv without launching the JVM."""
         cmd = [
             java, "-jar", str(self.jar_path),
             "--source-dir", str(self.repo_root),
@@ -116,6 +128,10 @@ class CobolParser:
         ]
         for d in self.copybook_dirs:
             cmd += ["--copybook-dir", d]
+        return cmd
+
+    def _run_extractor(self, java: str = "java") -> dict:
+        cmd = self._build_command(java)
         try:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=self.timeout, check=True,
