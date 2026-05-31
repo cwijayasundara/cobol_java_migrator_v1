@@ -46,7 +46,6 @@ not just its signature — then emit EnrichmentTags JSON:
 _FETCH_UNTAGGED = """
 MATCH (e:CodeEntity {repo: $repo})
 WHERE e.kind IN ['Class', 'Function', 'Method', 'Module']
-  AND e.semantic_layer IS NULL
   AND NOT e.qualified_name IN $seen
   AND (e.enrich_cache_key IS NULL OR e.enrich_cache_key <> $cache_key)
 OPTIONAL MATCH (e)-[r]-()
@@ -125,6 +124,8 @@ async def aenrich(deps: GraphDeps, *, runner: AgentRunner, model: str,
     total = 0
     while True:
         batch = _fetch_untagged(deps, batch_size, seen, source_hash)
+        # should_enrich is a defensive in-Python guard; _FETCH_UNTAGGED's
+        # cache-key clause is the primary staleness gate.
         fresh = [e for e in batch
                  if e.get("qualified_name") and e["qualified_name"] not in seen
                  and should_enrich(e, source_hash=source_hash)]
