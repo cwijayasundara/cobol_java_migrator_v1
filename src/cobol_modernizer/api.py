@@ -209,3 +209,5 @@ def get_routing(ws: str, slice_name: str) -> dict:
 # --- TEMP cockpit control-plane wiring (consolidated into controlplane_router in T9) ---
 from cobol_modernizer.controlplane.workspaces import router as _cp_workspaces_router
 app.include_router(_cp_workspaces_router)
+from cobol_modernizer.controlplane.events import router as _cp_events_router
+app.include_router(_cp_events_router)
