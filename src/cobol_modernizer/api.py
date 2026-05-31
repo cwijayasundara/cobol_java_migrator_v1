@@ -204,3 +204,9 @@ def get_routing(ws: str, slice_name: str) -> dict:
     # production: remaining_usd from CostPolicy(ledger).remaining_usd(workspace_id=ws)
     return {"canary_pct": rc.canary_pct, "legacy_pct": rc.legacy_pct,
             "remaining_usd": 50.0}
+
+
+# --- Cockpit control-plane: workspaces/runs/gates/artifacts/budget/approval,
+# read-only graph/entity, and SSE run-events (see controlplane/) -----------------
+from cobol_modernizer.controlplane import controlplane_router
+app.include_router(controlplane_router)

@@ -220,3 +220,20 @@ class FitnessCheck(Base):
     __table_args__ = (
         UniqueConstraint("workspace_id", "commit_sha", name="uq_fitness_commit"),
     )
+
+
+class AgentRunEvent(Base):
+    """Append-only per-run event log feeding the cockpit SSE stream. One row per
+    emitted event; (run_id, seq) is unique and monotonically increasing per run."""
+    __tablename__ = "agent_run_event"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_run.id", ondelete="CASCADE"), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    type: Mapped[str] = mapped_column(String, nullable=False)
+    summary: Mapped[str] = mapped_column(String, nullable=False)
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    __table_args__ = (
+        UniqueConstraint("run_id", "seq", name="uq_agent_run_event_seq"),
+    )
