@@ -7,7 +7,9 @@ from cobol_modernizer.agent.clustering import detect_subsystems
 
 # Whitelist: edges and directions an agent may traverse. Anything else is rejected
 # so a tool call can never smuggle arbitrary Cypher fragments into a query.
-_EDGES = {"CALLS", "IMPORTS", "CONTAINS", "INHERITS", "DECORATES", "RAISES"}
+_EDGES = {"CALLS", "IMPORTS", "CONTAINS", "INHERITS", "DECORATES", "RAISES",
+          # v2 data-flow / IO / control-flow edges (read-only traversal)
+          "READS", "WRITES", "EXECUTES_CICS", "EXECUTES_SQL", "MOVES_TO", "GO_TO"}
 _DIRECTIONS = {"out", "in", "both"}
 
 
@@ -176,6 +178,29 @@ def known_refs(deps: GraphDeps) -> set[str]:
         if r.get("file_path"):
             refs.add(r["file_path"])
     return refs
+
+
+def data_accesses(deps: GraphDeps, name: str, *, intent: str | None = None,
+                  limit: int = 50) -> dict[str, Any]:
+    """A program's file/VSAM/CICS/SQL accesses as {resource, kind, intent, mode}."""
+    from cobol_modernizer.queries import CodeGraphQueries
+    rows = CodeGraphQueries(deps.client).data_accesses(
+        name, intent=intent, repo=deps.repo_id)
+    return {"accesses": rows[:limit]}
+
+
+def reader_writer_classification(deps: GraphDeps, resource: str) -> dict[str, Any]:
+    """Fowler's reader-vs-writer split for one resource (pure Cypher)."""
+    from cobol_modernizer.queries import CodeGraphQueries
+    return CodeGraphQueries(deps.client).reader_writer_classification(
+        resource, repo=deps.repo_id)
+
+
+def seam_candidates(deps: GraphDeps, *, limit: int = 20) -> dict[str, Any]:
+    """Ranked strangler-fig seam candidates (reader-only first; pure Cypher, no LLM)."""
+    from cobol_modernizer.queries import CodeGraphQueries
+    rows = CodeGraphQueries(deps.client).seam_candidates(repo=deps.repo_id, limit=limit)
+    return {"seam_candidates": rows}
 
 
 def list_subsystems(deps: GraphDeps, *, max_clusters: int = 12) -> dict[str, Any]:

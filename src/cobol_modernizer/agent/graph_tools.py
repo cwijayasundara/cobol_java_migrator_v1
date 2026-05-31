@@ -16,6 +16,8 @@ GRAPH_TOOL_NAMES = [
     for n in (
         "list_subsystems", "get_entity", "find_entities", "neighbors",
         "get_source_slice", "entry_points", "integration_points", "graph_summary",
+        # v2 seam-discovery tools (read-only; seam math stays in Cypher)
+        "data_accesses", "reader_writer_classification", "seam_candidates",
     )
 ]
 
@@ -58,11 +60,25 @@ def _make_handlers(deps: GraphDeps) -> dict[str, Callable[[dict], Awaitable[dict
     async def graph_summary(args):
         return _ok(ops.graph_summary(deps))
 
+    async def data_accesses(args):
+        return _ok(ops.data_accesses(deps, args["name"],
+                                     intent=args.get("intent"),
+                                     limit=int(args.get("limit", 50))))
+
+    async def reader_writer_classification(args):
+        return _ok(ops.reader_writer_classification(deps, args["resource"]))
+
+    async def seam_candidates(args):
+        return _ok(ops.seam_candidates(deps, limit=int(args.get("limit", 20))))
+
     return {
         "list_subsystems": list_subsystems, "get_entity": get_entity,
         "find_entities": find_entities, "neighbors": neighbors,
         "get_source_slice": get_source_slice, "entry_points": entry_points,
         "integration_points": integration_points, "graph_summary": graph_summary,
+        "data_accesses": data_accesses,
+        "reader_writer_classification": reader_writer_classification,
+        "seam_candidates": seam_candidates,
     }
 
 
@@ -86,7 +102,8 @@ def build_graph_server(deps: GraphDeps, *, advisor=None, advisor_max_uses: int =
              annotations=_READ_ONLY)(h["find_entities"]),
         tool("neighbors",
              "Traverse the graph from an entity. 'edge' one of "
-             "CALLS/IMPORTS/CONTAINS/INHERITS/DECORATES/RAISES; 'direction' "
+             "CALLS/IMPORTS/CONTAINS/INHERITS/DECORATES/RAISES or v2 "
+             "READS/WRITES/EXECUTES_CICS/EXECUTES_SQL/MOVES_TO/GO_TO; 'direction' "
              "out/in/both; 'depth' 1-5.",
              {"name": str, "edge": str, "direction": str, "depth": int, "limit": int},
              annotations=_READ_ONLY)(h["neighbors"]),
@@ -103,6 +120,19 @@ def build_graph_server(deps: GraphDeps, *, advisor=None, advisor_max_uses: int =
              annotations=_READ_ONLY)(h["integration_points"]),
         tool("graph_summary", "Entity and relationship counts for the repo.",
              {}, annotations=_READ_ONLY)(h["graph_summary"]),
+        tool("data_accesses",
+             "List a program's file/VSAM/CICS/SQL accesses as {resource, kind, "
+             "intent, mode}. Optional 'intent' filter (read|write). Read-only.",
+             {"name": str, "intent": str, "limit": int},
+             annotations=_READ_ONLY)(h["data_accesses"]),
+        tool("reader_writer_classification",
+             "Classify programs touching a resource into readers vs writers "
+             "(Fowler's pivotal seam split), computed in Cypher. Read-only.",
+             {"resource": str}, annotations=_READ_ONLY)(h["reader_writer_classification"]),
+        tool("seam_candidates",
+             "Ranked strangler-fig seam candidates (reader-only first; fan-in/out, "
+             "side-effect aware). Scoring is pure Cypher — no LLM. Read-only.",
+             {"limit": int}, annotations=_READ_ONLY)(h["seam_candidates"]),
     ]
     if advisor is not None:
         from cobol_modernizer.agent.advisor import build_advisor_tool
