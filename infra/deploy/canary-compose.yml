@@ -1,0 +1,22 @@
+services:
+  legacy:           # COBOL path (GnuCOBOL shim / recorded-I/O service, Phase 3)
+    image: cobol-legacy-shim:latest
+    ports: ["8081:8080"]
+  canary:           # the generated Spring Boot slice
+    image: account-view-service:canary
+    ports: ["8082:8080"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  router:           # the enabling-point: routes by weight to legacy|canary
+    build:
+      context: .
+      dockerfile: router.Dockerfile
+    environment:
+      LEGACY_URL: http://legacy:8080
+      CANARY_URL: http://canary:8080
+      CANARY_PCT: "0"             # stoppable-safe default
+    ports: ["8080:8080"]
+    depends_on: [legacy, canary]

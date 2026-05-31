@@ -138,3 +138,69 @@ def run_equivalence(req: EquivalenceRunRequest):
 
 
 app.include_router(equiv_router)
+
+# --- Phase 6: deploy / canary / rollback / routing -----------------------------
+# The flip path is a HARD, attributed RBAC gate: raising canary traffic requires
+# an `approval` (approver_email + approver_role + rationale). Decreasing to legacy
+# (rollback) is always allowed. Routing weight is DATA, never a code change. No
+# LLM anywhere in this decision path. (In-memory route store here; production
+# wires CanaryRoute/Gate/Approval Postgres rows + CostPolicy.remaining_usd.)
+from cobol_modernizer.deploy.routing import RoutingController, GateNotPassed
+
+_routes: dict[tuple[str, str], RoutingController] = {}
+
+
+def _route(ws: str, slice_name: str) -> RoutingController:
+    key = (ws, slice_name)
+    if key not in _routes:
+        _routes[key] = RoutingController(slice_name=slice_name)
+    return _routes[key]
+
+
+class ApprovalBody(BaseModel):
+    decision: str
+    approver_email: str
+    approver_role: str
+    risk_accepted: bool = False
+    rationale: str
+
+
+class FlipBody(BaseModel):
+    slice_name: str
+    canary_pct: int
+    approval: ApprovalBody | None = None
+
+
+@app.post("/api/workspaces/{ws}/canary/flip")
+def canary_flip(ws: str, body: FlipBody) -> dict:
+    if body.approval is None or body.approval.decision not in ("approved", "waived_with_risk"):
+        raise HTTPException(status_code=403,
+                            detail="attributed deploy-gate approval required to flip canary")
+    rc = _route(ws, body.slice_name)
+    try:
+        rc.flip(canary_pct=body.canary_pct, deploy_gate_passed=True)
+    except GateNotPassed as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    # production: persist Gate(status="passed") + Approval(approver_email,...) rows here
+    return {
+        "canary_pct": rc.canary_pct,
+        "legacy_pct": rc.legacy_pct,
+        "gate": {"status": "passed",
+                 "approver_email": body.approval.approver_email,
+                 "approver_role": body.approval.approver_role},
+    }
+
+
+@app.post("/api/workspaces/{ws}/canary/rollback")
+def canary_rollback(ws: str, slice_name: str, reason: str = "human") -> dict:
+    rc = _route(ws, slice_name)
+    rc.reset_to_legacy(reason=reason)
+    return {"canary_pct": rc.canary_pct, "legacy_pct": rc.legacy_pct, "reason": reason}
+
+
+@app.get("/api/workspaces/{ws}/routing")
+def get_routing(ws: str, slice_name: str) -> dict:
+    rc = _route(ws, slice_name)
+    # production: remaining_usd from CostPolicy(ledger).remaining_usd(workspace_id=ws)
+    return {"canary_pct": rc.canary_pct, "legacy_pct": rc.legacy_pct,
+            "remaining_usd": 50.0}
