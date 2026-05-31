@@ -1,0 +1,15 @@
+{
+  "sections": [
+    {"title": "Posting", "body_markdown": "Post each valid daily transaction.",
+     "requirements": [
+       {"id": "FR-1", "text": "Add TRAN-AMT to ACCT-CURR-BAL and REWRITE the account."},
+       {"id": "FR-2", "text": "Add TRAN-AMT to the matching TCATBAL category balance."},
+       {"id": "FR-3", "text": "Reject and log a transaction that exceeds the credit limit."}
+     ]}
+  ],
+  "evidence_map": {
+    "FR-1": ["CBTRN02C.2800-UPDATE-ACCOUNT-REC"],
+    "FR-2": ["CBTRN02C.2700-UPDATE-TCATBAL"],
+    "FR-3": ["CBTRN02C.1500-VALIDATE-TRAN"]
+  }
+}

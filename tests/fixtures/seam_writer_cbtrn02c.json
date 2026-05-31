@@ -1,0 +1,16 @@
+{
+  "program": "CBTRN02C",
+  "reader_only": false,
+  "writes": [
+    {"resource": "ACCTDAT", "command": "REWRITE", "intent": "write",
+     "paragraph": "CBTRN02C.2800-UPDATE-ACCOUNT-REC"},
+    {"resource": "TCATBAL", "command": "REWRITE", "intent": "write",
+     "paragraph": "CBTRN02C.2700-UPDATE-TCATBAL"},
+    {"resource": "TRANSACT", "command": "WRITE", "intent": "write",
+     "paragraph": "CBTRN02C.2900-WRITE-TRANSACTION-FILE"}
+  ],
+  "identity_drift_risk": true,
+  "transition_pattern": "extract_product_lines+legacy_mimic",
+  "fan_in": 1, "fan_out": 6,
+  "score": 0.71
+}
