@@ -1,0 +1,27 @@
+name: account-view-ci
+on:
+  push:
+    paths: ["generated/account-view-service/**"]
+  pull_request:
+    paths: ["generated/account-view-service/**"]
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: generated/account-view-service
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Build, test, coverage (jacoco)
+        run: mvn -B verify
+      - name: Upload jacoco coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: generated/account-view-service/target/site/jacoco/
+          if-no-files-found: warn
