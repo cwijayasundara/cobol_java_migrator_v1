@@ -204,3 +204,8 @@ def get_routing(ws: str, slice_name: str) -> dict:
     # production: remaining_usd from CostPolicy(ledger).remaining_usd(workspace_id=ws)
     return {"canary_pct": rc.canary_pct, "legacy_pct": rc.legacy_pct,
             "remaining_usd": 50.0}
+
+
+# --- TEMP cockpit control-plane wiring (consolidated into controlplane_router in T9) ---
+from cobol_modernizer.controlplane.workspaces import router as _cp_workspaces_router
+app.include_router(_cp_workspaces_router)
