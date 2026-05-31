@@ -6,7 +6,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from cobol_modernizer.persistence.tables import (
-    Workspace, JourneyStage, AgentRun, Budget,
+    Workspace, AgentRun, Budget,
 )
 
 class PgRepo:
