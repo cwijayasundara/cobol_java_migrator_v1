@@ -3,16 +3,19 @@
 Usage
 -----
     uv run python -m cobol_modernizer.cli baseline \\
-        --repo <path-to-repo> \\
+        --repo <path-to-cobol-repo> \\
         --out  <path-to-output.json>
+
+    # Defaults: --repo ./source_code_to_analyse, --out ./benchmark_out/baseline.json
+    uv run python -m cobol_modernizer.cli baseline
 
     # with the real COBOL extractor JAR
     COBOL_EXTRACTOR_JAR=tools/cobol-extractor/target/cobol-extractor.jar \\
     JAVA_HOME=/opt/homebrew/opt/openjdk@25/... \\
-    COBOL_MOD_COPYBOOK_DIRS=app/cpy,app/cpy-bms \\
+    COBOL_MOD_COPYBOOK_DIRS=<copybook-dirs-relative-to-repo> \\
     uv run python -m cobol_modernizer.cli baseline \\
-        --repo /path/to/aws-mf-mod-carddemo \\
-        --out  ./benchmark_out/carddemo_baseline.json
+        --repo ./source_code_to_analyse/<your-cobol-app> \\
+        --out  ./benchmark_out/baseline.json
 
 On a missing JAR or JVM the command still emits a report (zero entities,
 graceful degradation) and exits 0.
@@ -30,10 +33,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Default COBOL input location: where source COBOL is copied for analysis.
+_DEFAULT_REPO = Path(__file__).resolve().parents[2] / "source_code_to_analyse"
+
 
 def _cmd_baseline(args: argparse.Namespace) -> int:
-    """Run the CardDemo Phase-0 baseline benchmark and write the JSON report."""
-    from cobol_modernizer.benchmark.carddemo_baseline import run_baseline, write_report
+    """Run the Phase-0 baseline benchmark on a COBOL repo and write the JSON report."""
+    from cobol_modernizer.benchmark.baseline import run_baseline, write_report
     from cobol_modernizer.cobol.parser import CobolParser
 
     repo_root = Path(args.repo).resolve()
@@ -82,19 +88,21 @@ def build_parser() -> argparse.ArgumentParser:
     # ── baseline ──────────────────────────────────────────────────────────────
     p_base = sub.add_parser(
         "baseline",
-        help="Run the Phase-0 CardDemo baseline benchmark and write a JSON report",
+        help="Run the Phase-0 baseline benchmark on a COBOL repo and write a JSON report",
     )
     p_base.add_argument(
         "--repo",
-        required=True,
+        default=str(_DEFAULT_REPO),
         metavar="PATH",
-        help="Root directory of the COBOL repository to analyse",
+        help="Root directory of the COBOL repository to analyse "
+             "(default: ./source_code_to_analyse)",
     )
     p_base.add_argument(
         "--out",
-        required=True,
+        default="./benchmark_out/baseline.json",
         metavar="FILE",
-        help="Output path for the JSON benchmark report",
+        help="Output path for the JSON benchmark report "
+             "(default: ./benchmark_out/baseline.json)",
     )
     p_base.set_defaults(func=_cmd_baseline)
 

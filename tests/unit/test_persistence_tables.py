@@ -7,7 +7,7 @@ def test_workspace_and_approval_roundtrip():
     eng = create_engine("sqlite://")
     Base.metadata.create_all(eng)
     with Session(eng) as s:
-        ws = Workspace(name="cardemo", repo_slug="aws-mf-carddemo",
+        ws = Workspace(name="sample", repo_slug="sample-cobol",
                        created_by="cwijay@biz2bricks.ai")
         s.add(ws); s.flush()
         g = Gate(workspace_id=ws.id, stage_id=None, gate_key="brd_groundedness",

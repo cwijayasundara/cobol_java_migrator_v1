@@ -1,8 +1,8 @@
 """Model tiering: resolve_model(role) -> Claude model id (master plan §2).
 
-Ported from source_graphs_v1.0 agent/models.py, extended from 4 to the 11
-roles the full platform needs. Tiers: Haiku for high-volume breadth, Sonnet for
-synthesis throughput, Opus reserved for planning/judging/hard calls.
+Covers the 11 roles the full platform needs. Tiers: Haiku for high-volume
+breadth, Sonnet for synthesis throughput, Opus reserved for planning/judging/
+hard calls.
 """
 from __future__ import annotations
 

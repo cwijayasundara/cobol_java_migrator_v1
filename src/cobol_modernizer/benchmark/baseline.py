@@ -1,6 +1,7 @@
-"""CardDemo Phase-0 baseline benchmark. Measures parse wall-time, peak memory,
-entity/error counts, and nested-copybook depth. parse_fn is injectable so CI
-can run against a canned v2 contract without the JVM (graceful degradation)."""
+"""Phase-0 baseline benchmark for any COBOL repository. Measures parse
+wall-time, peak memory, entity/error counts, and nested-copybook depth.
+parse_fn is injectable so CI can run against a canned v2 contract without the
+JVM (graceful degradation)."""
 from __future__ import annotations
 
 import json

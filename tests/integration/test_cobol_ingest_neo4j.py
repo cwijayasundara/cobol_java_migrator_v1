@@ -1,7 +1,7 @@
-"""Full-loop integration: real CardDemo COBOL -> CobolParser (real extractor
-JAR) -> CodeGraphIngester -> a real Neo4j (testcontainer). Proves the graph
-actually contains Program nodes and non-zero entities/relationships from a real
-ingest, not a fixture.
+"""Full-loop integration: real COBOL -> CobolParser (real extractor JAR) ->
+CodeGraphIngester -> a real Neo4j (testcontainer). Proves the graph actually
+contains Program nodes and non-zero entities/relationships from a real ingest,
+not a fixture. Works against any COBOL sample in source_code_to_analyse.
 
 Skips (never errors/hangs) when Docker/testcontainers/JAR/Java are unavailable.
 """
@@ -13,16 +13,11 @@ from pathlib import Path
 
 import pytest
 
-# A small but real subset of CardDemo: the batch (CB*) programs COPY members
-# from app/cpy, so we copy those programs + the whole app/cpy copybook dir.
-SUBSET_PROGRAMS = [
-    "CBACT01C.cbl",
-    "CBACT02C.cbl",
-    "CBACT03C.cbl",
-    "CBACT04C.cbl",
-    "CBCUS01C.cbl",
-    "CBTRN01C.cbl",
-]
+from _cobol_helpers import discover_copybook_dirs, discover_programs
+
+# Cap on programs copied into the throwaway repo — a small but real subset keeps
+# the testcontainer ingest fast while still exercising COPY -> IMPORTS edges.
+SUBSET_LIMIT = 6
 
 
 def _require(cond: bool, reason: str) -> None:
@@ -30,18 +25,24 @@ def _require(cond: bool, reason: str) -> None:
         pytest.skip(reason)
 
 
-def _build_subset(carddemo_root: Path, dst: Path) -> Path:
-    """Copy a handful of real programs + the real app/cpy copybooks into dst."""
-    (dst / "app" / "cbl").mkdir(parents=True)
-    for name in SUBSET_PROGRAMS:
-        src = carddemo_root / "app" / "cbl" / name
-        if src.exists():
-            shutil.copy2(src, dst / "app" / "cbl" / name)
-    shutil.copytree(carddemo_root / "app" / "cpy", dst / "app" / "cpy")
-    return dst
+def _build_subset(sample_root: Path, dst: Path) -> tuple[Path, list[str]]:
+    """Copy a handful of discovered programs + every copybook dir into dst.
+    Returns (repo_root, copybook_dirs-relative-to-repo). Layout-independent."""
+    (dst / "cbl").mkdir(parents=True)
+    for src in discover_programs(sample_root)[:SUBSET_LIMIT]:
+        shutil.copy2(src, dst / "cbl" / src.name)
+    copybook_dirs: list[str] = []
+    for i, d in enumerate(discover_copybook_dirs(sample_root)):
+        rel = f"copybooks/d{i}"
+        sub = dst / rel
+        sub.mkdir(parents=True)
+        for cpy in d.glob("*.cpy"):
+            shutil.copy2(cpy, sub / cpy.name)
+        copybook_dirs.append(rel)
+    return dst, copybook_dirs
 
 
-def test_carddemo_subset_ingests_into_neo4j(carddemo_root, tmp_path):
+def test_cobol_subset_ingests_into_neo4j(cobol_sample_root, tmp_path):
     # --- guards: skip cleanly if any real dependency is missing ---
     jar = os.getenv("COBOL_EXTRACTOR_JAR")
     _require(bool(jar) and Path(jar).exists(), "COBOL_EXTRACTOR_JAR not set / missing")
@@ -59,8 +60,8 @@ def test_carddemo_subset_ingests_into_neo4j(carddemo_root, tmp_path):
     except Exception as exc:
         pytest.skip(f"Docker unavailable: {exc}")
 
-    repo = _build_subset(carddemo_root, tmp_path / "carddemo_subset")
-    n_programs = len(list((repo / "app" / "cbl").glob("*.cbl")))
+    repo, copybook_dirs = _build_subset(cobol_sample_root, tmp_path / "cobol_subset")
+    n_programs = len(list((repo / "cbl").glob("*.cbl")))
     assert n_programs >= 1
 
     from cobol_modernizer.cobol.parser import CobolParser
@@ -72,14 +73,14 @@ def test_carddemo_subset_ingests_into_neo4j(carddemo_root, tmp_path):
     from cobol_modernizer.neo4j_client import Neo4jClient
     from cobol_modernizer.ingestion import CodeGraphIngester
 
-    # Wire CobolParser (relative copybook dir -> Deliverable-1 fix resolves it
+    # Wire CobolParser (relative copybook dirs -> Deliverable-1 fix resolves them
     # absolute under repo_root) as a repo extractor so CodeGraphIngester picks up
     # COBOL through its normal parse_directory -> run_repo_extractors path.
     def _cobol_extractor(root: Path):
         parser = CobolParser(
             root,
             jar_path=jar,
-            copybook_dirs=("app/cpy",),  # relative on purpose: exercises the fix
+            copybook_dirs=tuple(copybook_dirs),  # relative on purpose: exercises the fix
             java_home=os.getenv("JAVA_HOME"),
         )
         return parser.parse_repo()

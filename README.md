@@ -1,8 +1,8 @@
 # COBOL → Java/Spring Boot Migration Platform
 
-Greenfield implementation. **Phase 0 (CardDemo baseline + persistence + cost guardrails) is complete** — see `docs/plans/` for the full roadmap (`INDEX.md` first) and `IMPLEMENTATION_PLAN.md` for the master plan.
+Greenfield implementation of a **generic COBOL → Java/Spring Boot converter**. **Phase 0 (baseline + persistence + cost guardrails) is complete** — see `docs/plans/` for the full roadmap (`INDEX.md` first) and `IMPLEMENTATION_PLAN.md` for the master plan.
 
-This README is the runbook for **executing and verifying Phase 0** on the AWS CardDemo workload.
+This README is the runbook for **executing and verifying Phase 0** against any COBOL workload. Drop your COBOL into `source_code_to_analyse/` (git-ignored, so it stays local); nothing in the toolchain is tied to a specific app. AWS CardDemo is a convenient public test workload.
 
 ---
 
@@ -12,10 +12,10 @@ This README is the runbook for **executing and verifying Phase 0** on the AWS Ca
 - A **Postgres run/audit/RBAC schema** (7 tables) via Alembic migrations.
 - **Model tiering** (`resolve_model`) + **fail-closed cost caps with a kill-switch**.
 - **Content-hash incremental re-ingest** (re-ingesting an unchanged repo re-pays ~0 LLM cost).
-- A **CardDemo baseline benchmark** (parse time, peak memory, parse-error resilience, copybook depth).
+- A **baseline benchmark** for any COBOL repo (parse time, peak memory, parse-error resilience, copybook depth).
 - The map/reduce **BRD pipeline + groundedness-gate judge** (lineage-checked).
 
-**Exit criteria (all verified):** CardDemo ingests benchmarked & survives ≥10 injected parse errors · a grounded BRD renders with a judge score · unchanged re-ingest ≈ $0 · a runaway run is killed by the cap.
+**Exit criteria (all verified):** the sample ingests benchmarked & survives ≥10 injected parse errors · a grounded BRD renders with a judge score · unchanged re-ingest ≈ $0 · a runaway run is killed by the cap.
 
 ---
 
@@ -29,13 +29,22 @@ This README is the runbook for **executing and verifying Phase 0** on the AWS Ca
 | Maven | 3.9+ | builds the extractor JAR |
 | Docker | running | only for the integration tests (Neo4j + Postgres testcontainers) and `docker-compose` infra |
 
-The **AWS CardDemo** source is the headline workload. On this machine it lives at:
+Put the COBOL you want to analyse under `source_code_to_analyse/` at the repo root (this directory is git-ignored). Any layout works — the toolchain discovers `*.cbl/*.cob/*.cobol` programs and `*.cpy` copybooks recursively.
 
 ```
-/Users/chamindawijayasundara/Documents/applying_agents_2026/source_graphs_v1.0/source_code_to_analyse/aws-mf-mod-carddemo
+source_code_to_analyse/
+└── <your-cobol-app>/          # any directory tree of COBOL + copybooks
 ```
 
-(programs in `app/cbl/`, copybooks in `app/cpy/` and `app/cpy-bms/`).
+For example, to use AWS CardDemo as a test workload:
+
+```bash
+git clone https://github.com/aws-samples/aws-mainframe-modernization-carddemo.git \
+  source_code_to_analyse/aws-mf-mod-carddemo
+# programs in app/cbl/, copybooks in app/cpy/ and app/cpy-bms/
+```
+
+To point at a tree outside the repo, pass `--repo <path>` (CLI) or set `COBOL_SAMPLE_DIR=<path>` (tests).
 
 ---
 
@@ -71,7 +80,7 @@ Then set (or export in your shell) the two variables the extractor subprocess ne
 ```bash
 export COBOL_EXTRACTOR_JAR="$PWD/tools/cobol-extractor/target/cobol-extractor.jar"
 export JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home
-export COBOL_MOD_COPYBOOK_DIRS=app/cpy,app/cpy-bms   # relative dirs resolve against the repo being parsed
+export COBOL_MOD_COPYBOOK_DIRS=app/cpy,app/cpy-bms   # copybook dirs relative to the repo being parsed (these match the bundled sample; set to your own)
 ```
 
 `.env` also documents the model/cost/Neo4j/Postgres/MinIO settings (see `.env.example`).
@@ -96,7 +105,8 @@ Expected: **42 passed**. Integration tests spin up throwaway Neo4j 5.26 and Post
 
 ## One-command Phase-0 baseline
 
-Runs the **real** extractor over CardDemo and writes a benchmark report:
+Runs the **real** extractor over your COBOL and writes a benchmark report. With no
+`--repo`/`--out`, it defaults to `./source_code_to_analyse` → `./benchmark_out/baseline.json`:
 
 ```bash
 COBOL_EXTRACTOR_JAR="$PWD/tools/cobol-extractor/target/cobol-extractor.jar" \
@@ -104,8 +114,8 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home \
 COBOL_MOD_COPYBOOK_DIRS=app/cpy,app/cpy-bms \
 PYTHONPATH=src \
 uv run python -m cobol_modernizer.cli baseline \
-  --repo "/Users/chamindawijayasundara/Documents/applying_agents_2026/source_graphs_v1.0/source_code_to_analyse/aws-mf-mod-carddemo" \
-  --out  ./benchmark_out/carddemo_baseline.json
+  --repo ./source_code_to_analyse/aws-mf-mod-carddemo \
+  --out  ./benchmark_out/baseline.json
 ```
 
 Sample report:
@@ -146,9 +156,9 @@ uv run alembic -c alembic.ini upgrade head
 
 | Exit criterion | Verified by |
 |---|---|
-| CardDemo ingests, benchmarked | `cli baseline` + `tests/integration/test_carddemo_ingest_neo4j.py` (real extractor → live Neo4j; asserts Program nodes) |
-| Survives ≥10 injected parse errors | `tests/integration/test_carddemo_error_resilience.py` |
-| Grounded BRD renders with judge score | `tests/integration/test_carddemo_brd_grounded.py` + `tests/unit/test_brd_judge_groundedness.py` |
+| COBOL ingests, benchmarked | `cli baseline` + `tests/integration/test_cobol_ingest_neo4j.py` (real extractor → live Neo4j; asserts Program nodes) |
+| Survives ≥10 injected parse errors | `tests/integration/test_error_resilience.py` |
+| Grounded BRD renders with judge score | `tests/integration/test_brd_grounded.py` + `tests/unit/test_brd_judge_groundedness.py` |
 | Unchanged re-ingest ≈ $0 | `tests/unit/test_incremental_ingestion.py`, `tests/unit/test_enricher_cache_key.py` |
 | Runaway run killed by cap | `tests/unit/test_runaway_run_killed.py`, `tests/unit/test_cost_policy.py` |
 
@@ -165,7 +175,7 @@ src/cobol_modernizer/
   persistence/tables.py, db.py, repo.py, migrations/   # Postgres run/audit/RBAC + Alembic
   agent/ (harness, graph_ops, graph_tools, brd_judge, enricher, …)   # working core (tools=[], setting_sources=[], json_schema)
   brd/ (pipeline, schema, renderer, storage)  # map/reduce BRD + groundedness gate
-  benchmark/ (carddemo_baseline.py, error_injection.py)
+  benchmark/ (baseline.py, error_injection.py)
   cli.py
 tools/cobol-extractor/         # ProLeap Java extractor (com.cobolmodernizer.cobol), emits schemaVersion=2
 docs/plans/                    # the decomposed implementation plans + INDEX.md roadmap

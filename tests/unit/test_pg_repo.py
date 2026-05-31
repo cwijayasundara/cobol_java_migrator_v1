@@ -8,7 +8,7 @@ def test_run_usage_rolls_into_run_and_workspace_budget():
     Base.metadata.create_all(eng)
     with Session(eng) as s:
         repo = PgRepo(s)
-        ws = repo.create_workspace(name="cardemo", repo_slug="aws-mf-carddemo",
+        ws = repo.create_workspace(name="sample", repo_slug="sample-cobol",
                                    created_by="cwijay@biz2bricks.ai")
         repo.set_budget(workspace_id=ws.id, scope="workspace", cap_usd=50.0)
         run = repo.start_run(workspace_id=ws.id, stage_id=None, role="brd",
@@ -31,7 +31,7 @@ def test_repeated_usage_accumulates_not_overwrites():
     Base.metadata.create_all(eng)
     with Session(eng) as s:
         repo = PgRepo(s)
-        ws = repo.create_workspace(name="cardemo", repo_slug="aws-mf-carddemo",
+        ws = repo.create_workspace(name="sample", repo_slug="sample-cobol",
                                    created_by="cwijay@biz2bricks.ai")
         repo.set_budget(workspace_id=ws.id, scope="workspace", cap_usd=50.0)
         run = repo.start_run(workspace_id=ws.id, stage_id=None, role="brd",
