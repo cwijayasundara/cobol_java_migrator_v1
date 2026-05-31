@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 2,
+  "files": [
+    {"filePath":"app/cbl/CBACT01C.cbl","parseStatus":"ok","error":null,
+     "entities":[{"kind":"Program","qualifiedName":"CBACT01C","simpleName":"CBACT01C","filePath":"app/cbl/CBACT01C.cbl","startLine":1,"endLine":200,"isExternal":false}],
+     "dataItems":[],
+     "relationships":[{"sourceQname":"CBACT01C","targetQname":"ACCTDAT","kind":"READS","filePath":"app/cbl/CBACT01C.cbl","line":166,"metadata":{"resource":"ACCTDAT","resourceType":"VSAM","mode":"sequential"}}]},
+    {"filePath":"app/cbl/COACTVWC.cbl","parseStatus":"ok","error":null,
+     "entities":[{"kind":"Program","qualifiedName":"COACTVWC","simpleName":"COACTVWC","filePath":"app/cbl/COACTVWC.cbl","startLine":1,"endLine":900,"isExternal":false}],
+     "dataItems":[],
+     "relationships":[
+       {"sourceQname":"COACTVWC","targetQname":"ACCTDAT","kind":"EXECUTES_CICS","filePath":"app/cbl/COACTVWC.cbl","line":776,"metadata":{"resource":"ACCTDAT","command":"READ","intent":"read"}},
+       {"sourceQname":"COACTVWC","targetQname":"CARDDAT","kind":"EXECUTES_CICS","filePath":"app/cbl/COACTVWC.cbl","line":727,"metadata":{"resource":"CARDDAT","command":"READ","intent":"read"}}]},
+    {"filePath":"app/cbl/CBTRN02C.cbl","parseStatus":"ok","error":null,
+     "entities":[{"kind":"Program","qualifiedName":"CBTRN02C","simpleName":"CBTRN02C","filePath":"app/cbl/CBTRN02C.cbl","startLine":1,"endLine":400,"isExternal":false}],
+     "dataItems":[],
+     "relationships":[{"sourceQname":"CBTRN02C","targetQname":"TRANSACT","kind":"WRITES","filePath":"app/cbl/CBTRN02C.cbl","line":300,"metadata":{"resource":"TRANSACT","resourceType":"VSAM","mode":"random"}}]},
+    {"filePath":"app/cbl/COBIL00C.cbl","parseStatus":"ok","error":null,
+     "entities":[{"kind":"Program","qualifiedName":"COBIL00C","simpleName":"COBIL00C","filePath":"app/cbl/COBIL00C.cbl","startLine":1,"endLine":500,"isExternal":false}],
+     "dataItems":[],
+     "relationships":[{"sourceQname":"COBIL00C","targetQname":"TRANSACT","kind":"WRITES","filePath":"app/cbl/COBIL00C.cbl","line":250,"metadata":{"resource":"TRANSACT","resourceType":"VSAM","mode":"random"}}]}
+  ]
+}
