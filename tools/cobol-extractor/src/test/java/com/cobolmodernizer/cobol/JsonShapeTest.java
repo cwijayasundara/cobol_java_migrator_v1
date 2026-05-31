@@ -13,7 +13,7 @@ class JsonShapeTest {
     void serializesContractShape() throws Exception {
         EntityJson e = new EntityJson("Program", "PAY", "PAY", "src/PAY.cbl", 1, 9, false);
         RelationshipJson r = new RelationshipJson("PAY", "PAY.MAIN", "CONTAINS", "src/PAY.cbl", 3, java.util.Map.of());
-        FileResultJson fr = new FileResultJson("src/PAY.cbl", "ok", null, List.of(e), List.of(r));
+        FileResultJson fr = new FileResultJson("src/PAY.cbl", "ok", null, List.of(e), List.of(), List.of(r));
         ExtractionJson root = new ExtractionJson(2, List.of(fr));
 
         String json = new ObjectMapper().writeValueAsString(root);

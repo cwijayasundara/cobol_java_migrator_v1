@@ -104,13 +104,13 @@ public class CobolWalker {
             if (entities.stream().noneMatch(e -> e.kind().equals("Program"))) {
                 return new FileResultJson(relPath, "error",
                         "no COBOL program found (file did not parse to a program)",
-                        List.of(), List.of());
+                        List.of(), List.of(), List.of());
             }
-            return new FileResultJson(relPath, "ok", null, entities, rels);
+            return new FileResultJson(relPath, "ok", null, entities, List.of(), rels);
         } catch (Exception e) {
             String msg = e.getClass().getSimpleName()
                     + (e.getMessage() != null ? ": " + e.getMessage() : "");
-            return new FileResultJson(relPath, "error", msg, List.of(), List.of());
+            return new FileResultJson(relPath, "error", msg, List.of(), List.of(), List.of());
         }
     }
 

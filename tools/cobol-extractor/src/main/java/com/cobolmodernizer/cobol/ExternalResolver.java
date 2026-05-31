@@ -31,7 +31,7 @@ public final class ExternalResolver {
                 }
             }
             out.add(new FileResultJson(f.filePath(), f.parseStatus(), f.error(),
-                    entities, f.relationships()));
+                    entities, f.dataItems(), f.relationships()));
         }
         return out;
     }
