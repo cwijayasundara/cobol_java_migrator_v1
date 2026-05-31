@@ -50,21 +50,17 @@ to stop them, `down -v` to also drop the data volumes).
 
 ### Port conflicts
 
-The default host ports are Postgres `5432`, Neo4j `7687`/`7474`, API `8000`, UI `3000`.
-If a port is already taken, set the matching var(s) in `.env` and re-run
-`./scripts/start-backend.sh`:
+Default host ports are Postgres `5432`, Neo4j `7687`/`7474`, API `8000`, UI `3000`.
+**`start-backend.sh` handles Postgres/Neo4j port conflicts automatically** — it reuses
+the ports an already-running stack publishes, otherwise picks the next free port and
+derives `POSTGRES_URL`/`NEO4J_URI` from it, so you never edit `.env` for this. It
+prints the chosen ports, e.g. `→ host ports: postgres=5432 neo4j bolt=7687 http=7475`.
 
-```ini
-POSTGRES_PORT=5433
-POSTGRES_URL=postgresql+psycopg://cobol:devpassword@localhost:5433/cobol_modernizer
-NEO4J_BOLT_PORT=7690
-NEO4J_HTTP_PORT=7475
-NEO4J_URI=bolt://localhost:7690
-BACKEND_PORT=8000
-```
-
-`docker-compose.yml` reads the `*_PORT` vars; the app reads `POSTGRES_URL`/`NEO4J_URI`
-— change both halves so they agree. See also `docs/running-the-cockpit.md`.
+To *pin* specific ports instead, set them in `.env` (`POSTGRES_PORT`,
+`NEO4J_BOLT_PORT`, `NEO4J_HTTP_PORT`) — those become the starting point and are still
+auto-bumped only if busy. The **API port** (`BACKEND_PORT`, default 8000) is *not*
+auto-changed because the cockpit proxies `/api` → `:8000`; free 8000 or change both
+sides. See also `docs/running-the-cockpit.md`.
 
 ---
 
