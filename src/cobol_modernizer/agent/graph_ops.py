@@ -123,11 +123,11 @@ DEFAULT_INTEGRATION_MARKERS = [
 
 
 def entry_points(deps: GraphDeps, *, limit: int = 50) -> dict[str, Any]:
-    """Heuristic, language-agnostic: callable entities with zero incoming CALLS."""
+    """Heuristic: callable COBOL entities with zero incoming CALLS."""
     rows = deps.client.run(
         """
         MATCH (e:CodeEntity {repo: $repo})
-        WHERE e.kind IN ['Function', 'Method', 'Module']
+        WHERE e.kind IN ['Program', 'Paragraph']
         OPTIONAL MATCH (e)<-[c:CALLS]-()
         WITH e, count(c) AS callers
         WHERE callers = 0

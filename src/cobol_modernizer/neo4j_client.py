@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -60,9 +61,11 @@ class Neo4jClient:
             result = session.run(query, **params)
             return [record.data() for record in result]
 
-    def merge_entity(self, qualified_name: str, label: str, props: dict[str, Any]) -> None:
+    def merge_entity(
+        self, qualified_name: str, label: str, props: dict[str, Any], repo: str
+    ) -> None:
         query = schema.MERGE_ENTITY % {"label": label}
-        self.run(query, qualified_name=qualified_name, props=props)
+        self.run(query, repo=repo, qualified_name=qualified_name, props=props)
 
     def merge_relationship(
         self,
@@ -71,10 +74,21 @@ class Neo4jClient:
         rel_type: str,
         props: dict[str, Any] | None = None,
         allow_unresolved: bool = True,
+        repo: str | None = None,
     ) -> None:
+        # rel_type is interpolated into Cypher; gate it against the allow-list so a
+        # tool/contract can never smuggle an arbitrary clause into the query.
+        if rel_type not in schema.MERGEABLE_REL_TYPES:
+            raise ValueError(
+                f"rel_type {rel_type!r} is not in MERGEABLE_REL_TYPES "
+                f"{sorted(schema.MERGEABLE_REL_TYPES)}"
+            )
         template = schema.MERGE_RELATIONSHIP_TO_UNRESOLVED if allow_unresolved else schema.MERGE_RELATIONSHIP
         query = template % {"rel_type": rel_type}
-        self.run(query, source_qname=source_qname, target_qname=target_qname, props=props or {})
+        self.run(
+            query, repo=repo, source_qname=source_qname,
+            target_qname=target_qname, props=props or {},
+        )
 
     def merge_author(self, name: str, email: str, commit_count: int) -> None:
         self.run(schema.MERGE_AUTHOR, name=name, email=email, commit_count=commit_count)
@@ -92,6 +106,18 @@ class Neo4jClient:
             times=times,
             confidence=confidence,
         )
+
+    def save_manifest(self, slug: str, manifest: dict[str, str]) -> None:
+        """Persist a content-hash manifest (path -> source_hash) for a repo,
+        serialized as JSON on the Repository node. Used by IncrementalIngester."""
+        self.run(schema.SAVE_MANIFEST, slug=slug, manifest_json=json.dumps(manifest))
+
+    def load_manifest(self, slug: str) -> dict[str, str]:
+        """Load a previously saved manifest; empty dict if none exists yet."""
+        rows = self.run(schema.LOAD_MANIFEST, slug=slug)
+        if not rows or not rows[0].get("manifest_json"):
+            return {}
+        return json.loads(rows[0]["manifest_json"])
 
     def stats(self) -> dict[str, int]:
         node_count = self.run("MATCH (n) RETURN count(n) AS count")[0]["count"]

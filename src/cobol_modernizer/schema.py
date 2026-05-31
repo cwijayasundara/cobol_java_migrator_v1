@@ -14,7 +14,9 @@ MERGEABLE_REL_TYPES = {
 }
 
 CONSTRAINTS = [
-    "CREATE CONSTRAINT entity_qname IF NOT EXISTS FOR (e:CodeEntity) REQUIRE e.qualified_name IS UNIQUE",
+    # qualified_name is unique PER REPO (composite), not globally — two repos may
+    # each define a program named CBACT01C without colliding.
+    "CREATE CONSTRAINT entity_repo_qname IF NOT EXISTS FOR (e:CodeEntity) REQUIRE (e.repo, e.qualified_name) IS UNIQUE",
     "CREATE CONSTRAINT file_repo_path IF NOT EXISTS FOR (f:File) REQUIRE (f.repo, f.path) IS UNIQUE",
     "CREATE CONSTRAINT author_email IF NOT EXISTS FOR (a:Author) REQUIRE a.email IS UNIQUE",
     "CREATE CONSTRAINT brd_id IF NOT EXISTS FOR (b:BRD) REQUIRE b.id IS UNIQUE",
@@ -40,7 +42,7 @@ INDEXES = [
 CLEAR_GRAPH = "MATCH (n) DETACH DELETE n"
 
 MERGE_ENTITY = """
-MERGE (e:CodeEntity {qualified_name: $qualified_name})
+MERGE (e:CodeEntity {repo: $repo, qualified_name: $qualified_name})
 SET e += $props,
     e:%(label)s
 """
@@ -56,15 +58,15 @@ RETURN count(DISTINCT f) AS file_count
 DELETE_FILES_FOR_REPO = "MATCH (f:File {repo: $slug}) DETACH DELETE f"
 
 MERGE_RELATIONSHIP = """
-MATCH (src:CodeEntity {qualified_name: $source_qname})
-MATCH (tgt:CodeEntity {qualified_name: $target_qname})
+MATCH (src:CodeEntity {repo: $repo, qualified_name: $source_qname})
+MATCH (tgt:CodeEntity {repo: $repo, qualified_name: $target_qname})
 MERGE (src)-[r:%(rel_type)s]->(tgt)
 SET r += $props
 """
 
 MERGE_RELATIONSHIP_TO_UNRESOLVED = """
-MATCH (src:CodeEntity {qualified_name: $source_qname})
-MERGE (tgt:CodeEntity {qualified_name: $target_qname})
+MATCH (src:CodeEntity {repo: $repo, qualified_name: $source_qname})
+MERGE (tgt:CodeEntity {repo: $repo, qualified_name: $target_qname})
 ON CREATE SET tgt.kind = 'External', tgt:External
 MERGE (src)-[r:%(rel_type)s]->(tgt)
 SET r += $props

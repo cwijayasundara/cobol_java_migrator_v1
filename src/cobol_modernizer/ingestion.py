@@ -27,12 +27,81 @@ def _print(msg: str) -> None:
         print(plain)
 
 
+# Optional/v2 CodeEntity columns projected onto the graph node when present.
+_OPTIONAL_COLS = (
+    "docstring", "signature", "level", "picture", "usage", "redefines", "parent_qname",
+)
+
+
+def _entity_props(entity: CodeEntity) -> dict:
+    """Graph property projection for a CodeEntity (v1 + v2 columns). `repo` is set
+    by the MERGE key, not here."""
+    props: dict = {
+        "kind": entity.kind.value,
+        "simple_name": entity.simple_name,
+        "file_path": entity.file_path,
+        "start_line": entity.start_line,
+        "end_line": entity.end_line,
+        "is_async": entity.is_async,
+        "is_private": entity.is_private,
+        "is_external": entity.is_external,
+    }
+    for col in _OPTIONAL_COLS:
+        val = getattr(entity, col, None)
+        if val is not None:
+            props[col] = val
+    if entity.occurs:
+        props["occurs"] = entity.occurs
+    if entity.decorators:
+        props["decorators"] = entity.decorators
+    if entity.base_classes:
+        props["base_classes"] = entity.base_classes
+    if entity.complexity is not None:
+        props["complexity"] = entity.complexity
+    return props
+
+
+def _rel_props(rel: CodeRelationship) -> dict:
+    props: dict = {}
+    if rel.file_path:
+        props["file_path"] = rel.file_path
+    if rel.line is not None:
+        props["line"] = rel.line
+    props.update(rel.metadata)
+    return props
+
+
+def ingest_parse_results(client, results: list[ParseResult], *, repo: str) -> dict[str, int]:
+    """Repo-scoped ingest of already-parsed results (no disk parse, no git). The
+    canonical v2 load path: every entity carries `repo`, every relationship is
+    matched within `repo`, so the graph is isolated per repository."""
+    client.apply_schema()
+    entity_count = rel_count = 0
+    for result in results:
+        for entity in result.entities:
+            client.merge_entity(
+                qualified_name=entity.qualified_name, label=entity.kind.value,
+                props=_entity_props(entity), repo=repo,
+            )
+            entity_count += 1
+        for rel in result.relationships:
+            client.merge_relationship(
+                source_qname=rel.source_qname, target_qname=rel.target_qname,
+                rel_type=rel.kind.value, props=_rel_props(rel),
+                allow_unresolved=True, repo=repo,
+            )
+            rel_count += 1
+    return {"entities": entity_count, "relationships": rel_count}
+
+
 class CodeGraphIngester:
     """Orchestrates parsing source code + git history and loading into Neo4j."""
 
-    def __init__(self, client: Neo4jClient, repo_root: Path) -> None:
+    def __init__(self, client: Neo4jClient, repo_root: Path,
+                 repo_slug: str | None = None) -> None:
         self.client = client
         self.repo_root = repo_root
+        self.repo = repo_slug or repo_root.name
 
     def ingest(self, clear: bool = False, with_git: bool = True) -> dict[str, int]:
         if clear:
@@ -87,47 +156,21 @@ class CodeGraphIngester:
         return stats
 
     def _load_entity(self, entity: CodeEntity) -> None:
-        props = {
-            "kind": entity.kind.value,
-            "simple_name": entity.simple_name,
-            "file_path": entity.file_path,
-            "start_line": entity.start_line,
-            "end_line": entity.end_line,
-            "is_async": entity.is_async,
-            "is_private": entity.is_private,
-            "is_external": entity.is_external,
-        }
-        if entity.docstring:
-            props["docstring"] = entity.docstring
-        if entity.signature:
-            props["signature"] = entity.signature
-        if entity.decorators:
-            props["decorators"] = entity.decorators
-        if entity.base_classes:
-            props["base_classes"] = entity.base_classes
-        if entity.complexity is not None:
-            props["complexity"] = entity.complexity
-
         self.client.merge_entity(
             qualified_name=entity.qualified_name,
             label=entity.kind.value,
-            props=props,
+            props=_entity_props(entity),
+            repo=self.repo,
         )
 
     def _load_relationship(self, rel: CodeRelationship) -> None:
-        props: dict[str, str | int] = {}
-        if rel.file_path:
-            props["file_path"] = rel.file_path
-        if rel.line is not None:
-            props["line"] = rel.line
-        props.update(rel.metadata)
-
         self.client.merge_relationship(
             source_qname=rel.source_qname,
             target_qname=rel.target_qname,
             rel_type=rel.kind.value,
-            props=props,
+            props=_rel_props(rel),
             allow_unresolved=True,
+            repo=self.repo,
         )
 
     def _ingest_git(self) -> dict[str, int]:
@@ -207,13 +250,14 @@ class IncrementalIngester:
                     self.client.merge_entity(
                         qualified_name=e.qualified_name, label=e.kind.value,
                         props={"file_path": e.file_path,
-                               "source_hash": new_manifest.get(e.file_path, "")})
+                               "source_hash": new_manifest.get(e.file_path, "")},
+                        repo=self.repo_slug)
                 for rel in result.relationships:
                     self.client.merge_relationship(
                         source_qname=rel.source_qname,
                         target_qname=rel.target_qname,
                         rel_type=rel.kind.value, props=dict(rel.metadata),
-                        allow_unresolved=True)
+                        allow_unresolved=True, repo=self.repo_slug)
                 processed += 1
         self.client.save_manifest(self.repo_slug, new_manifest)
         return {"processed": processed, "skipped": len(d.unchanged),
