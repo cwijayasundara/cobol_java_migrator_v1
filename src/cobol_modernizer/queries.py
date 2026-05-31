@@ -132,3 +132,52 @@ class CodeGraphQueries:
             """,
             **self._params(repo, markers=self.SIDE_EFFECT_MARKERS, limit=limit),
         )
+
+    # ---- cockpit graph reads (read-only; shaped for the UI GraphView/EntityDrawer) ----
+
+    def graph_overview(self, repo: str | None = None, limit: int = 300) -> dict:
+        """Read-only: nodes (capped at limit) + the relationships among them, shaped
+        for the cockpit GraphView (nodes:{id,name,kind,file,summary}, links:{source,target,type})."""
+        node_rows = self.client.run(
+            """
+            MATCH (n:CodeEntity)
+            WHERE $repo IS NULL OR n.repo = $repo
+            RETURN n.qualified_name AS id, n.simple_name AS name, n.kind AS kind,
+                   n.file_path AS file, n.semantic_summary AS summary
+            LIMIT $limit
+            """,
+            repo=repo, limit=limit,
+        )
+        ids = [r["id"] for r in node_rows]
+        link_rows = self.client.run(
+            """
+            MATCH (a:CodeEntity)-[r]->(b:CodeEntity)
+            WHERE a.qualified_name IN $ids AND b.qualified_name IN $ids
+            RETURN a.qualified_name AS source, b.qualified_name AS target, type(r) AS type
+            """,
+            ids=ids,
+        )
+        return {"nodes": node_rows, "links": link_rows}
+
+    def entity_detail(self, qualified_name: str) -> dict | None:
+        """Read-only: an entity's props + incoming/outgoing relationships, shaped for
+        the cockpit EntityDetail. Returns None if the entity is unknown."""
+        ent = self.client.run(
+            "MATCH (n:CodeEntity {qualified_name: $q}) RETURN properties(n) AS props",
+            q=qualified_name,
+        )
+        if not ent:
+            return None
+        incoming = self.client.run(
+            """
+            MATCH (s:CodeEntity)-[r]->(n:CodeEntity {qualified_name: $q})
+            RETURN s.qualified_name AS source, s.kind AS source_kind, type(r) AS relationship
+            """, q=qualified_name,
+        )
+        outgoing = self.client.run(
+            """
+            MATCH (n:CodeEntity {qualified_name: $q})-[r]->(t:CodeEntity)
+            RETURN t.qualified_name AS target, t.kind AS target_kind, type(r) AS relationship
+            """, q=qualified_name,
+        )
+        return {"entity": ent[0]["props"], "incoming": incoming, "outgoing": outgoing}

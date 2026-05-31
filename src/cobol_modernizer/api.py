@@ -211,3 +211,5 @@ from cobol_modernizer.controlplane.workspaces import router as _cp_workspaces_ro
 app.include_router(_cp_workspaces_router)
 from cobol_modernizer.controlplane.events import router as _cp_events_router
 app.include_router(_cp_events_router)
+from cobol_modernizer.controlplane.graph import router as _cp_graph_router
+app.include_router(_cp_graph_router)
