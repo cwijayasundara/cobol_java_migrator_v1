@@ -1,0 +1,17 @@
+{
+  "program": "COACTVWC",
+  "interactions": [
+    {"command": "READ", "dataset": "CXACAIX",
+     "ridfld": "00000000001",
+     "resp": "NORMAL",
+     "into": {"XREF-ACCT-ID": "00000000001", "XREF-CARD-NUM": "4111111111111111", "XREF-CUST-ID": "000000001"}},
+    {"command": "READ", "dataset": "ACCTDAT",
+     "ridfld": "00000000001",
+     "resp": "NORMAL",
+     "into": {"ACCT-ID": "00000000001", "ACCT-ACTIVE-STATUS": "Y", "ACCT-CURR-BAL": "1234.56"}},
+    {"command": "READ", "dataset": "CUSTDAT",
+     "ridfld": "000000001",
+     "resp": "NORMAL",
+     "into": {"CUST-ID": "000000001", "CUST-FIRST-NAME": "JANE", "CUST-LAST-NAME": "DOE"}}
+  ]
+}
