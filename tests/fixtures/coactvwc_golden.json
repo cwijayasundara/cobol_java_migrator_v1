@@ -1,0 +1,10 @@
+{
+  "00000000123": {"accountId": "00000000123", "activeStatus": "Y",
+                  "currentBalance": "1234.56", "creditLimit": "5000.00",
+                  "customerId": "000000042", "customerFirstName": "JANE",
+                  "customerLastName": "DOE", "ficoScore": "720"},
+  "00000000456": {"accountId": "00000000456", "activeStatus": "N",
+                  "currentBalance": "0.00", "creditLimit": "2500.00",
+                  "customerId": "000000099", "customerFirstName": "JOHN",
+                  "customerLastName": "SMITH", "ficoScore": "640"}
+}
