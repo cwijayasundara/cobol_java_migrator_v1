@@ -37,9 +37,12 @@ class CostVerifier:
         except BudgetExceeded as exc:
             self.aborted = True
             run_remaining = self.policy.remaining_usd(workspace_id=self.workspace_id)
+            # Attribute the scope to the breached cap. policy.check always trips
+            # the run kill-switch on any breach, so is_killed cannot distinguish
+            # a workspace-only breach — parse the authoritative exception message.
+            scope = "workspace" if "workspace cap" in str(exc) else "run"
             return ApprovalRequest(
                 workspace_id=self.workspace_id, run_id=self.run_id,
-                scope="run" if self.policy.is_killed(
-                    workspace_id=self.workspace_id, run_id=self.run_id) else "workspace",
+                scope=scope,
                 spent_usd=cost_usd, cap_usd=run_remaining, reason=str(exc))
         return None
