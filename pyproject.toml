@@ -18,6 +18,7 @@ dependencies = [
   "networkx>=3.3",
   "bleach>=6.1",
   "markdown-it-py>=3.0",
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

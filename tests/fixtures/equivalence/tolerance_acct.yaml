@@ -1,0 +1,19 @@
+version: 1
+record: ACCOUNT-RECORD
+default:
+  matcher: exact
+rules:
+  - field: ACCT-CURR-BAL
+    matcher: numeric_scale
+    scale: 2
+    representation: zoned_overpunch
+  - field: ACCT-CREDIT-LIMIT
+    matcher: numeric_scale
+    scale: 2
+    representation: zoned_overpunch
+  - field: ACCT-OPEN-DATE
+    matcher: date
+    cobol_format: "YYYY-MM-DD"
+    java_format: "yyyy-MM-dd"
+  - field: FILLER
+    matcher: ignore
