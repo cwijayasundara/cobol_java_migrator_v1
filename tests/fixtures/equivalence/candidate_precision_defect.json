@@ -1,0 +1,14 @@
+{
+  "record": "ACCOUNT-RECORD",
+  "records": [
+    {"ACCT-ID": "00000000001", "ACCT-ACTIVE-STATUS": "Y",
+     "ACCT-CURR-BAL": "1234.5", "ACCT-CREDIT-LIMIT": "5000.00",
+     "ACCT-OPEN-DATE": "2014-11-20", "FILLER": "different-but-ignored"},
+    {"ACCT-ID": "00000000002", "ACCT-ACTIVE-STATUS": "Y",
+     "ACCT-CURR-BAL": "1580.00", "ACCT-CREDIT-LIMIT": "6130.00",
+     "ACCT-OPEN-DATE": "2013-06-19", "FILLER": "x"},
+    {"ACCT-ID": "00000000003", "ACCT-ACTIVE-STATUS": "N",
+     "ACCT-CURR-BAL": "0.00", "ACCT-CREDIT-LIMIT": "1000.00",
+     "ACCT-OPEN-DATE": "2020-01-01", "FILLER": "z"}
+  ]
+}

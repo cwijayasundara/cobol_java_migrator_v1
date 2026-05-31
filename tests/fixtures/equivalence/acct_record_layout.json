@@ -1,0 +1,18 @@
+{
+  "record": "ACCOUNT-RECORD",
+  "fields": [
+    {"name": "ACCT-ID", "picture": "9(11)", "usage": "DISPLAY"},
+    {"name": "ACCT-ACTIVE-STATUS", "picture": "X(01)", "usage": "DISPLAY"},
+    {"name": "ACCT-CURR-BAL", "picture": "S9(10)V99", "usage": "DISPLAY"},
+    {"name": "ACCT-CREDIT-LIMIT", "picture": "S9(10)V99", "usage": "DISPLAY"},
+    {"name": "ACCT-CASH-CREDIT-LIMIT", "picture": "S9(10)V99", "usage": "DISPLAY"},
+    {"name": "ACCT-OPEN-DATE", "picture": "X(10)", "usage": "DISPLAY"},
+    {"name": "ACCT-EXPIRAION-DATE", "picture": "X(10)", "usage": "DISPLAY"},
+    {"name": "ACCT-REISSUE-DATE", "picture": "X(10)", "usage": "DISPLAY"},
+    {"name": "ACCT-CURR-CYC-CREDIT", "picture": "S9(10)V99", "usage": "DISPLAY"},
+    {"name": "ACCT-CURR-CYC-DEBIT", "picture": "S9(10)V99", "usage": "DISPLAY"},
+    {"name": "ACCT-ADDR-ZIP", "picture": "X(10)", "usage": "DISPLAY"},
+    {"name": "ACCT-GROUP-ID", "picture": "X(10)", "usage": "DISPLAY"},
+    {"name": "FILLER", "picture": "X(178)", "usage": "DISPLAY"}
+  ]
+}
