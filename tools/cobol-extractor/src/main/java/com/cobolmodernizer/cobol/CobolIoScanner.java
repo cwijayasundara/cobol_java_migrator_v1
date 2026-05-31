@@ -131,4 +131,79 @@ public final class CobolIoScanner {
         String rtype = "INDEXED".equals(org) ? "VSAM" : "FILE";
         return new FileDef(logical, dd == null ? logical : dd, rtype, mode);
     }
+
+    // ---- EXEC CICS / EXEC SQL intent scanning ----
+
+    private static final Pattern CICS_VERB =
+        Pattern.compile("(?i)\\bEXEC\\s+CICS\\s+([A-Z]+)");
+    private static final Pattern CICS_RES =
+        Pattern.compile("(?i)\\b(?:DATASET|FILE)\\s*\\(\\s*([A-Z0-9][A-Z0-9-]*)");
+    private static final Map<String, String> CICS_INTENT = Map.of(
+        "READ", "read", "STARTBR", "read", "READNEXT", "read", "READPREV", "read",
+        "RECEIVE", "read", "WRITE", "write", "REWRITE", "write", "DELETE", "write",
+        "SEND", "write");
+
+    private static final Pattern SQL_VERB =
+        Pattern.compile("(?i)\\b(SELECT|INSERT|UPDATE|DELETE|FETCH)\\b");
+    private static final Pattern SQL_FROM =
+        Pattern.compile("(?i)\\b(?:FROM|INTO|UPDATE|DELETE\\s+FROM)\\s+([A-Z0-9_][A-Z0-9_.]*)");
+    private static final Map<String, String> SQL_INTENT = Map.of(
+        "SELECT", "read", "FETCH", "read",
+        "INSERT", "write", "UPDATE", "write", "DELETE", "write");
+
+    /** Collect each EXEC <opener> ... END-EXEC block as {joinedBlockText, firstLineNo}. */
+    private List<String[]> execBlocks(File file, String opener) {
+        List<String[]> out = new ArrayList<>();
+        StringBuilder buf = null;
+        int start = 0, n = 0;
+        for (String raw : read(file)) {
+            n++;
+            if (isComment(raw)) continue;
+            String up = raw.toUpperCase();
+            if (buf == null && up.contains(opener)) { buf = new StringBuilder(raw); start = n; }
+            else if (buf != null) buf.append(' ').append(raw);
+            if (buf != null && up.contains("END-EXEC")) {
+                out.add(new String[]{buf.toString(), String.valueOf(start)});
+                buf = null;
+            }
+        }
+        return out;
+    }
+
+    public List<RelationshipJson> scanCics(File file, String progId, String relPath) {
+        List<RelationshipJson> rels = new ArrayList<>();
+        for (String[] blk : execBlocks(file, "EXEC CICS")) {
+            Matcher vm = CICS_VERB.matcher(blk[0]);
+            if (!vm.find()) continue;
+            String cmd = vm.group(1).toUpperCase();
+            String intent = CICS_INTENT.get(cmd);
+            if (intent == null) continue;  // HANDLE/RETURN/XCTL/SYNCPOINT etc. are not data IO
+            Matcher rm = CICS_RES.matcher(blk[0]);
+            String res = rm.find() ? rm.group(1).toUpperCase() : cmd;
+            Map<String, Object> meta = new LinkedHashMap<>();
+            meta.put("resource", res); meta.put("command", cmd); meta.put("intent", intent);
+            rels.add(new RelationshipJson(progId, res, "EXECUTES_CICS",
+                    relPath, Integer.valueOf(blk[1]), meta));
+        }
+        return rels;
+    }
+
+    public List<RelationshipJson> scanSql(File file, String progId, String relPath) {
+        List<RelationshipJson> rels = new ArrayList<>();
+        for (String[] blk : execBlocks(file, "EXEC SQL")) {
+            String body = blk[0];
+            if (body.toUpperCase().contains("INCLUDE")) continue; // EXEC SQL INCLUDE copybook, not data IO
+            Matcher vm = SQL_VERB.matcher(body);
+            if (!vm.find()) continue;
+            String op = vm.group(1).toUpperCase();
+            String intent = SQL_INTENT.getOrDefault(op, "read");
+            Matcher fm = SQL_FROM.matcher(body);
+            String res = fm.find() ? fm.group(1).toUpperCase() : op;
+            Map<String, Object> meta = new LinkedHashMap<>();
+            meta.put("resource", res); meta.put("operation", op); meta.put("intent", intent);
+            rels.add(new RelationshipJson(progId, res, "EXECUTES_SQL",
+                    relPath, Integer.valueOf(blk[1]), meta));
+        }
+        return rels;
+    }
 }
