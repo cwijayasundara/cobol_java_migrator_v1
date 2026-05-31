@@ -1,0 +1,7 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       PROCEDURE DIVISION.
+       MAIN.
+           CALL 'CALLEE'.
+           CALL 'MISSINGSUB'.
+           STOP RUN.

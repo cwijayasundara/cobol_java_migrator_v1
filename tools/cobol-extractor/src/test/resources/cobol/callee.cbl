@@ -1,0 +1,5 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       PROCEDURE DIVISION.
+       DOIT.
+           DISPLAY 'OK'.
