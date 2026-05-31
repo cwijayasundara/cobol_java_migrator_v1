@@ -167,3 +167,56 @@ class DefectTicket(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="open")
     dialect_note: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+# --- Phase 6: deployment automation + canary (Postgres run/audit split) ---
+# Neo4j carries zero deploy/routing state; everything below is Postgres state.
+class Deployment(Base):
+    __tablename__ = "deployment"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False)
+    artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifact.id"), nullable=True)         # the spring_boot_project
+    slice_name: Mapped[str] = mapped_column(String, nullable=False)
+    image_ref: Mapped[str] = mapped_column(String, nullable=False)
+    image_digest: Mapped[str] = mapped_column(String, nullable=False)   # sha256 anchor
+    smoke_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    perf_baseline: Mapped[dict] = mapped_column(JSON, default=dict)      # PerfBaseline body
+    status: Mapped[str] = mapped_column(String, default="built")
+    # built|smoked|baselined|canarying|promoted|rolled_back
+    created_by: Mapped[str] = mapped_column(String, nullable=False)      # RBAC identity
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CanaryRoute(Base):
+    __tablename__ = "canary_route"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False)
+    slice_name: Mapped[str] = mapped_column(String, nullable=False)
+    deployment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("deployment.id"), nullable=True)        # canary image behind the route
+    canary_pct: Mapped[int] = mapped_column(Integer, default=0)   # 0 == full legacy (safe)
+    legacy_pct: Mapped[int] = mapped_column(Integer, default=100)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    rollback_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "slice_name", "active",
+                         name="uq_canary_route_active"),    # one active route per slice
+    )
+
+
+class FitnessCheck(Base):
+    __tablename__ = "fitness_check"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False)
+    commit_sha: Mapped[str] = mapped_column(String, nullable=False)
+    report: Mapped[dict] = mapped_column(JSON, default=dict)      # FitnessReport body
+    passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "commit_sha", name="uq_fitness_commit"),
+    )
