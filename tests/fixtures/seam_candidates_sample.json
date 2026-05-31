@@ -1,0 +1,5 @@
+[
+  {"program": "COACTVWC", "fan_in": 1, "fan_out": 0, "reader_only": true,  "writes": 0, "reads": 3, "score": 0.91},
+  {"program": "COCRDSLC", "fan_in": 2, "fan_out": 1, "reader_only": true,  "writes": 0, "reads": 2, "score": 0.78},
+  {"program": "COACTUPC", "fan_in": 3, "fan_out": 2, "reader_only": false, "writes": 2, "reads": 4, "score": 0.31}
+]
