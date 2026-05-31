@@ -47,6 +47,7 @@ class CodeGraphQueries:
         SQL read -> 'read'; WRITES / CICS write / SQL write -> 'write'."""
         return self.client.run(
             f"""
+            // accesses_for_program
             MATCH (p:CodeEntity)-[r:READS|WRITES|EXECUTES_CICS|EXECUTES_SQL]->(res)
             WHERE {self._name_match("p")}
             {self._repo_filter("p", repo)}
