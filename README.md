@@ -1,166 +1,186 @@
 # COBOL → Java/Spring Boot Migration Platform
 
-Greenfield implementation of a **generic COBOL → Java/Spring Boot converter**. **Phase 0 (baseline + persistence + cost guardrails) is complete** — see `docs/plans/` for the full roadmap (`INDEX.md` first) and `IMPLEMENTATION_PLAN.md` for the master plan.
+A **generic, graph-grounded, agent-driven COBOL → Java/Spring Boot modernization
+platform**. Nothing is tied to a specific app — drop your COBOL into
+`source_code_to_analyse/` (git-ignored) and the toolchain discovers it. AWS CardDemo
+is a convenient public test workload.
 
-This README is the runbook for **executing and verifying Phase 0** against any COBOL workload. Drop your COBOL into `source_code_to_analyse/` (git-ignored, so it stays local); nothing in the toolchain is tied to a specific app. AWS CardDemo is a convenient public test workload.
+The platform is a **FastAPI control plane** (`src/cobol_modernizer/`) plus an
+**11-stage Next.js cockpit** (`web/`), backed by **Neo4j** (the deterministic code
+graph — source of truth), **Postgres** (run/audit/RBAC/version state), and **MinIO**
+(artifacts). Agent execution stays server-side; the cockpit is a thin client that
+reads everything through the control plane.
+
+> **Status:** the full roadmap is implemented — Phase 0 (baseline/persistence/cost)
+> through Phase 6 (deployment & canary), the cross-cutting UI cockpit, and the
+> cockpit↔backend control-plane endpoints. See `docs/plans/INDEX.md` for the
+> roadmap and `docs/plans/*` for the per-phase plans.
 
 ---
 
-## What Phase 0 delivers
+## Quick start (two scripts)
 
-- The deterministic analysis core (ProLeap COBOL → JSON contract → Neo4j graph), ported and wired to a **single versioned `schemaVersion=2` JSON contract** (the only Python↔Java coupling; the loader raises on a version mismatch).
-- A **Postgres run/audit/RBAC schema** (7 tables) via Alembic migrations.
-- **Model tiering** (`resolve_model`) + **fail-closed cost caps with a kill-switch**.
-- **Content-hash incremental re-ingest** (re-ingesting an unchanged repo re-pays ~0 LLM cost).
-- A **baseline benchmark** for any COBOL repo (parse time, peak memory, parse-error resilience, copybook depth).
-- The map/reduce **BRD pipeline + groundedness-gate judge** (lineage-checked).
+Two one-shot scripts bring the whole thing up — no piecemeal commands.
 
-**Exit criteria (all verified):** the sample ingests benchmarked & survives ≥10 injected parse errors · a grounded BRD renders with a judge score · unchanged re-ingest ≈ $0 · a runaway run is killed by the cap.
+```bash
+# 1. Backend: loads .env (creates it from .env.example on first run), starts
+#    Postgres + Neo4j, applies migrations, seeds a demo workspace, runs the API.
+./scripts/start-backend.sh        # → http://localhost:8000
 
----
+# 2. Cockpit UI (in a second terminal): installs web deps on first run, runs the
+#    Next.js dev server. It proxies /api/* → http://localhost:8000.
+./scripts/start-ui.sh             # → http://localhost:3000
+```
 
-## Prerequisites
+Open **http://localhost:3000/workspaces** — the seeded **CardDemo** workspace appears
+with its 11-stage journey, gate/cost pills, agent console, and evidence drawer.
 
-| Tool | Version | Notes |
+Both scripts are **idempotent** (safe to re-run) and read every setting from `.env`.
+Stop the backend with `Ctrl-C`; the containers keep running (`docker compose down`
+to stop them, `down -v` to also drop the data volumes).
+
+### Prerequisites
+
+| Tool | Version | For |
 |---|---|---|
-| Python | 3.12 | managed by `uv` |
-| [uv](https://docs.astral.sh/uv/) | ≥ 0.5 | package/venv manager |
-| JDK | 25 | for the ProLeap extractor (Homebrew `openjdk@25` works; it can stay off-PATH — see below) |
-| Maven | 3.9+ | builds the extractor JAR |
-| Docker | running | only for the integration tests (Neo4j + Postgres testcontainers) and `docker-compose` infra |
+| [uv](https://docs.astral.sh/uv/) | ≥ 0.5 | Python 3.12 env + the backend |
+| Docker | running | Postgres + Neo4j (+ MinIO) via `docker-compose.yml` |
+| Node.js | ≥ 18 | the cockpit (`web/`) |
+| JDK 25 + Maven 3.9+ | — | **only** to build the ProLeap COBOL extractor (ingesting real COBOL); not needed to run the cockpit against the seed |
 
-Put the COBOL you want to analyse under `source_code_to_analyse/` at the repo root (this directory is git-ignored). Any layout works — the toolchain discovers `*.cbl/*.cob/*.cobol` programs and `*.cpy` copybooks recursively.
+### Port conflicts
 
+The default host ports are Postgres `5432`, Neo4j `7687`/`7474`, API `8000`, UI `3000`.
+If a port is already taken, set the matching var(s) in `.env` and re-run
+`./scripts/start-backend.sh`:
+
+```ini
+POSTGRES_PORT=5433
+POSTGRES_URL=postgresql+psycopg://cobol:devpassword@localhost:5433/cobol_modernizer
+NEO4J_BOLT_PORT=7690
+NEO4J_HTTP_PORT=7475
+NEO4J_URI=bolt://localhost:7690
+BACKEND_PORT=8000
 ```
-source_code_to_analyse/
-└── <your-cobol-app>/          # any directory tree of COBOL + copybooks
+
+`docker-compose.yml` reads the `*_PORT` vars; the app reads `POSTGRES_URL`/`NEO4J_URI`
+— change both halves so they agree. See also `docs/running-the-cockpit.md`.
+
+---
+
+## What's in the box
+
+| Area | Where | Notes |
+|---|---|---|
+| Deterministic analysis core | `cobol/`, `parser.py`, `ingestion.py`, `neo4j_client.py`, `schema.py` | ProLeap COBOL → single `schemaVersion=2` JSON contract → Neo4j graph |
+| v2 graph enrichment (Phase 1) | `queries.py`, `agent/graph_ops.py` | READS/WRITES/EXECUTES_CICS/SQL + DataItem nodes; reader/writer Cypher |
+| BRD pipeline + groundedness gate | `brd/`, `agent/brd_judge.py` | map/reduce BRD with lineage-checked judge |
+| Thin vertical slice + dark launch (Phase 2) | `slice/`, `darklaunch/` | account-view Spring Boot slice (Spring Boot 4.0.6 / Java 25) |
+| Equivalence Lab (Phase 3) | `equivalence/` | golden-master diff with COMP-3 / scale tolerance + identity-drift |
+| Seam engine + increment planner (Phase 4) | `seam/`, `planner/` | ranked seams + acyclic INVEST story DAG, all Cypher (no LLM in scoring) |
+| Design + codegen workbench (Phase 5) | `design/`, `codegen/`, `mimic/` | service design/ADRs, TDD codegen + repair loop, Legacy Mimic write-back |
+| Deployment + canary (Phase 6) | `deploy/` | routing enabling-point, proven rollback, fitness functions, stoppable-safe |
+| Cost guardrails | `cost/tiering.py`, `cost/policy.py` | model tiering + fail-closed caps with a kill-switch |
+| Persistence | `persistence/` | Postgres run/audit/RBAC (Alembic; 13 tables incl. `agent_run_event`) |
+| Control plane (HTTP/SSE) | `api.py`, `controlplane/` | the cockpit's backend — see below |
+| Cockpit UI | `web/` | Next.js 15 / React 19 / Tailwind 3.4, five-region shell + 9 screens |
+
+### Control-plane endpoints (`controlplane/`)
+
+The cockpit talks to these (all under `/api`), backed by Postgres + read-only Neo4j:
+
+- `GET/POST /workspaces`, `GET /workspaces/{id}`
+- `GET /workspaces/{id}/{stages,gates,artifacts,runs,budget}`, `GET .../artifacts/{aid}`
+- `POST /workspaces/{id}/runs` · `POST /gates/{id}/approval` (attributed RBAC gate)
+- `GET /graph?repo=&limit=` · `GET /entity/{qname}` (read-only Neo4j)
+- `GET /workspaces/{id}/runs/{runId}/events` (SSE: replay persisted events + live stream)
+
+`controlplane/seed.py` (`python -m cobol_modernizer.controlplane.seed`) creates the
+demo workspace `start-backend.sh` shows. `controlplane/events.py:emit_event(...)` is
+the seam a server-side agent executor calls to feed the SSE stream (wiring it into the
+live agent harness is the next piece of work).
+
+---
+
+## Configuration
+
+`scripts/start-backend.sh` creates `.env` from `.env.example` on first run; edit `.env`
+to change anything. Key groups (full list in `.env.example`):
+
+- **LLM / Anthropic** — `ANTHROPIC_API_KEY` + per-role model overrides (defaults in
+  `cost/tiering.py`). Not needed just to run the cockpit against seeded data.
+- **Cost caps** — `COBOL_MOD_WORKSPACE_CAP_USD`, `COBOL_MOD_RUN_CAP_USD`.
+- **Neo4j / Postgres / MinIO** — connection URLs + the `*_PORT` overrides above.
+- **COBOL extractor** — `COBOL_EXTRACTOR_JAR`, `JAVA_HOME`, `COBOL_MOD_COPYBOOK_DIRS`
+  (only for ingesting real COBOL; see below).
+
+---
+
+## Tests
+
+```bash
+uv run --extra dev pytest tests/unit -q          # fast unit suite (no Docker/JAR)
+uv run --extra dev pytest -q                      # + integration (Docker for Neo4j/Postgres testcontainers)
+cd web && npm test                                # cockpit (Vitest, MSW-mocked)
 ```
 
-For example, to use AWS CardDemo as a test workload:
+Integration tests spin up throwaway Neo4j/Postgres containers and `skip` (not fail)
+when Docker/Java/JAR are unavailable. One pre-existing integration test
+(`test_v2_ingestion_neo4j.py`) fails only when the Java extractor JAR is built but the
+local Java toolchain rejects it — environmental, not a code regression.
+
+> Note: `uv run pytest` may resolve an ephemeral Python that lacks the dev
+> `testcontainers` extra, causing Neo4j/Postgres integration tests to **skip**. To run
+> them for real: `uv pip install --python .venv/bin/python testcontainers docker pytest pytest-asyncio`
+> then `.venv/bin/python -m pytest ...`.
+
+---
+
+## Ingesting real COBOL (analysis core)
+
+Put COBOL under `source_code_to_analyse/` (git-ignored). To ingest/benchmark you need
+the ProLeap extractor JAR:
+
+```bash
+export JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home   # your JDK 25
+cd tools/cobol-extractor && JAVA_HOME=$JAVA_HOME mvn -q clean package && cd -
+# → tools/cobol-extractor/target/cobol-extractor.jar  (emits schemaVersion=2)
+```
+
+For example, AWS CardDemo:
 
 ```bash
 git clone https://github.com/aws-samples/aws-mainframe-modernization-carddemo.git \
   source_code_to_analyse/aws-mf-mod-carddemo
-# programs in app/cbl/, copybooks in app/cpy/ and app/cpy-bms/
 ```
 
-To point at a tree outside the repo, pass `--repo <path>` (CLI) or set `COBOL_SAMPLE_DIR=<path>` (tests).
-
----
-
-## One-time setup
-
-### 1. Install Python dependencies
-
-```bash
-cd /Users/chamindawijayasundara/Documents/cobol_mod/cobol_to_java_v1
-uv sync --extra dev
-```
-
-### 2. Build the COBOL extractor JAR
-
-The Phase-0 ingest runs the ProLeap extractor as a subprocess. Build the shaded JAR with JDK 25:
-
-```bash
-export JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home   # adjust to your JDK 25
-cd tools/cobol-extractor && JAVA_HOME=$JAVA_HOME mvn -q clean package && cd -
-# produces: tools/cobol-extractor/target/cobol-extractor.jar  (emits schemaVersion=2)
-```
-
-> The build output (`target/`) is git-ignored. The first build downloads ProLeap/ANTLR deps and may take a few minutes.
-
-### 3. Configure environment
-
-```bash
-cp .env.example .env
-```
-
-Then set (or export in your shell) the two variables the extractor subprocess needs. **If these are missing, `CobolParser` silently degrades to zero entities** — a misleading "pass":
-
-```bash
-export COBOL_EXTRACTOR_JAR="$PWD/tools/cobol-extractor/target/cobol-extractor.jar"
-export JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home
-export COBOL_MOD_COPYBOOK_DIRS=app/cpy,app/cpy-bms   # copybook dirs relative to the repo being parsed (these match the bundled sample; set to your own)
-```
-
-`.env` also documents the model/cost/Neo4j/Postgres/MinIO settings (see `.env.example`).
-
----
-
-## Run the test suite
-
-```bash
-# Unit tests only (fast, no Docker/JAR needed):
-uv run --extra dev pytest tests/unit -q
-
-# Full suite incl. integration (needs Docker running + the JAR built + JAVA_HOME):
-COBOL_EXTRACTOR_JAR="$PWD/tools/cobol-extractor/target/cobol-extractor.jar" \
-JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home \
-uv run --extra dev pytest -q
-```
-
-Expected: **42 passed**. Integration tests spin up throwaway Neo4j 5.26 and Postgres 16 containers and run the real extractor; they `skip` (not fail) if Docker/Java/JAR are unavailable.
-
----
-
-## One-command Phase-0 baseline
-
-Runs the **real** extractor over your COBOL and writes a benchmark report. With no
-`--repo`/`--out`, it defaults to `./source_code_to_analyse` → `./benchmark_out/baseline.json`:
+One-command baseline benchmark (real extractor → report):
 
 ```bash
 COBOL_EXTRACTOR_JAR="$PWD/tools/cobol-extractor/target/cobol-extractor.jar" \
 JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home \
-COBOL_MOD_COPYBOOK_DIRS=app/cpy,app/cpy-bms \
-PYTHONPATH=src \
+COBOL_MOD_COPYBOOK_DIRS=app/cpy,app/cpy-bms PYTHONPATH=src \
 uv run python -m cobol_modernizer.cli baseline \
-  --repo ./source_code_to_analyse/aws-mf-mod-carddemo \
-  --out  ./benchmark_out/baseline.json
+  --repo ./source_code_to_analyse/aws-mf-mod-carddemo --out ./benchmark_out/baseline.json
 ```
 
-Sample report:
-
-```json
-{
-  "files_discovered": 106,
-  "programs": 44,
-  "copybooks": 62,
-  "parse_errors": 5,
-  "parse_seconds": 14.8,
-  "peak_memory_mb": 4.81,
-  "max_copybook_depth": 1
-}
-```
-
-> `PYTHONPATH=src` is needed for `python -m …` (pytest already sets it). The 5 parse errors are genuine `EXEC DLI`/IMS programs ProLeap can't parse — the graceful-degradation path, not a crash.
+> **If `COBOL_EXTRACTOR_JAR`/`JAVA_HOME` are missing, the parser silently degrades to
+> zero entities** — a misleading "pass". `PYTHONPATH=src` is needed for `python -m …`
+> (pytest sets it automatically).
 
 ---
 
-## Optional: stand up backing services
-
-For a persistent dev environment (the test suite uses throwaway containers and doesn't need this):
+## Manual backend bring-up (what start-backend.sh automates)
 
 ```bash
-docker compose up -d         # Neo4j(+GDS) :7474/:7687 · Postgres :5432 · MinIO :9000/:9001
-
-# Apply the Postgres schema (7 run/audit/RBAC tables):
-POSTGRES_URL='postgresql+psycopg://cobol:devpassword@localhost:5432/cobol_modernizer' \
-uv run alembic -c alembic.ini upgrade head
+docker compose up -d postgres neo4j
+cp .env.example .env
+PYTHONPATH=src uv run alembic -c alembic.ini upgrade head     # 13 tables
+PYTHONPATH=src uv run python -m cobol_modernizer.controlplane.seed
+PYTHONPATH=src uv run uvicorn cobol_modernizer.api:app --port 8000
 ```
 
-(The migration is also applied & verified automatically by `tests/integration/test_migrations_apply.py` against a throwaway Postgres.)
-
----
-
-## How each exit criterion is proven
-
-| Exit criterion | Verified by |
-|---|---|
-| COBOL ingests, benchmarked | `cli baseline` + `tests/integration/test_cobol_ingest_neo4j.py` (real extractor → live Neo4j; asserts Program nodes) |
-| Survives ≥10 injected parse errors | `tests/integration/test_error_resilience.py` |
-| Grounded BRD renders with judge score | `tests/integration/test_brd_grounded.py` + `tests/unit/test_brd_judge_groundedness.py` |
-| Unchanged re-ingest ≈ $0 | `tests/unit/test_incremental_ingestion.py`, `tests/unit/test_enricher_cache_key.py` |
-| Runaway run killed by cap | `tests/unit/test_runaway_run_killed.py`, `tests/unit/test_cost_policy.py` |
+`alembic` needs `PYTHONPATH=src` (the package is src-layout, not pip-installed).
 
 ---
 
@@ -168,22 +188,32 @@ uv run alembic -c alembic.ini upgrade head
 
 ```
 src/cobol_modernizer/
-  contract/cobol_contract.py   # the single schemaVersion=2 JSON contract loader (raises on mismatch)
-  cobol/parser.py, mapping.py  # extractor subprocess driver + thin v2 delegate
-  parser.py, neo4j_client.py, schema.py, ingestion.py, ingestion_hash.py
-  cost/tiering.py, policy.py, verifier.py     # model tiering + fail-closed caps/kill-switch
-  persistence/tables.py, db.py, repo.py, migrations/   # Postgres run/audit/RBAC + Alembic
-  agent/ (harness, graph_ops, graph_tools, brd_judge, enricher, …)   # working core (tools=[], setting_sources=[], json_schema)
-  brd/ (pipeline, schema, renderer, storage)  # map/reduce BRD + groundedness gate
-  benchmark/ (baseline.py, error_injection.py)
+  api.py                         # FastAPI control plane (includes every router)
+  controlplane/                  # cockpit endpoints: deps, serializers, stages,
+                                 #   workspaces, graph, events(SSE), seed
+  contract/, cobol/, parser.py, neo4j_client.py, schema.py, ingestion*.py, queries.py
+  brd/, slice/, darklaunch/, equivalence/, seam/, planner/, design/, codegen/, mimic/, deploy/
+  cost/ (tiering, policy)        # model tiering + fail-closed caps / kill-switch
+  persistence/ (tables, db, migrations/)   # Postgres run/audit/RBAC + Alembic (0001..0004)
+  agent/ (harness, graph_ops, brd_judge, …)
   cli.py
-tools/cobol-extractor/         # ProLeap Java extractor (com.cobolmodernizer.cobol), emits schemaVersion=2
-docs/plans/                    # the decomposed implementation plans + INDEX.md roadmap
+web/                             # Next.js 15 cockpit (5-region shell + 9 stage screens)
+tools/cobol-extractor/           # ProLeap Java extractor (emits schemaVersion=2)
+scripts/                         # start-backend.sh, start-ui.sh
+docs/plans/                      # per-phase implementation plans + INDEX.md
+docs/running-the-cockpit.md      # backend bring-up detail
 tests/unit/, tests/integration/
 ```
 
 ---
 
-## What's next (Phase 1)
+## Troubleshooting
 
-Phase 1 (v2 graph enrichment) is the **critical-path barrier** that unblocks the seam engine (Phases 4+). The final Phase-0 review flagged two wiring gaps to address first: add `Neo4jClient.save_manifest`/`load_manifest` (production incremental re-ingest) and write a `repo` property on ingested entities so repo-scoped reads connect the ingest→enrich→BRD chain end-to-end. See `docs/plans/phase-1-v2-graph-enrichment.md`.
+- **Port already in use** on `docker compose up` → set `POSTGRES_PORT` /
+  `NEO4J_BOLT_PORT` / `NEO4J_HTTP_PORT` (and the matching `POSTGRES_URL` / `NEO4J_URI`)
+  in `.env`, then re-run `./scripts/start-backend.sh`.
+- **Cockpit shows no data** → the backend isn't running or the seed didn't run; re-run
+  `./scripts/start-backend.sh` (the seed is idempotent).
+- **Stray `"<name> 2.ext"` files** appear from cloud-sync/Finder conflict copies and are
+  untracked; they once broke Alembic (duplicate revision id). List them with
+  `git ls-files --others --exclude-standard | grep ' 2\.'` then delete the listed files.
