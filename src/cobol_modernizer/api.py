@@ -7,8 +7,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, HTTPException
 from pydantic import BaseModel
+
+# Load .env so running the server (`uvicorn cobol_modernizer.api:app`) honors
+# POSTGRES_URL / NEO4J_* without exporting them by hand. The control-plane DB
+# dependency (get_session) reads os.environ directly, so this must run at import.
+load_dotenv()
 
 from cobol_modernizer.slice.selection import pick_slice
 from cobol_modernizer.darklaunch.runner import run_dark_launch
