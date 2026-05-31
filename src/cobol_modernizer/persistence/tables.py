@@ -138,3 +138,32 @@ class Budget(Base):
     spent_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0)
     killed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class DefectTicket(Base):
+    """An equivalence-diff failure, linked to the COBOL source seam that owns
+    the failing field (Phase 3). ``source_seam`` is a real graph entity qname,
+    never invented; ``dialect_note`` records the GnuCOBOL-vs-mainframe
+    provenance behind the §7 fidelity risk."""
+    __tablename__ = "defect_ticket"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False)
+    stage_id: Mapped[str | None] = mapped_column(
+        ForeignKey("journey_stage.id", ondelete="CASCADE"), nullable=True)
+    agent_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_run.id"), nullable=True)
+    artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifact.id"), nullable=True)
+    source_seam: Mapped[str] = mapped_column(String, nullable=False)
+    seam_edge_kind: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_file: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    field: Mapped[str] = mapped_column(String, nullable=False)
+    record_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    severity: Mapped[str] = mapped_column(String, nullable=False, default="high")
+    status: Mapped[str] = mapped_column(String, nullable=False, default="open")
+    dialect_note: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
