@@ -34,3 +34,13 @@ def test_data_accesses_op_returns_normalized_rows():
     out = ops.data_accesses(deps, "COACTVWC")
     assert out["accesses"][0]["resource"] == "ACCTFILE"
     assert out["accesses"][0]["intent"] == "read"
+
+
+def test_no_seam_op_emits_write_cypher():
+    import inspect, cobol_modernizer.seam.signals as sg
+    import cobol_modernizer.seam.reader_writer as rw
+    import cobol_modernizer.seam.service as svc
+    src = inspect.getsource(sg) + inspect.getsource(rw) + inspect.getsource(svc)
+    for kw in ("CREATE ", "MERGE ", "DELETE ", "SET ", "REMOVE "):
+        # CREATE/MERGE only appear in the test fixture, never in seam Cypher.
+        assert kw not in src, f"seam Cypher must be read-only; found {kw!r}"
