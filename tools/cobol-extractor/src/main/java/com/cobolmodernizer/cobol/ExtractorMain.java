@@ -28,7 +28,7 @@ public class ExtractorMain implements Callable<Integer> {
     @Option(names = "--extensions") String extensions = ".cbl,.cob,.cobol";
     @Option(names = "--out") String out = "-";
 
-    static final int SCHEMA_VERSION = 2;
+    static final int SCHEMA_VERSION = 2;  // v2: DataItem nodes + READS/WRITES/EXEC/MOVES_TO/GO_TO edges
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Override

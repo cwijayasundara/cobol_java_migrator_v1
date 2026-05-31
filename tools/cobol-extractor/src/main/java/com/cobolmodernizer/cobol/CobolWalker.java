@@ -1,5 +1,6 @@
 package com.cobolmodernizer.cobol;
 
+import com.cobolmodernizer.cobol.json.DataItemJson;
 import com.cobolmodernizer.cobol.json.EntityJson;
 import com.cobolmodernizer.cobol.json.FileResultJson;
 import com.cobolmodernizer.cobol.json.RelationshipJson;
@@ -47,6 +48,7 @@ public class CobolWalker {
 
     public FileResultJson walk(File file, String relPath) {
         List<EntityJson> entities = new ArrayList<>();
+        List<DataItemJson> dataItems = new ArrayList<>();
         List<RelationshipJson> rels = new ArrayList<>();
         try {
             Program program = analyze(file);
@@ -59,6 +61,11 @@ public class CobolWalker {
                 String progId = pu.getIdentificationDivision()
                         .getProgramIdParagraph().getName().toUpperCase();
                 entities.add(new EntityJson("Program", progId, progId, relPath, 1, lineCount(file), false));
+
+                // v2 data-flow enrichment (line-oriented; ProLeap-ASG-independent).
+                DataFlowWalker dfw = new DataFlowWalker(format);
+                dataItems.addAll(dfw.dataItems(file, progId, relPath));
+                rels.addAll(dfw.allEdges(file, progId, relPath));
 
                 ProcedureDivision pd = pu.getProcedureDivision();
                 if (pd == null) continue;
@@ -106,7 +113,7 @@ public class CobolWalker {
                         "no COBOL program found (file did not parse to a program)",
                         List.of(), List.of(), List.of());
             }
-            return new FileResultJson(relPath, "ok", null, entities, List.of(), rels);
+            return new FileResultJson(relPath, "ok", null, entities, dataItems, rels);
         } catch (Exception e) {
             String msg = e.getClass().getSimpleName()
                     + (e.getMessage() != null ? ": " + e.getMessage() : "");
