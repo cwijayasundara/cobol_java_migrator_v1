@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+# v2 graph vocabulary (Phase 1). DataItem is a CodeEntity label like Program/Paragraph.
+ENTITY_LABELS = [
+    "Program", "Section", "Paragraph", "Copybook", "DataItem", "External",
+]
+
+# Relationship types the ingestion MERGE accepts (v1 + v2). Used to guard the
+# `%(rel_type)s` interpolation in MERGE_RELATIONSHIP against arbitrary input.
+MERGEABLE_REL_TYPES = {
+    "CALLS", "CONTAINS", "IMPORTS",                                  # v1
+    "READS", "WRITES", "EXECUTES_CICS", "EXECUTES_SQL",              # v2 IO
+    "MOVES_TO", "GO_TO",                                             # v2 data/control flow
+}
+
 CONSTRAINTS = [
     "CREATE CONSTRAINT entity_qname IF NOT EXISTS FOR (e:CodeEntity) REQUIRE e.qualified_name IS UNIQUE",
     "CREATE CONSTRAINT file_repo_path IF NOT EXISTS FOR (f:File) REQUIRE (f.repo, f.path) IS UNIQUE",
@@ -16,6 +29,12 @@ INDEXES = [
     "CREATE FULLTEXT INDEX entity_search IF NOT EXISTS FOR (e:CodeEntity) ON EACH [e.simple_name, e.qualified_name, e.docstring]",
     "CREATE INDEX brd_repo IF NOT EXISTS FOR (b:BRD) ON (b.repo_id)",
     "CREATE INDEX brd_version IF NOT EXISTS FOR (b:BRD) ON (b.version)",
+    # v2 seam-discovery support
+    "CREATE INDEX entity_dataitem IF NOT EXISTS FOR (e:DataItem) ON (e.qualified_name)",
+    "CREATE INDEX reads_resource IF NOT EXISTS FOR ()-[r:READS]-() ON (r.resource)",
+    "CREATE INDEX writes_resource IF NOT EXISTS FOR ()-[r:WRITES]-() ON (r.resource)",
+    "CREATE INDEX cics_resource IF NOT EXISTS FOR ()-[r:EXECUTES_CICS]-() ON (r.resource)",
+    "CREATE INDEX sql_resource IF NOT EXISTS FOR ()-[r:EXECUTES_SQL]-() ON (r.resource)",
 ]
 
 CLEAR_GRAPH = "MATCH (n) DETACH DELETE n"
@@ -72,4 +91,17 @@ WHERE a.kind = 'Module' AND b.kind = 'Module'
 MERGE (a)-[r:CO_CHANGED_WITH]-(b)
 SET r.times = $times,
     r.confidence = $confidence
+"""
+
+# --- Content-hash manifest persistence (incremental re-ingest) ---
+# The manifest (repo-relative path -> source_hash) is stored as a JSON string on
+# the per-repo Repository node, so an unchanged re-ingest re-pays ~0 parse cost.
+SAVE_MANIFEST = """
+MERGE (r:Repository {slug: $slug})
+SET r.manifest_json = $manifest_json
+"""
+
+LOAD_MANIFEST = """
+MATCH (r:Repository {slug: $slug})
+RETURN r.manifest_json AS manifest_json
 """
