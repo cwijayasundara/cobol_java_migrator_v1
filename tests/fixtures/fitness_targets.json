@@ -1,0 +1,7 @@
+{
+  "equivalence_divergence_rate": {"threshold": 0.0, "direction": "max"},
+  "canary_p95_ratio":           {"threshold": 1.2, "direction": "max"},
+  "slice_test_coverage":        {"threshold": 0.8, "direction": "min"},
+  "seams_migrated":             {"threshold": 1,   "direction": "min"},
+  "identity_drift_writers":     {"threshold": 0.0, "direction": "max"}
+}
