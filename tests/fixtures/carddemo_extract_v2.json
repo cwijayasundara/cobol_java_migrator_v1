@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 2,
+  "files": [
+    {
+      "filePath": "app/cbl/CBACT01C.cbl",
+      "parseStatus": "ok",
+      "error": null,
+      "entities": [
+        {"kind":"Program","qualifiedName":"CBACT01C","simpleName":"CBACT01C","filePath":"app/cbl/CBACT01C.cbl","startLine":1,"endLine":200,"isExternal":false}
+      ],
+      "dataItems": [],
+      "relationships": [
+        {"sourceQname":"CBACT01C","targetQname":"CVACT01Y","kind":"IMPORTS","filePath":"app/cbl/CBACT01C.cbl","line":30,"metadata":{"copybook":"CVACT01Y"}}
+      ]
+    },
+    {
+      "filePath": "app/cpy/CVACT01Y.cpy",
+      "parseStatus": "ok",
+      "error": null,
+      "entities": [
+        {"kind":"Copybook","qualifiedName":"CVACT01Y","simpleName":"CVACT01Y","filePath":"app/cpy/CVACT01Y.cpy","startLine":1,"endLine":50,"isExternal":false}
+      ],
+      "dataItems": [
+        {"kind":"DataItem","qualifiedName":"CVACT01Y.ACCOUNT-RECORD","simpleName":"ACCOUNT-RECORD","filePath":"app/cpy/CVACT01Y.cpy","startLine":3,"endLine":3,"isExternal":false,"level":1,"picture":null,"usage":"DISPLAY","redefines":null,"occurs":0,"parentQname":null}
+      ],
+      "relationships": [
+        {"sourceQname":"CVACT01Y","targetQname":"CVACT02Y","kind":"IMPORTS","filePath":"app/cpy/CVACT01Y.cpy","line":10,"metadata":{"copybook":"CVACT02Y"}}
+      ]
+    },
+    {
+      "filePath": "app/cbl/BADFILE.cbl",
+      "parseStatus": "error",
+      "error": "syntax error: unexpected token at line 12",
+      "entities": [],
+      "dataItems": [],
+      "relationships": []
+    }
+  ]
+}
