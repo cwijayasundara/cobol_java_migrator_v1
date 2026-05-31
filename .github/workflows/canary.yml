@@ -1,0 +1,42 @@
+name: canary
+on:
+  workflow_dispatch:
+    inputs:
+      slice_name: { required: true, type: string }
+      canary_pct: { required: true, type: number, default: 10 }
+jobs:
+  build-smoke-perf-fitness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with: { python-version: "3.12" }
+      - run: uv sync --extra dev
+      - name: build image
+        # inputs passed via env (never interpolated straight into the shell) to
+        # avoid command injection from a crafted slice_name (workflow-injection hardening)
+        env:
+          SLICE_NAME: ${{ inputs.slice_name }}
+        run: docker build -t "${SLICE_NAME}:canary" "generated/${SLICE_NAME}"
+      - name: smoke + perf baseline + fitness
+        run: |
+          docker compose -f infra/deploy/canary-compose.yml up -d
+          uv run pytest tests/integration/test_perf_baseline.py -q
+          uv run pytest tests/unit/test_fitness.py -q
+  deploy:
+    needs: build-smoke-perf-fitness
+    runs-on: ubuntu-latest
+    environment: deploy            # GitHub environment protection = attributed RBAC gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with: { python-version: "3.12" }
+      - run: uv sync --extra dev
+      - name: flip canary (post-approval) then guard rollback
+        env:
+          SLICE_NAME: ${{ inputs.slice_name }}
+          CANARY_PCT: ${{ inputs.canary_pct }}
+        run: |
+          uv run python -m cobol_modernizer.deploy.canary \
+            --slice "${SLICE_NAME}" --canary-pct "${CANARY_PCT}" \
+            --deploy-gate-passed true
