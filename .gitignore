@@ -11,3 +11,6 @@ __pycache__/
 # Java / Maven build output
 tools/cobol-extractor/target/
 tools/cobol-extractor/dependency-reduced-pom.xml
+
+# Generated benchmark reports
+benchmark_out/
