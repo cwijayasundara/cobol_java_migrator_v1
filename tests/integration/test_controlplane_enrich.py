@@ -86,3 +86,23 @@ def test_plan_enrich_runs_and_polls(monkeypatch):
         assert body["result"]["stories"]["S1"]["description"] == "d"
     finally:
         app.dependency_overrides.clear()
+
+
+def test_design_enrich_runs_and_polls(monkeypatch):
+    c = _setup(monkeypatch)
+    try:
+        monkeypatch.setattr(analysis, "_compute_designs",
+                            lambda neo, slug: [{"slice_id": "P1-slice",
+                                                "owned_resources": ["R"],
+                                                "evidence_map": {"DR-1": ["P1"]}}])
+
+        async def _fake(designs, known, **kw):
+            return {"P1-slice": {"slice_id": "P1-slice", "api_surface": "GET /x"}}
+        monkeypatch.setattr(analysis, "enrich_design", _fake)
+
+        assert c.post("/api/workspaces/ws-1/design/enrich").status_code == 202
+        body = c.get("/api/workspaces/ws-1/design/enrichment").json()
+        assert body["status"] == "done"
+        assert body["result"]["narratives"]["P1-slice"]["api_surface"] == "GET /x"
+    finally:
+        app.dependency_overrides.clear()

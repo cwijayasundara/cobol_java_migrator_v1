@@ -26,6 +26,7 @@ from cobol_modernizer.design.context_map import assign_context
 from cobol_modernizer.design.judge import judge_design
 from cobol_modernizer.design.schema import BoundedContext, ServiceDesign
 from cobol_modernizer.enrichment.config import enrich_model, enrich_timeout_s
+from cobol_modernizer.enrichment.design import enrich_design
 from cobol_modernizer.enrichment.plan import enrich_plan
 from cobol_modernizer.enrichment.seams import enrich_seams
 from cobol_modernizer.persistence.tables import JourneyStage, Workspace
@@ -204,34 +205,20 @@ class _WriterAdapter:
         return self._w.get(program, [])
 
 
-@router.post("/workspaces/{wid}/design")
-def run_design(wid: str, session: Session = Depends(get_session),
-               neo4j=Depends(get_neo4j)) -> dict:
-    """Deterministic service design for each WRITER slice: bounded-context
-    assignment (from owned/written resources) + template ADRs (modular monolith,
-    Extract Product Lines, Legacy Mimic) + the data-ownership/groundedness gate.
-    No LLM."""
-    ws = _workspace(session, wid)
-    try:
-        rows = neo4j.run(_WRITES_BY_PROGRAM, repo=ws.repo_slug)
-        known_refs = {r["q"] for r in neo4j.run(
-            "MATCH (n:CodeEntity {repo:$repo}) RETURN n.qualified_name AS q",
-            repo=ws.repo_slug)}
-    except _NEO4J_ERRORS as exc:
-        raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
-
-    writes_by_program: dict[str, list[str]] = {
-        r["program"]: [w for w in (r.get("writes") or []) if w] for r in rows
-    }
+def _compute_designs(neo4j, slug: str) -> list[dict]:
+    """The deterministic per-writer-slice design list (the same data run_design
+    returns under 'designs'). Extracted so the enrich job can reuse it."""
+    rows = neo4j.run(_WRITES_BY_PROGRAM, repo=slug)
+    known_refs = _known_refs(neo4j, slug)
+    writes_by_program = {r["program"]: [w for w in (r.get("writes") or []) if w]
+                         for r in rows}
     if not known_refs:
         raise HTTPException(status_code=409,
                             detail="no graph — run the Parse stage first")
-    # resource -> every program that writes it (for ownership-leak detection)
     writers_of: dict[str, list[str]] = {}
     for prog, res_list in writes_by_program.items():
         for res in res_list:
             writers_of.setdefault(res, []).append(prog)
-
     adapter = _WriterAdapter(writes_by_program)
     designs: list[dict] = []
     for prog in sorted(p for p, w in writes_by_program.items() if w):
@@ -239,7 +226,7 @@ def run_design(wid: str, session: Session = Depends(get_session),
         try:
             context = assign_context(adapter, prog)
         except ValueError:
-            continue  # owns resources with no known context — skip
+            continue
         external = {res: [w for w in writers_of.get(res, []) if w != prog]
                     for res in owned if any(w != prog for w in writers_of.get(res, []))}
         design = ServiceDesign(
@@ -257,7 +244,55 @@ def run_design(wid: str, session: Session = Depends(get_session),
             "groundedness_failures": report.groundedness_failures,
             "rationale": report.rationale,
         })
+    return designs
 
+
+@router.post("/workspaces/{wid}/design")
+def run_design(wid: str, session: Session = Depends(get_session),
+               neo4j=Depends(get_neo4j)) -> dict:
+    """Deterministic service design for each WRITER slice: bounded-context
+    assignment (from owned/written resources) + template ADRs (modular monolith,
+    Extract Product Lines, Legacy Mimic) + the data-ownership/groundedness gate.
+    No LLM."""
+    ws = _workspace(session, wid)
+    try:
+        designs = _compute_designs(neo4j, ws.repo_slug)
+    except _NEO4J_ERRORS as exc:
+        raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
     _mark_passed(session, wid, "design")
     session.flush()
     return {"repo_slug": ws.repo_slug, "count": len(designs), "designs": designs}
+
+
+@router.post("/workspaces/{wid}/design/enrich", status_code=202)
+def design_enrich(wid: str, session: Session = Depends(get_session),
+                  neo4j=Depends(get_neo4j)) -> dict:
+    ws = _workspace(session, wid)
+    _require_llm()
+    slug = ws.repo_slug
+
+    def _job() -> dict:
+        neo = jobs.make_neo4j()
+        try:
+            designs = _compute_designs(neo, slug)
+            known = _known_refs(neo, slug)
+            runner = SdkAgentRunner()
+            narratives = asyncio.run(enrich_design(
+                designs, known, runner=runner, model=enrich_model("design"),
+                timeout_s=enrich_timeout_s("design")))
+            return {"repo_slug": slug, "narratives": narratives,
+                    "token_usage": dict(runner.token_usage)}
+        finally:
+            try:
+                neo.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _job_view(jobs.runner.start("design-enrich", wid, _job))
+
+
+@router.get("/workspaces/{wid}/design/enrichment")
+def design_enrichment(wid: str, session: Session = Depends(get_session),
+                      neo4j=Depends(get_neo4j)) -> dict:
+    _workspace(session, wid)
+    return _job_view(jobs.runner.get("design-enrich", wid))
