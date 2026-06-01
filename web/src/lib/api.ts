@@ -53,6 +53,14 @@ export interface ParseResultSummary {
   relationships: number;
 }
 
+// Cheap graph counts for a workspace's repo (GET .../graph-summary).
+export interface GraphSummary {
+  repo_slug: string;
+  entities: number;
+  relationships: number;
+  by_kind: Record<string, number>;
+}
+
 // Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
 export interface AskAnswer {
   answer: string;
@@ -112,6 +120,10 @@ export const api = {
   // ---- budget (cost cap surfaced in the UI, not just spend) ----
   getWorkspaceBudget: (workspaceId: string) =>
     json<Budget>(`/api/workspaces/${workspaceId}/budget`),
+
+  // ---- graph counts (Outcome overview) ----
+  getGraphSummary: (workspaceId: string) =>
+    json<GraphSummary>(`/api/workspaces/${workspaceId}/graph-summary`),
 
   // ---- approvals (RBAC-attributed) ----
   submitApproval: (gateId: string, body: SubmitApprovalBody) =>

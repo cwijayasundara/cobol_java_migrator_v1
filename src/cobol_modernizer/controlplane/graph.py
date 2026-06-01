@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from neo4j.exceptions import DriverError, Neo4jError
+from sqlalchemy.orm import Session
 
-from cobol_modernizer.controlplane.deps import get_neo4j
+from cobol_modernizer.controlplane.deps import get_neo4j, get_session
+from cobol_modernizer.persistence.tables import Workspace
 from cobol_modernizer.queries import CodeGraphQueries
 
 router = APIRouter(prefix="/api", tags=["controlplane-graph"])
@@ -27,6 +29,31 @@ def get_graph(repo: str | None = None, limit: int = 300,
         return CodeGraphQueries(client).graph_overview(repo=repo, limit=limit)
     except _NEO4J_ERRORS as exc:
         raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
+
+
+@router.get("/workspaces/{wid}/graph-summary")
+def graph_summary(wid: str, session: Session = Depends(get_session),
+                  client=Depends(get_neo4j)) -> dict:
+    """Cheap COUNT-only graph stats for the workspace's repo (for the Outcome
+    overview). entities=0 means the repo hasn't been parsed yet."""
+    ws = session.get(Workspace, wid)
+    if ws is None:
+        raise HTTPException(status_code=404, detail=f"workspace {wid} not found")
+    try:
+        kinds = client.run(
+            "MATCH (n:CodeEntity {repo:$r}) RETURN n.kind AS kind, count(*) AS c",
+            r=ws.repo_slug)
+        rels = client.run(
+            "MATCH (:CodeEntity {repo:$r})-[x]->(:CodeEntity {repo:$r}) "
+            "RETURN count(x) AS c", r=ws.repo_slug)
+    except _NEO4J_ERRORS as exc:
+        raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
+    return {
+        "repo_slug": ws.repo_slug,
+        "entities": sum(int(r["c"]) for r in kinds),
+        "relationships": int(rels[0]["c"]) if rels else 0,
+        "by_kind": {r["kind"]: int(r["c"]) for r in kinds},
+    }
 
 
 @router.get("/entity/{qname}")

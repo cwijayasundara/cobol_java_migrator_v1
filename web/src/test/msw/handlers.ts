@@ -15,6 +15,10 @@ export const handlers = [
   http.get("/api/workspaces/:id/stages", () => HttpResponse.json(STAGES)),
   http.get("/api/workspaces/:id/gates", () => HttpResponse.json(GATES)),
   http.get("/api/workspaces/:id/budget", () => HttpResponse.json(BUDGET)),
+  http.get("/api/workspaces/:id/graph-summary", () => HttpResponse.json({
+    repo_slug: "aws-mf-carddemo", entities: 40, relationships: 29,
+    by_kind: { Program: 3, Paragraph: 13, DataItem: 20, Copybook: 1, External: 3 },
+  })),
   http.post("/api/workspaces/:id/parse", () => HttpResponse.json({
     repo_slug: "carddemo-mini", programs: 3, copybooks: 1, parse_errors: 0,
     entities: 38, relationships: 30,

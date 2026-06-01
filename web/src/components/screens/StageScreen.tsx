@@ -1,5 +1,6 @@
 "use client";
 
+import { OutcomeOverview } from "@/components/screens/OutcomeOverview";
 import { RepositoryIntake } from "@/components/screens/RepositoryIntake";
 import { ParseStudio } from "@/components/screens/ParseStudio";
 import { GraphExplorer } from "@/components/screens/GraphExplorer";
@@ -15,6 +16,7 @@ export function StageScreen(
   { workspaceId, stageKey, repoSlug }: { workspaceId: string; stageKey: string; repoSlug: string },
 ) {
   switch (stageKey) {
+    case "outcome": return <OutcomeOverview workspaceId={workspaceId} repoSlug={repoSlug} />;
     case "intake": return <RepositoryIntake workspaceId={workspaceId} />;
     case "parse": return <ParseStudio workspaceId={workspaceId} />;
     case "graph": return <GraphExplorer workspaceId={workspaceId} repoSlug={repoSlug} />;
