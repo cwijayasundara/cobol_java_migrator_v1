@@ -31,7 +31,8 @@ CODEGEN_SYSTEM = (
 
 
 async def generate_slice(*, runner, server, model: str, brd_json: str,
-                         golden_summary: str, allowed_tools: list[str]) -> GeneratedProject:
+                         golden_summary: str, allowed_tools: list[str],
+                         max_turns: int = 40) -> GeneratedProject:
     prompt = (
         f"## BRD\n```json\n{brd_json}\n```\n"
         f"## Golden-master summary (the oracle)\n{golden_summary}\n"
@@ -39,8 +40,16 @@ async def generate_slice(*, runner, server, model: str, brd_json: str,
     )
     raw = await runner.run_structured(
         system=CODEGEN_SYSTEM, prompt=prompt, server=server,
-        allowed_tools=allowed_tools, model=model, max_turns=12, schema=CODEGEN_SCHEMA)
+        allowed_tools=allowed_tools, model=model, max_turns=max_turns,
+        schema=CODEGEN_SCHEMA)
     files = [GeneratedFile(**f) for f in raw.get("files", [])]
+    # Distinguish "the agent returned nothing" (hit the turn cap / errored — the
+    # runner swallows it to {}) from a genuine TDD violation (emitted code but no
+    # test). The first is an operational limit, not a discipline failure.
+    if not files:
+        raise ValueError(
+            f"codegen agent produced no output (likely hit the {max_turns}-turn cap "
+            "or errored — see the harness log; raise CODEGEN_AGENT_MAX_TURNS).")
     if not any(f.kind == "test" for f in files):
         raise ValueError("codegen produced no failing test (TDD violated)")
     evidence_map: dict[str, list[str]] = {}
