@@ -105,6 +105,12 @@ async def agenerate_brd_draft(deps: GraphDeps, *, runner: AgentRunner, model: st
     server = build_graph_server(deps, advisor=advisor, advisor_max_uses=advisor_max_uses)
     map_tools = list(GRAPH_TOOL_NAMES) + ([ADVISOR_TOOL_NAME] if advisor is not None else [])
     subs = ops.list_subsystems(deps, max_clusters=max_subsystems)["subsystems"]
+    # Drop trivial single-entity "subsystems" (e.g. a lone FILLER / *-STATUS data
+    # item that the clusterer split out): spending a map agent — and its whole turn
+    # budget — to write a BRD about one field just produces noise and burns the
+    # cap. Keep meaningful clusters (>=2 members); fall back to all if that empties.
+    meaningful = [s for s in subs if len(s.get("members", [])) >= 2]
+    subs = meaningful or subs
     if not subs:
         subs = [{"name": deps.repo_id, "members": []}]
 
