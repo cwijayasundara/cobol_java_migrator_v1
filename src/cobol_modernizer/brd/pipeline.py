@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from cobol_modernizer.agent.deps import GraphDeps
     from cobol_modernizer.agent.harness import AgentRunner
 
-from cobol_modernizer.cost.tiering import resolve_model
+from cobol_modernizer.cost.tiering import GLOBAL_ENV, HAIKU, SONNET, resolve_model
 from cobol_modernizer.brd.renderer import render_html
 from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.brd.schema import (
@@ -30,6 +34,27 @@ class GraphBRDResult:
     strategy: Strategy
 
 
+def _log_timing(repo_id: str, n_prog: int, small: bool, model: str,
+                runner, total_s: float) -> None:
+    """Phase-0 instrumentation: print where a BRD run's wall-clock went — total,
+    per-call breakdown (map/reduce/judge), and turn counts — so we can confirm the
+    agentic loop (not fan-out/retries) is the bottleneck for small repos."""
+    calls = getattr(runner, "calls", []) or []
+    n_calls = len(calls)
+    summed_ms = sum(c.get("wall_ms", 0) for c in calls)
+    parallel_savings = max(0, summed_ms - int(total_s * 1000))
+    logger.info(
+        "BRD timing repo=%s programs=%d small=%s model=%s total_s=%.1f "
+        "agent_calls=%d sum_call_ms=%d parallel_overlap_ms=%d",
+        repo_id, n_prog, small, model, total_s, n_calls, summed_ms, parallel_savings)
+    for c in calls:
+        logger.info(
+            "  - %s: wall=%dms turns=%s/%s api_ms=%s stop=%s%s",
+            c.get("label"), c.get("wall_ms"), c.get("num_turns"),
+            c.get("max_turns"), c.get("duration_api_ms"), c.get("stop_reason"),
+            " HIT_TURN_CAP" if c.get("hit_turn_cap") else "")
+
+
 def _draft_to_brd(draft, repo_id: str, model: str, strategy: Strategy) -> BRD:
     return BRD(sections=draft.sections, evidence_map=draft.evidence_map,
                repo_id=repo_id, model=model, strategy=strategy)
@@ -39,10 +64,14 @@ async def agenerate_brd_graph(deps: GraphDeps, *, runner: AgentRunner, model: st
                               max_retries: int, max_turns: int,
                               max_subsystems: int, min_turns: int | None = None,
                               map_concurrency: int = 4,
-                              advisor=None, advisor_max_uses: int = 3) -> GraphBRDResult:
+                              advisor=None, advisor_max_uses: int = 3,
+                              judge_model: str | None = None) -> GraphBRDResult:
     from cobol_modernizer.agent.brd_judge import ajudge
     from cobol_modernizer.agent.brd_orchestrator import agenerate_brd_draft
 
+    # The judge is a tool-free scoring pass — run it on a cheap/fast model. Defaults
+    # to the draft model only when a caller doesn't supply one (keeps tests stable).
+    judge_model = judge_model or model
     attempts: list[AttemptRecord] = []
     best: tuple[BRD, JudgeReport] | None = None
 
@@ -53,7 +82,7 @@ async def agenerate_brd_graph(deps: GraphDeps, *, runner: AgentRunner, model: st
             map_concurrency=map_concurrency, advisor=advisor,
             advisor_max_uses=advisor_max_uses)
         brd = _draft_to_brd(draft, deps.repo_id, model, strategy)
-        report = await ajudge(brd, deps, runner=runner, model=model)
+        report = await ajudge(brd, deps, runner=runner, model=judge_model)
         attempts.append(AttemptRecord(attempt=attempt_no, rating=report.rating,
                                       weighted_score=report.weighted_score,
                                       feedback=report.feedback))
@@ -102,6 +131,16 @@ def generate_brd_graph_sync(repo_id: str, *, client=None, repo_path=None,
     # faster, just as good. Override with BRD_SINGLE_SHOT_MAX_PROGRAMS / explicit args.
     small = 0 < n_prog <= int(os.getenv("BRD_SINGLE_SHOT_MAX_PROGRAMS", "4"))
 
+    # Judge model is SIZE-TIERED. The judge is a tool-free scoring pass on the
+    # serial critical path, so we don't pay Opus latency here. For small repos the
+    # rating is purely advisory (max_retries=0 below), so Haiku — fast + cheap —
+    # is plenty. For large repos the rating GATES a (multi-minute) retry, so it's
+    # worth Sonnet's stronger judgement. An explicit BRD_JUDGE_MODEL / global pin
+    # always wins. (Robust parsing in brd_judge tolerates a weaker model's format
+    # drift, e.g. capitalized enum values, instead of crashing the run.)
+    judge_pin = os.getenv("BRD_JUDGE_MODEL") or os.getenv(GLOBAL_ENV)
+    judge_model = judge_pin or (HAIKU if small else SONNET)
+
     if max_retries is None:
         max_retries = 0 if small else int(os.getenv("BRD_MAX_RETRIES", "1"))
     # The per-subsystem turn budget is now ADAPTIVE (orchestrator scales it to each
@@ -128,11 +167,14 @@ def generate_brd_graph_sync(repo_id: str, *, client=None, repo_path=None,
     if os.getenv("BRD_ADVISOR_ENABLED", "").lower() in ("1", "true", "yes"):
         from cobol_modernizer.agent.advisor import AnthropicAdvisor
         advisor = AnthropicAdvisor()
+    wall_start = time.monotonic()
     result = asyncio.run(agenerate_brd_graph(
         deps, runner=runner, model=model, max_retries=max_retries,
         max_turns=max_turns, max_subsystems=max_subsystems, min_turns=min_turns,
         map_concurrency=map_concurrency,
-        advisor=advisor, advisor_max_uses=advisor_max_uses))
+        advisor=advisor, advisor_max_uses=advisor_max_uses,
+        judge_model=judge_model))
+    _log_timing(repo_id, n_prog, small, model, runner, time.monotonic() - wall_start)
 
     html = render_html(result.brd)
     if storage is None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -13,7 +14,7 @@ class AgentRunner(Protocol):
 
     async def run_structured(self, *, system: str, prompt: str, server: Any,
                              allowed_tools: list[str], model: str, max_turns: int,
-                             schema: dict[str, Any]) -> dict[str, Any]:
+                             schema: dict[str, Any], label: str = "") -> dict[str, Any]:
         ...
 
 
@@ -53,10 +54,15 @@ class SdkAgentRunner:
     def __init__(self) -> None:
         self.token_usage = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
         self.cost_usd = 0.0
+        # Phase-0 instrumentation: one record per run_structured call, so a run's
+        # latency can be attributed to map vs reduce vs judge. See `calls` consumers.
+        self.calls: list[dict[str, Any]] = []
 
     async def run_structured(self, *, system: str, prompt: str, server: Any,
                              allowed_tools: list[str], model: str, max_turns: int,
-                             schema: dict[str, Any]) -> dict[str, Any]:
+                             schema: dict[str, Any], label: str = "") -> dict[str, Any]:
+        wall_start = time.monotonic()
+        result_msg: Any = None
         try:
             from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage
 
@@ -74,10 +80,39 @@ class SdkAgentRunner:
             structured: dict[str, Any] = {}
             async for message in query(prompt=prompt, options=options):
                 if isinstance(message, ResultMessage):
+                    result_msg = message
                     structured = message.structured_output or {}
                     _accumulate_usage(self.token_usage, getattr(message, "usage", None))
                     self.cost_usd += getattr(message, "total_cost_usd", 0.0) or 0.0
             return structured
         except Exception:
-            logger.exception("SdkAgentRunner.run_structured failed; returning empty result")
+            logger.exception(
+                "SdkAgentRunner.run_structured failed (label=%s); returning empty result",
+                label or "?")
             return {}
+        finally:
+            self._record_call(label, model, max_turns, wall_start, result_msg)
+
+    def _record_call(self, label: str, model: str, max_turns: int,
+                     wall_start: float, msg: Any) -> None:
+        """Capture per-call latency/turn metrics and log a one-line summary. Reads
+        the SDK ResultMessage fields (num_turns, duration_ms, stop_reason, is_error)
+        so we can see WHY a call was slow: many turns, or one slow turn, or a hang."""
+        wall_ms = int((time.monotonic() - wall_start) * 1000)
+        rec = {
+            "label": label or "?", "model": model, "max_turns": max_turns,
+            "wall_ms": wall_ms,
+            "num_turns": getattr(msg, "num_turns", None),
+            "duration_ms": getattr(msg, "duration_ms", None),
+            "duration_api_ms": getattr(msg, "duration_api_ms", None),
+            "stop_reason": getattr(msg, "stop_reason", None),
+            "is_error": getattr(msg, "is_error", None),
+            "hit_turn_cap": getattr(msg, "num_turns", None) == max_turns,
+        }
+        self.calls.append(rec)
+        logger.info(
+            "agent-call label=%s model=%s wall_ms=%d turns=%s/%s api_ms=%s "
+            "stop=%s error=%s%s",
+            rec["label"], model, wall_ms, rec["num_turns"], max_turns,
+            rec["duration_api_ms"], rec["stop_reason"], rec["is_error"],
+            " HIT_TURN_CAP" if rec["hit_turn_cap"] else "")
