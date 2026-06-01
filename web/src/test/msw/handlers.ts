@@ -139,6 +139,28 @@ export const handlers = [
       severity: "high", dialect_note: "cobc 3.2 (ibm-strict, ASCII)",
     }],
   })),
+  http.post("/api/workspaces/:id/design/enrich", () => HttpResponse.json(
+    { status: "running", result: null, error: null },
+    { status: 202 })),
+  http.get("/api/workspaces/:id/design/enrichment", () => HttpResponse.json({
+    status: "done", error: null,
+    result: {
+      repo_slug: "carddemo-mini",
+      narratives: {
+        "CBPOST1M-slice": {
+          slice_id: "CBPOST1M-slice",
+          adrs: [
+            { number: 1, title: "Single writer", context: "c", decision: "d",
+              consequences: "q", alternatives: "a" },
+          ],
+          component_descriptions: ["P1Service handles posting"],
+          api_surface: "POST /accounts",
+          data_model_notes: "ACCT-MASTER -> Account",
+          cited_refs: ["CBPOST1M.WRITE-ACCT"],
+        },
+      },
+    },
+  })),
   http.post("/api/workspaces/:id/seams/enrich", () => HttpResponse.json(
     { status: "running", result: null, error: null },
     { status: 202 })),
