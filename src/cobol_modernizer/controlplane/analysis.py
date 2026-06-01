@@ -21,7 +21,7 @@ from cobol_modernizer.design.context_map import assign_context
 from cobol_modernizer.design.judge import judge_design
 from cobol_modernizer.design.schema import BoundedContext, ServiceDesign
 from cobol_modernizer.persistence.tables import JourneyStage, Workspace
-from cobol_modernizer.planner.dag import is_acyclic, topo_order
+from cobol_modernizer.planner.dag import delivery_waves, is_acyclic, topo_order
 from cobol_modernizer.planner.dependency import derive_dependencies, stories_from_seam_set
 from cobol_modernizer.seam.service import rank_candidates
 
@@ -83,10 +83,12 @@ def run_plan(wid: str, session: Session = Depends(get_session),
     dag = derive_dependencies(stories, cands, repo_id=ws.repo_slug)
     acyclic = is_acyclic(dag)
     order = topo_order(dag) if acyclic else []
+    waves = delivery_waves(dag) if acyclic else []
     _mark_passed(session, wid, "plan")
     session.flush()
     return {
         "repo_slug": ws.repo_slug, "acyclic": acyclic, "topo_order": order,
+        "delivery_waves": waves,
         "stories": [s.model_dump(mode="json") for s in dag.stories],
     }
 
