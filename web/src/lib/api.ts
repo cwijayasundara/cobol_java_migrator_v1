@@ -61,6 +61,27 @@ export interface GraphSummary {
   by_kind: Record<string, number>;
 }
 
+// A ranked strangler-fig seam candidate (POST .../seams).
+export interface SeamCandidate {
+  program: string;
+  seam_type: string;
+  score: { weighted: number; normalized: Record<string, number> };
+  signals: Record<string, number>;
+  transition: { name: string; summary: string };
+  identity_drift_writer: boolean;
+  evidence_map: Record<string, string[]>;
+}
+export interface SeamsResult { repo_slug: string; count: number; candidates: SeamCandidate[] }
+
+// Story DAG from POST .../plan.
+export interface PlanStory {
+  id: string; title: string; seam: string; depends_on: string[];
+  evidence_map: Record<string, string[]>;
+}
+export interface PlanResult {
+  repo_slug: string; acyclic: boolean; topo_order: string[]; stories: PlanStory[];
+}
+
 // Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
 export interface AskAnswer {
   answer: string;
@@ -108,6 +129,12 @@ export const api = {
   // ---- parse: run the COBOL extractor on the workspace repo + ingest to Neo4j ----
   parseWorkspace: (workspaceId: string) =>
     json<ParseResultSummary>(`/api/workspaces/${workspaceId}/parse`, { method: "POST" }),
+
+  // ---- seams + plan: deterministic analysis over the parsed graph ----
+  runSeams: (workspaceId: string) =>
+    json<SeamsResult>(`/api/workspaces/${workspaceId}/seams`, { method: "POST" }),
+  runPlan: (workspaceId: string) =>
+    json<PlanResult>(`/api/workspaces/${workspaceId}/plan`, { method: "POST" }),
 
   // ---- explore: "ask the codebase" (grounded in the Neo4j graph) ----
   askWorkspace: (workspaceId: string, question: string) =>
