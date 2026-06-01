@@ -94,8 +94,12 @@ The cockpit talks to these (all under `/api`), backed by Postgres + read-only Ne
 - `POST /workspaces/{id}/parse` — the **Parse** stage's "Run parse" button: runs the
   ProLeap extractor on the workspace's repo and ingests the code graph into Neo4j
   (deterministic, no LLM), marking the parse+graph stages passed. Needs `JAVA_HOME` +
-  the extractor JAR (start-backend.sh auto-sets both). The later LLM stages
-  (blueprint/seams/design/build) still need an Anthropic key + the agent harness.
+  the extractor JAR (start-backend.sh auto-sets both).
+- `POST /workspaces/{id}/ask` — the **Explore** stage's "Ask the codebase" chat:
+  answers NL questions grounded in the parsed Neo4j graph (per-program READS/WRITES/
+  CALLS + copybooks) via Claude (cheap `ask`/Haiku tier). Needs `ANTHROPIC_API_KEY` and
+  the repo parsed first (otherwise it returns a "run Parse first" hint, no LLM call).
+  The later LLM stages (blueprint/seams/design/build) still need the agent harness.
 - `POST /workspaces/{id}/runs` · `POST /gates/{id}/approval` (attributed RBAC gate)
 - `GET /graph?repo=&limit=` · `GET /entity/{qname}` (read-only Neo4j)
 - `GET /workspaces/{id}/runs/{runId}/events` (SSE: replay persisted events + live stream)

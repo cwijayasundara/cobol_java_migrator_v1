@@ -3,6 +3,7 @@
 import { RepositoryIntake } from "@/components/screens/RepositoryIntake";
 import { ParseStudio } from "@/components/screens/ParseStudio";
 import { GraphExplorer } from "@/components/screens/GraphExplorer";
+import { ExploreChat } from "@/components/screens/ExploreChat";
 import { BlueprintStudio } from "@/components/screens/BlueprintStudio";
 import { SeamStudio } from "@/components/screens/SeamStudio";
 import { IncrementPlanner } from "@/components/screens/IncrementPlanner";
@@ -16,8 +17,8 @@ export function StageScreen(
   switch (stageKey) {
     case "intake": return <RepositoryIntake workspaceId={workspaceId} />;
     case "parse": return <ParseStudio workspaceId={workspaceId} />;
-    case "graph":
-    case "explore": return <GraphExplorer workspaceId={workspaceId} repoSlug={repoSlug} />;
+    case "graph": return <GraphExplorer workspaceId={workspaceId} repoSlug={repoSlug} />;
+    case "explore": return <ExploreChat workspaceId={workspaceId} repoSlug={repoSlug} />;
     case "blueprint": return <BlueprintStudio workspaceId={workspaceId} />;
     case "seams": return <SeamStudio workspaceId={workspaceId} />;
     case "plan": return <IncrementPlanner workspaceId={workspaceId} />;

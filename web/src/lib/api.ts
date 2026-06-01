@@ -53,6 +53,14 @@ export interface ParseResultSummary {
   relationships: number;
 }
 
+// Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
+export interface AskAnswer {
+  answer: string;
+  grounded: boolean;
+  model: string | null;
+  context_entities: number;
+}
+
 export const api = {
   // ---- local repos available to start a workspace for ----
   listRepos: () => json<RepoInfo[]>("/api/repos"),
@@ -92,6 +100,14 @@ export const api = {
   // ---- parse: run the COBOL extractor on the workspace repo + ingest to Neo4j ----
   parseWorkspace: (workspaceId: string) =>
     json<ParseResultSummary>(`/api/workspaces/${workspaceId}/parse`, { method: "POST" }),
+
+  // ---- explore: "ask the codebase" (grounded in the Neo4j graph) ----
+  askWorkspace: (workspaceId: string, question: string) =>
+    json<AskAnswer>(`/api/workspaces/${workspaceId}/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    }),
 
   // ---- budget (cost cap surfaced in the UI, not just spend) ----
   getWorkspaceBudget: (workspaceId: string) =>
