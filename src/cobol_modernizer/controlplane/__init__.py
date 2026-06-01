@@ -6,11 +6,13 @@ from fastapi import APIRouter
 
 from cobol_modernizer.controlplane.repos import router as _repos_router
 from cobol_modernizer.controlplane.workspaces import router as _workspaces_router
+from cobol_modernizer.controlplane.parse import router as _parse_router
 from cobol_modernizer.controlplane.graph import router as _graph_router
 from cobol_modernizer.controlplane.events import router as _events_router
 
 controlplane_router = APIRouter()
 controlplane_router.include_router(_repos_router)
 controlplane_router.include_router(_workspaces_router)
+controlplane_router.include_router(_parse_router)
 controlplane_router.include_router(_graph_router)
 controlplane_router.include_router(_events_router)

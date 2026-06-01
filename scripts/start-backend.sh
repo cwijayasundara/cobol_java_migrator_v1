@@ -30,6 +30,27 @@ BACKEND_PORT="${BACKEND_PORT:-8000}"
 command -v docker >/dev/null || { echo "✗ docker not found — install Docker and retry"; exit 1; }
 command -v uv >/dev/null     || { echo "✗ uv not found — see https://docs.astral.sh/uv/"; exit 1; }
 
+# The 'parse' stage runs the ProLeap COBOL extractor (Java). Make it work out of
+# the box: resolve a real JDK (the macOS /usr/bin/java stub is not enough) and the
+# built extractor JAR, exporting both for the API process. Non-fatal if absent —
+# only the parse action needs them.
+if [ -z "${JAVA_HOME:-}" ] || [ ! -x "${JAVA_HOME:-}/bin/java" ]; then
+  for _jh in /opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home \
+             /opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home \
+             "$(/usr/libexec/java_home 2>/dev/null || true)"; do
+    if [ -n "$_jh" ] && [ -x "$_jh/bin/java" ]; then export JAVA_HOME="$_jh"; break; fi
+  done
+fi
+: "${COBOL_EXTRACTOR_JAR:=tools/cobol-extractor/target/cobol-extractor.jar}"
+case "$COBOL_EXTRACTOR_JAR" in /*) ;; *) COBOL_EXTRACTOR_JAR="$ROOT/$COBOL_EXTRACTOR_JAR";; esac
+export COBOL_EXTRACTOR_JAR
+if [ -n "${JAVA_HOME:-}" ] && [ -f "$COBOL_EXTRACTOR_JAR" ]; then
+  echo "→ COBOL extractor ready (JAVA_HOME=$JAVA_HOME)"
+else
+  echo "⚠ COBOL extractor not fully available (JAVA_HOME='${JAVA_HOME:-}', jar='$COBOL_EXTRACTOR_JAR')."
+  echo "  The 'parse' stage needs JDK 25 + the built JAR (cd tools/cobol-extractor && mvn -q package)."
+fi
+
 # --- 2. Choose free host ports (reuse-if-running, else next free) ------------
 # The containers' credentials are fixed by docker-compose.yml; we derive the
 # connection URLs from whatever host ports we land on, so no .env edits are ever
