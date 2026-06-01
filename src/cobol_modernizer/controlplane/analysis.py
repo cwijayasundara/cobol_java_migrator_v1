@@ -119,7 +119,7 @@ def seams_enrich(wid: str, session: Session = Depends(get_session),
     def _job() -> dict:
         neo = jobs.make_neo4j()
         try:
-            cands = rank_candidates(neo, repo=slug)
+            cands = _ranked(neo, slug)  # limit=25, matching the deterministic stage
             known = _known_refs(neo, slug)
             runner = SdkAgentRunner()
             narratives = asyncio.run(enrich_seams(
@@ -153,7 +153,7 @@ def plan_enrich(wid: str, session: Session = Depends(get_session),
     def _job() -> dict:
         neo = jobs.make_neo4j()
         try:
-            cands = rank_candidates(neo, repo=slug)
+            cands = _ranked(neo, slug)  # limit=25, matching the deterministic stage
             stories = stories_from_seam_set(cands, repo_id=slug)
             dag = derive_dependencies(stories, cands, repo_id=slug)
             waves = delivery_waves(dag) if is_acyclic(dag) else []
