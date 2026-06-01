@@ -89,7 +89,21 @@ def generate_brd_graph_sync(repo_id: str, *, client=None, repo_path=None,
             raise ValueError(f"Repo {repo_id} not registered or missing local_path")
         repo_path = repo["local_path"]
     model = model or resolve_model("brd")
-    max_retries = int(os.getenv("BRD_MAX_RETRIES", "1")) if max_retries is None else max_retries
+    # Probe repo size once — it drives BOTH the strategy and the subsystem count.
+    try:
+        n_prog = client.run(
+            "MATCH (p:CodeEntity {repo:$r}) WHERE p.kind='Program' "
+            "RETURN count(p) AS c", r=repo_id)[0]["c"]
+    except Exception:  # noqa: BLE001 — fall back to a sane default
+        n_prog = 0
+    # Small repos: a 3-program codebase has almost nothing to decompose, so the
+    # map→reduce fan-out (multiple agents + a merge agent) and the retry loop are
+    # pure overhead. Do ONE agent over the whole graph and a single attempt — far
+    # faster, just as good. Override with BRD_SINGLE_SHOT_MAX_PROGRAMS / explicit args.
+    small = 0 < n_prog <= int(os.getenv("BRD_SINGLE_SHOT_MAX_PROGRAMS", "4"))
+
+    if max_retries is None:
+        max_retries = 0 if small else int(os.getenv("BRD_MAX_RETRIES", "1"))
     # The per-subsystem turn budget is now ADAPTIVE (orchestrator scales it to each
     # cluster's size). These are the bounds: floor so even a tiny cluster can
     # explore + emit (the structured-output emission itself costs a turn under
@@ -98,17 +112,12 @@ def generate_brd_graph_sync(repo_id: str, *, client=None, repo_path=None,
     min_turns = int(os.getenv("BRD_AGENT_MIN_TURNS", "14"))
     # Bound parallel map agents (cost / rate-limit control on large codebases).
     map_concurrency = int(os.getenv("BRD_MAP_CONCURRENCY", "4"))
-    # Scale the subsystem count to the codebase (~one cluster per program, + a
-    # little), bounded by BRD_MAX_SUBSYSTEMS; overflow folds into a 'misc' cluster.
+    # Subsystem count: 1 (single-shot, no reduce) for small repos; otherwise scale
+    # to the codebase (~one cluster per program + a little), bounded by
+    # BRD_MAX_SUBSYSTEMS; overflow folds into a 'misc' cluster.
     if max_subsystems is None:
         cap = int(os.getenv("BRD_MAX_SUBSYSTEMS", "24"))
-        try:
-            n_prog = client.run(
-                "MATCH (p:CodeEntity {repo:$r}) WHERE p.kind='Program' "
-                "RETURN count(p) AS c", r=repo_id)[0]["c"]
-        except Exception:  # noqa: BLE001 — fall back to a sane default
-            n_prog = 0
-        max_subsystems = max(4, min(cap, n_prog + 2))
+        max_subsystems = 1 if small else max(4, min(cap, n_prog + 2))
 
     from cobol_modernizer.agent.deps import GraphDeps
     from cobol_modernizer.agent.harness import SdkAgentRunner
