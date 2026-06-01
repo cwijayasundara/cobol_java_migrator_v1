@@ -36,7 +36,13 @@ export function PortfolioDashboard() {
     const ws = await api
       .createWorkspace({ name: repo.name, repo_slug: repo.slug, created_by: ME })
       .catch(() => null);
-    if (ws) setRows((prev) => [...prev, { ws, budget: null }]);
+    // Backend is idempotent per repo_slug; guard the local list too so a card
+    // never appears twice for the same repo.
+    if (ws) {
+      setRows((prev) =>
+        prev.some((r) => r.ws.id === ws.id) ? prev : [...prev, { ws, budget: null }],
+      );
+    }
     setCreating(null);
   };
 

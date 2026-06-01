@@ -66,6 +66,14 @@ def get_workspace(wid: str, s: Session = Depends(get_session)) -> dict:
 
 @router.post("/workspaces")
 def create_workspace(body: CreateWorkspaceBody, s: Session = Depends(get_session)) -> dict:
+    # Idempotent per repo: one workspace per repo_slug. Re-creating an existing
+    # repo's workspace returns it (no duplicate, no re-seed) so the Portfolio picker
+    # can't spawn two cards for the same repo.
+    existing = s.execute(
+        select(Workspace).where(Workspace.repo_slug == body.repo_slug)
+    ).scalars().first()
+    if existing is not None:
+        return workspace_dto(existing)
     ws = Workspace(name=body.name, repo_slug=body.repo_slug, created_by=body.created_by)
     s.add(ws); s.flush()
     for st in JOURNEY_STAGES:
