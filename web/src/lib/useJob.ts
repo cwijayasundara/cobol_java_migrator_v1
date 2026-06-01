@@ -7,7 +7,10 @@ interface Job<T> { status: JobStatus; result: T | null; error: string | null }
 
 // Drives a long backend job: POST to start, then poll status until done/failed.
 // Used by the multi-minute LLM stages (Blueprint, Build) so the UI stays
-// responsive instead of hanging on one synchronous request.
+// responsive instead of hanging on one synchronous request. On mount it syncs
+// with the backend, so if a run is already in flight (e.g. after a reload or
+// navigating back) the action stays disabled and polling resumes — a fresh mount
+// can't fire a second run on top of one that's still going.
 export function useJob<T>(
   start: () => Promise<Job<T>>,
   poll: () => Promise<Job<T>>,
@@ -19,23 +22,31 @@ export function useJob<T>(
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const alive = useRef(true);
 
-  useEffect(() => () => {
-    alive.current = false;
-    if (timer.current) clearTimeout(timer.current);
-  }, []);
+  const apply = (job: Job<T>) => {
+    setStatus(job.status); setResult(job.result); setError(job.error);
+    // Only a 'running' job keeps polling; idle/done/failed are terminal here.
+    if (job.status === "running") timer.current = setTimeout(tick, intervalMs);
+  };
 
   const tick = async () => {
     try {
       const job = await poll();
-      if (!alive.current) return;
-      setStatus(job.status); setResult(job.result); setError(job.error);
-      if (job.status === "running" || job.status === "idle") {
-        timer.current = setTimeout(tick, intervalMs);  // keep polling
-      }
+      if (alive.current) apply(job);
     } catch (e) {
       if (alive.current) { setStatus("failed"); setError(e instanceof Error ? e.message : String(e)); }
     }
   };
+
+  // Sync with the backend once on mount (reflect an in-flight or finished run).
+  useEffect(() => {
+    alive.current = true;
+    void tick();
+    return () => {
+      alive.current = false;
+      if (timer.current) clearTimeout(timer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const run = async () => {
     setError(null); setResult(null); setStatus("running");
