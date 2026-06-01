@@ -1,60 +1,72 @@
 "use client";
 
-import { useState } from "react";
-import { api } from "@/lib/api";
-import type { Workspace } from "@/lib/types";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { Boxes, FileCode2, Library, ArrowRight, AlertTriangle } from "lucide-react";
+import { api, type RepoInfo } from "@/lib/api";
 
-// Phase 0: register a repository for ingest. Ingest/parse run server-side in
-// FastAPI; this form only posts the intake request.
-export function RepositoryIntake({ workspaceId }: { workspaceId: string }) {
-  const [name, setName] = useState("");
-  const [repoSlug, setRepoSlug] = useState("");
-  const [created, setCreated] = useState<Workspace | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+// Intake stage: a read-only summary of the COBOL repository this workspace
+// migrates (name/slug/path + program & copybook counts from GET /repos), with a
+// "Next: Parse" link to start the actual work. The repo was already selected in
+// the Portfolio, so this stage just confirms it before parsing.
+export function RepositoryIntake(
+  { workspaceId, repoSlug }: { workspaceId: string; repoSlug: string },
+) {
+  const [repo, setRepo] = useState<RepoInfo | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
-  const submit = async () => {
-    setSubmitting(true);
-    const ws = await api
-      .createWorkspace({ name, repo_slug: repoSlug, created_by: "cwijay@biz2bricks.ai" })
-      .catch(() => null);
-    setCreated(ws);
-    setSubmitting(false);
-  };
+  useEffect(() => {
+    api.listRepos()
+      .then((repos) => setRepo(repos.find((r) => r.slug === repoSlug) ?? null))
+      .catch(() => setRepo(null))
+      .finally(() => setLoaded(true));
+  }, [repoSlug]);
 
   return (
-    <div className="p-4 space-y-3 max-w-md">
-      <h3 className="text-sm font-medium text-zinc-300">Repository Intake</h3>
+    <div className="p-4 space-y-4 max-w-md">
+      <div className="flex items-center gap-2">
+        <Boxes className="w-4 h-4 text-indigo-400" />
+        <h3 className="text-sm font-medium text-zinc-300">Repository</h3>
+      </div>
       <p className="text-xs text-zinc-500">
-        Register a COBOL repository; parsing + graph ingestion run in the control plane.
+        The COBOL repository this workspace migrates. Parsing + graph ingestion run next.
       </p>
-      <label className="block text-xs text-zinc-400">
-        Name
-        <input
-          aria-label="name"
-          className="mt-1 w-full bg-zinc-800 rounded px-2 py-1 text-sm"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-      </label>
-      <label className="block text-xs text-zinc-400">
-        Repo slug
-        <input
-          aria-label="repo slug"
-          className="mt-1 w-full bg-zinc-800 rounded px-2 py-1 text-sm font-mono"
-          value={repoSlug}
-          onChange={(e) => setRepoSlug(e.target.value)}
-        />
-      </label>
-      <button
-        className="px-3 py-1.5 text-sm rounded bg-indigo-700 disabled:opacity-40"
-        disabled={submitting || name === "" || repoSlug === ""}
-        onClick={submit}
-      >
-        Register
-      </button>
-      {created && (
-        <div className="text-xs text-emerald-400">Registered {created.name} ({created.repo_slug})</div>
+
+      {!loaded && <p className="text-xs text-zinc-500">Loading…</p>}
+
+      {loaded && !repo && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-900 bg-amber-950/40 p-3 text-xs text-amber-300">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>
+            <span className="font-mono">{repoSlug}</span> isn’t a folder under{" "}
+            <span className="font-mono">source_code_to_analyse/</span>. Pick a discovered
+            repo from the Portfolio, or add the folder and reload.
+          </span>
+        </div>
       )}
+
+      {repo && (
+        <div className="rounded-md border border-zinc-800 p-3 space-y-1.5 text-sm">
+          <div className="text-zinc-200">{repo.name}</div>
+          <div className="text-xs text-zinc-500 font-mono">{repo.slug}</div>
+          <div className="text-xs text-zinc-600 font-mono break-all">{repo.path}</div>
+          <div className="flex gap-4 text-xs pt-1">
+            <span className="flex items-center gap-1 text-zinc-400">
+              <FileCode2 className="w-3.5 h-3.5" />{repo.programs} programs
+            </span>
+            <span className="flex items-center gap-1 text-zinc-400">
+              <Library className="w-3.5 h-3.5" />{repo.copybooks} copybooks
+            </span>
+          </div>
+        </div>
+      )}
+
+      <Link
+        href={`/workspaces/${workspaceId}/journey/parse`}
+        className="inline-flex items-center gap-2 px-4 py-2 text-sm rounded bg-indigo-700 hover:bg-indigo-600"
+      >
+        Next: Parse <ArrowRight className="w-4 h-4" />
+      </Link>
     </div>
   );
 }

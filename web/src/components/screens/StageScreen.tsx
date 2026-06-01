@@ -17,7 +17,7 @@ export function StageScreen(
 ) {
   switch (stageKey) {
     case "outcome": return <OutcomeOverview workspaceId={workspaceId} repoSlug={repoSlug} />;
-    case "intake": return <RepositoryIntake workspaceId={workspaceId} />;
+    case "intake": return <RepositoryIntake workspaceId={workspaceId} repoSlug={repoSlug} />;
     case "parse": return <ParseStudio workspaceId={workspaceId} />;
     case "graph": return <GraphExplorer workspaceId={workspaceId} repoSlug={repoSlug} />;
     case "explore": return <ExploreChat workspaceId={workspaceId} repoSlug={repoSlug} />;
