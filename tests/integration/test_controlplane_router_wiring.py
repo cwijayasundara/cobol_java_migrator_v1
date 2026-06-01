@@ -16,6 +16,7 @@ def test_router_exposes_all_cockpit_paths():
         "/api/workspaces/{wid}/blueprint",
         "/api/workspaces/{wid}/blueprint/html",
         "/api/workspaces/{wid}/build",
+        "/api/workspaces/{wid}/verify",
         "/api/workspaces/{wid}/ask",
         "/api/gates/{gate_id}/approval",
         "/api/repos",

@@ -91,6 +91,16 @@ export const handlers = [
     ],
     evidence_map: { "CBPOST1M.WRITE-ACCT": ["src/test/java/com/cobolmodernizer/carddemomini/PostingServiceTest.java"] },
   })),
+  http.post("/api/workspaces/:id/verify", () => HttpResponse.json({
+    repo_slug: "carddemo-mini", verdict: "fail", records_compared: 1, defect_count: 1,
+    open_questions: [],
+    defects: [{
+      source_seam: "CBPOST1M.1300-POST", seam_edge_kind: "MOVES_TO",
+      source_file: "cbl/CBPOST1M.cbl", source_line: null,
+      field: "BAL", record_key: "1", reason: "numeric: golden=1234.56 candidate=1234.50",
+      severity: "high", dialect_note: "cobc 3.2 (ibm-strict, ASCII)",
+    }],
+  })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),

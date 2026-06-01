@@ -115,6 +115,26 @@ export interface BuildResult {
   files: GeneratedFileInfo[]; evidence_map: Record<string, string[]>;
 }
 
+// Request + result for POST .../verify (deterministic COBOL↔Java equivalence).
+export interface VerifyRequest {
+  program: string; record: string; record_key: string;
+  golden_records: Record<string, unknown>[];
+  candidate_records: Record<string, unknown>[];
+  slice_name?: string; tolerance_yaml?: string; dialect?: string;
+  online_uses_recorded_fixtures?: boolean;
+}
+export interface EquivalenceDefect {
+  source_seam: string; seam_edge_kind: string | null;
+  source_file: string | null; source_line: number | null;
+  field: string; record_key: string | null; reason: string;
+  severity: string; dialect_note: string | null;
+}
+export interface VerifyResult {
+  repo_slug: string; verdict: "pass" | "fail";
+  records_compared: number; defect_count: number;
+  open_questions: string[]; defects: EquivalenceDefect[];
+}
+
 // Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
 export interface AskAnswer {
   answer: string;
@@ -180,6 +200,14 @@ export const api = {
   // ---- build: TDD codegen + Maven scaffold (slow; needs ANTHROPIC_API_KEY + BRD) ----
   runBuild: (workspaceId: string) =>
     json<BuildResult>(`/api/workspaces/${workspaceId}/build`, { method: "POST" }),
+
+  // ---- verify: deterministic equivalence diff on supplied golden + candidate ----
+  runVerify: (workspaceId: string, body: VerifyRequest) =>
+    json<VerifyResult>(`/api/workspaces/${workspaceId}/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 
   // ---- explore: "ask the codebase" (grounded in the Neo4j graph) ----
   askWorkspace: (workspaceId: string, question: string) =>
