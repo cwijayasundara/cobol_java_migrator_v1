@@ -16,10 +16,13 @@ from cobol_modernizer.controlplane.deps import get_session, get_neo4j
 
 
 class _FakeNeo4j:
-    def __init__(self):
+    def __init__(self, entities=40):
         self.merged = []
+        self.entities = entities
 
     def run(self, query, **params):
+        if "count(n) AS c" in query:
+            return [{"c": self.entities}]
         if "MERGE (r:Repository" in query:
             self.merged.append(params)
             return []
@@ -37,7 +40,7 @@ def _stub_brd(slug, *, client=None, repo_path=None, **kw):
         token_usage={"input": 1200, "output": 800, "cache_read": 0, "cache_creation": 0})
 
 
-def _setup(monkeypatch, tmp_path):
+def _setup(monkeypatch, tmp_path, entities=40):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     # source root with the repo dir present (run_blueprint 404s otherwise)
     (tmp_path / "carddemo-mini").mkdir()
@@ -61,7 +64,7 @@ def _setup(monkeypatch, tmp_path):
         finally:
             ss.close()
 
-    fake = _FakeNeo4j()
+    fake = _FakeNeo4j(entities=entities)
     app.dependency_overrides[get_session] = _ov
     app.dependency_overrides[get_neo4j] = lambda: fake
     return TestClient(app), eng, fake
@@ -97,5 +100,16 @@ def test_blueprint_503_without_api_key(monkeypatch, tmp_path):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     try:
         assert c.post("/api/workspaces/ws-1/blueprint").status_code == 503
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_blueprint_409_when_repo_not_parsed(monkeypatch, tmp_path):
+    # empty graph for the repo -> fast 409 instead of a doomed multi-minute LLM run
+    c, eng, fake = _setup(monkeypatch, tmp_path, entities=0)
+    try:
+        resp = c.post("/api/workspaces/ws-1/blueprint")
+        assert resp.status_code == 409
+        assert "Parse" in resp.json()["detail"]
     finally:
         app.dependency_overrides.clear()

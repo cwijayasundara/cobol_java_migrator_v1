@@ -14,7 +14,9 @@ RepoManager flow), which the cockpit's parse→graph step doesn't create, so we
 MERGE one (pointing at the on-disk source dir) before running."""
 from __future__ import annotations
 
+import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,8 +31,11 @@ from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.persistence.tables import JourneyStage, Workspace
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["controlplane-blueprint"])
 _NEO4J_ERRORS = (Neo4jError, DriverError)
+
+_COUNT_ENTITIES = "MATCH (n:CodeEntity {repo:$repo}) RETURN count(n) AS c"
 
 
 def _source_root() -> Path:
@@ -63,11 +68,20 @@ def run_blueprint(*, session: Session, neo4j, workspace: Workspace,
         raise HTTPException(
             status_code=404,
             detail=f"repo directory '{slug}' not found under {source_root}")
+    # Fast pre-check: a BRD run is a multi-minute LLM job, so fail fast (instead of
+    # launching the agent against an empty graph) if the repo hasn't been parsed.
+    entities = neo4j.run(_COUNT_ENTITIES, repo=slug)[0]["c"]
+    if not entities:
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{slug}' has no parsed graph — run the Parse stage first.")
     # Storage keys off a :Repository node — ensure one exists for this slug.
     neo4j.run("MERGE (r:Repository {slug: $slug}) "
               "SET r.local_path = $lp, r.name = coalesce(r.name, $slug)",
               slug=slug, lp=str(repo_dir.resolve()))
 
+    logger.info("blueprint: generating BRD for repo=%s (%d graph entities) — "
+                "this is a multi-minute LLM run", slug, entities)
     gen = generate or generate_brd_graph_sync
     result = gen(slug, client=neo4j, repo_path=str(repo_dir.resolve()))
 
@@ -95,15 +109,26 @@ def blueprint_workspace(wid: str, session: Session = Depends(get_session),
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(status_code=503,
                             detail="ANTHROPIC_API_KEY not set — Blueprint needs an LLM.")
+    t0 = time.monotonic()
     try:
-        return run_blueprint(session=session, neo4j=neo4j, workspace=ws,
-                             source_root=_source_root())
-    except HTTPException:
+        result = run_blueprint(session=session, neo4j=neo4j, workspace=ws,
+                               source_root=_source_root())
+        logger.info("blueprint: done repo=%s brd=%s v%s rating=%s in %.1fs",
+                    ws.repo_slug, result["brd_id"], result["version"],
+                    result["rating"], time.monotonic() - t0)
+        return result
+    except HTTPException as exc:
+        logger.warning("blueprint: repo=%s -> %s: %s",
+                       ws.repo_slug, exc.status_code, exc.detail)
         raise
     except _NEO4J_ERRORS as exc:
+        logger.exception("blueprint: graph store error for repo=%s", ws.repo_slug)
         raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        logger.exception("blueprint: FAILED for repo=%s after %.1fs",
+                         ws.repo_slug, time.monotonic() - t0)
+        raise HTTPException(status_code=500,
+                            detail=f"blueprint failed: {type(exc).__name__}: {exc}")
 
 
 @router.get("/workspaces/{wid}/blueprint/html", response_class=HTMLResponse)

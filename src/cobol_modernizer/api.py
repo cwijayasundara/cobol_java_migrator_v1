@@ -24,6 +24,15 @@ from cobol_modernizer.equivalence.tolerance import ToleranceRuleset
 
 app = FastAPI(title="cobol-modernizer control plane")
 
+# Observability: formatted app logs + a catch-all that logs tracebacks and returns
+# the error detail (so a 500 is never silent). See controlplane/logging_setup.py.
+from cobol_modernizer.controlplane.logging_setup import (  # noqa: E402
+    configure_logging, install_exception_logging,
+)
+
+configure_logging()
+install_exception_logging(app)
+
 # --- Phase 2: thin-slice + dark-launch endpoints -------------------------------
 slice_router = APIRouter(prefix="/api/slice", tags=["slice"])
 
