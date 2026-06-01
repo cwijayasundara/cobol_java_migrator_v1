@@ -20,7 +20,12 @@ Concretely (from a code map of `controlplane/analysis.py` + the underlying modul
   **always `None`** — only the LLM `judge_story` / `build_story_dag` path fills it.
   Stories are `"Migrate {program}"` + derived `depends_on`, with no description or
   acceptance criteria. `analysis.py` notes the LLM INVEST judge is "intentionally
-  skipped here."
+  skipped here." The seam→story **dependency map** (`depends_on` edges) and a linear
+  **`topo_order`** already exist deterministically (`planner/dag.py`), but: (a) the UI
+  barely renders them ("after S1, S2"), (b) there is no **delivery-wave** grouping
+  (which stories can ship in parallel), and (c) nothing explains *why* an edge exists
+  or how to *sequence the rollout*. Delivery planning is the most valuable plan
+  output and is currently absent.
 - **Design** (`assign_context` + `default_adrs_for_writer_slice` + `judge_design`):
   ADRs are **3 canned templates** with `{slice}`/`{resource}` interpolation;
   `components` are hardcoded `["{prog}Service", "{prog}Repository"]`; `evidence_map`
@@ -93,12 +98,26 @@ skip-malformed) following `agent/brd_judge.py`'s `_norm_*` / `_parse_*` helpers.
   batched call; same grounding contract ("cite only provided refs").
 
 ### `enrich_plan`
-- **Input:** the story DAG (stories with seam, depends_on, evidence_map).
-- **Output per story id:** `invest` (6 dims 1–5, with the existing groundedness floor:
-  ungrounded ⇒ valuable/estimable capped at 2), `description` (what/why),
-  `acceptance_criteria` (list), `groundedness_failures` (list).
-- Populates the existing-but-unused `Story.invest` (`planner/schema.py`) and adds new
-  narrative fields. Batched generalization of `planner/invest.py:judge_story`.
+Two complementary outputs — per-story and plan-level (delivery planning):
+- **Per-story** (`{story_id: ...}`): `invest` (6 dims 1–5, with the existing
+  groundedness floor: ungrounded ⇒ valuable/estimable capped at 2), `description`
+  (what/why), `acceptance_criteria` (list), `groundedness_failures` (list). Populates
+  the existing-but-unused `Story.invest` (`planner/schema.py`) and adds new narrative
+  fields. Batched generalization of `planner/invest.py:judge_story`.
+- **Plan-level delivery narrative** (the "plan the delivery accordingly" view):
+  `edge_rationale` (`{"S3->S1": "S1 establishes the ACCT-MASTER writer S3 reads"}`,
+  grounded in seam/data-ownership evidence) and `wave_narrative` (per delivery wave:
+  what it delivers, what it de-risks, reader/writer + blast-radius sequencing
+  guidance). Grounded only in the provided seam evidence.
+
+### Deterministic plan-stage additions (NOT LLM)
+The dependency map is graph math and stays deterministic for reliability. Add
+`delivery_waves(dag) -> list[list[str]]` to `planner/dag.py`: level-set grouping via
+the same Kahn's-algorithm pass as `topo_order` — each wave is the set of stories whose
+dependencies are all satisfied by prior waves, i.e. the stories that can be migrated in
+parallel. The `plan` stage returns `delivery_waves` alongside the existing `topo_order`
+and `stories`. The LLM `wave_narrative`/`edge_rationale` augments this; if enrichment is
+absent, the waves + DAG still render.
 
 ### `enrich_design`
 - **Input:** each `ServiceDesign` (slice_id, context, owned_resources), its template
@@ -120,7 +139,10 @@ skip-malformed) following `agent/brd_judge.py`'s `_norm_*` / `_parse_*` helpers.
 - `planner/schema.py`: `Story.invest` already exists; new narrative is returned in the
   enrichment payload (not by mutating the deterministic `Story`), keeping the
   deterministic schema stable. A small `StoryNarrative`/`SeamNarrative`/`DesignNarrative`
-  Pydantic model per stage defines the enrichment contract.
+  Pydantic model per stage defines the enrichment contract; the plan enrichment also
+  carries a `PlanDeliveryNarrative` (`edge_rationale`, `wave_narrative`). The
+  deterministic `delivery_waves` is part of the plan stage's normal (non-enrichment)
+  response.
 
 ## Reliability & error handling
 
@@ -145,7 +167,10 @@ the user decides when to spend the LLM call, consistent with this project's
 cost-consciousness). The button drives the enrich job via the backoff `useJob`, showing
 an "enriching…" state, then merges narrative by item id:
 - Seams: `rationale` line under each candidate.
-- Plan: INVEST bars + `description` + `acceptance_criteria` under each story.
+- Plan: render the DAG as **delivery waves** (parallel tracks grouped by `delivery_waves`,
+  with dependency edges shown), each wave annotated with its `wave_narrative` and edges
+  with `edge_rationale`; per-story INVEST bars + `description` + `acceptance_criteria`.
+  This replaces the flat "after S1, S2" list with an actual delivery plan.
 - Design: elaborated ADRs + `component_descriptions` / `api_surface` /
   `data_model_notes` under each slice.
 
@@ -157,6 +182,9 @@ Ungrounded fields get a subtle warning badge. `web/src/lib/api.ts` gains
 - **Unit** (per enricher, `FakeRunner`): happy path; malformed/capitalized/ungrounded
   model output → graceful degradation + correct grounding flags. Mirrors
   `tests/unit/test_brd_judge_robust_parsing.py`.
+- **Unit** (`delivery_waves`, no LLM): correct level-set grouping (independent stories
+  share a wave; dependents land in later waves); single-node and diamond DAGs; agrees
+  with `topo_order` (every story in exactly one wave, deps in strictly earlier waves).
 - **Endpoint** (`jobs.runner.inline=True` + stubbed enricher): 202 → poll → merged
   result; enricher failure → deterministic-only, job status `failed` surfaced. Mirrors
   the blueprint endpoint tests.
@@ -167,8 +195,10 @@ Ungrounded fields get a subtle warning badge. `web/src/lib/api.ts` gains
 
 - Persisting enrichment to a Neo4j/DB table (keep the in-memory job posture).
 - Size-tiering the enrichment model (noted follow-on).
-- Surfacing the dropped *deterministic* fields (Axis A) — this spec is Axis B only,
-  though the frontend work will naturally sit next to it.
+- Surfacing the dropped *deterministic* fields (Axis A) generally — this spec is Axis B
+  only. (Exception: the plan stage's DAG + `delivery_waves` visualization IS in scope —
+  it's the deterministic substrate the delivery narrative attaches to, and a new field
+  rather than a previously-dropped one.)
 - Graph-tool agentic enrichment (explicitly rejected in favor of prompt-grounded).
 
 ## Open questions
