@@ -1,13 +1,20 @@
-"""Deterministic analysis stages wired to the parsed Neo4j graph (no LLM):
+"""Analysis stages wired to the parsed Neo4j graph.
 
+Deterministic (no LLM) — run over the parsed graph, 409 if not yet parsed:
 - POST /api/workspaces/{id}/seams — ranked strangler-fig seam candidates
   (reader/writer split, blast radius, testability, data-ownership, risk), via the
   seam engine's pure-Cypher scorer.
 - POST /api/workspaces/{id}/plan — an acyclic story DAG derived from those seams
-  (deterministic dependency derivation + topological order; the LLM INVEST judge
-  from the full pipeline is intentionally skipped here).
+  (deterministic dependency derivation + topological order + delivery waves; the
+  LLM INVEST judge from the full pipeline is intentionally skipped here).
+- POST /api/workspaces/{id}/design — per-writer-slice bounded-context design + ADRs.
 
-Both run over the repo's parsed graph; they 409 if the repo hasn't been parsed."""
+LLM enrichment (opt-in, multi-minute background jobs; ANTHROPIC_API_KEY required) —
+these only ADD narrative on top of the deterministic output and degrade to
+deterministic-only on failure/timeout:
+- POST {seams,plan,design}/enrich — start a batched enrichment job (seam rationale /
+  per-story INVEST + delivery narrative / design ADR+component+API elaboration).
+- GET  {seams,plan,design}/enrichment — poll the job and fetch the narrative payload."""
 from __future__ import annotations
 
 import asyncio
