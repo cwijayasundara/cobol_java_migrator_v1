@@ -36,6 +36,42 @@ and preserve EVERY evidence pointer (do not drop entries from any evidence_map).
 Emit one BRDDraft JSON."""
 
 
+def _turns_for(n_members: int, *, lo: int, hi: int, base: int = 12, per: int = 6) -> int:
+    """Per-subsystem turn budget scaled to its size: a 3-entity cluster doesn't
+    need (or should burn) the budget a 300-entity one does. base + 1 turn per `per`
+    members, clamped to [lo, hi]. Keeps small clusters cheap and gives big ones
+    room without one global cap that's wrong for both."""
+    return max(lo, min(hi, base + n_members // per))
+
+
+def _select_subsystems(deps, raw_subs: list[dict], *, max_subsystems: int) -> list[dict]:
+    """Pick the clusters worth a map agent and FOLD the rest into one 'misc' bucket
+    (never drop entities). Substantive = contains a Program or has >=2 members;
+    program-bearing and larger clusters rank first. Scales with the codebase: more
+    programs -> more subsystems, but trivial singletons (lone FILLER/*-STATUS data
+    items the clusterer split out) don't each consume an agent + its turn budget."""
+    programs = {e["qualified_name"] for e in
+                ops.find_entities(deps, kind="Program", limit=10_000).get("entities", [])}
+
+    def _has_program(s: dict) -> bool:
+        return any(m in programs for m in s.get("members", []))
+
+    ranked = sorted(raw_subs,
+                    key=lambda s: (_has_program(s), len(s.get("members", []))),
+                    reverse=True)
+    keep: list[dict] = []
+    folded: list[str] = []
+    for s in ranked:
+        substantive = len(s.get("members", [])) >= 2 or _has_program(s)
+        if substantive and len(keep) < max_subsystems:
+            keep.append(s)
+        else:
+            folded.extend(s.get("members", []))
+    if folded:
+        keep.append({"name": "misc", "members": folded})
+    return keep or [{"name": deps.repo_id, "members": []}]
+
+
 def _map_prompt(subsystem_name: str, members: list[str]) -> str:
     preview = members[:60]
     return (f"Subsystem: {subsystem_name}\n"
@@ -99,31 +135,35 @@ async def _map_one(deps, runner, server, allowed_tools, model, max_turns, sub,
 
 async def agenerate_brd_draft(deps: GraphDeps, *, runner: AgentRunner, model: str,
                               max_turns: int, max_subsystems: int,
+                              min_turns: int | None = None,
+                              map_concurrency: int = 4,
                               advisor=None, advisor_max_uses: int = 3,
                               prompt_override: str | None = None
                               ) -> tuple[BRDDraft, Strategy]:
     server = build_graph_server(deps, advisor=advisor, advisor_max_uses=advisor_max_uses)
     map_tools = list(GRAPH_TOOL_NAMES) + ([ADVISOR_TOOL_NAME] if advisor is not None else [])
-    subs = ops.list_subsystems(deps, max_clusters=max_subsystems)["subsystems"]
-    # Drop trivial single-entity "subsystems" (e.g. a lone FILLER / *-STATUS data
-    # item that the clusterer split out): spending a map agent — and its whole turn
-    # budget — to write a BRD about one field just produces noise and burns the
-    # cap. Keep meaningful clusters (>=2 members); fall back to all if that empties.
-    meaningful = [s for s in subs if len(s.get("members", [])) >= 2]
-    subs = meaningful or subs
-    if not subs:
-        subs = [{"name": deps.repo_id, "members": []}]
+    lo = min_turns if min_turns is not None else min(max_turns, 14)
 
-    drafts = await asyncio.gather(*[
-        _map_one(deps, runner, server, map_tools, model, max_turns, s, prompt_override)
-        for s in subs
-    ])
+    raw_subs = ops.list_subsystems(deps, max_clusters=max_subsystems)["subsystems"]
+    subs = _select_subsystems(deps, raw_subs, max_subsystems=max_subsystems)
+
+    # Bound how many map agents run at once: a large codebase can yield many
+    # subsystems, and firing them all in parallel spikes cost + hits rate limits.
+    sem = asyncio.Semaphore(max(1, map_concurrency))
+
+    async def _run(sub: dict) -> BRDDraft:
+        async with sem:
+            turns = _turns_for(len(sub.get("members", [])), lo=lo, hi=max_turns)
+            return await _map_one(deps, runner, server, map_tools, model, turns,
+                                  sub, prompt_override)
+
+    drafts = await asyncio.gather(*[_run(s) for s in subs])
 
     if len(drafts) == 1:
         return drafts[0], Strategy.single_shot
 
     try:
-        merged = await runner.run_structured(
+        merged = await runner.run_structured(  # reduce gets the full budget
             system=REDUCE_SYSTEM, prompt=_reduce_prompt(list(drafts)),
             server=server, allowed_tools=GRAPH_TOOL_NAMES, model=model,
             max_turns=max_turns, schema=brd_draft_schema(),

@@ -37,7 +37,8 @@ def _draft_to_brd(draft, repo_id: str, model: str, strategy: Strategy) -> BRD:
 
 async def agenerate_brd_graph(deps: GraphDeps, *, runner: AgentRunner, model: str,
                               max_retries: int, max_turns: int,
-                              max_subsystems: int,
+                              max_subsystems: int, min_turns: int | None = None,
+                              map_concurrency: int = 4,
                               advisor=None, advisor_max_uses: int = 3) -> GraphBRDResult:
     from cobol_modernizer.agent.brd_judge import ajudge
     from cobol_modernizer.agent.brd_orchestrator import agenerate_brd_draft
@@ -48,7 +49,8 @@ async def agenerate_brd_graph(deps: GraphDeps, *, runner: AgentRunner, model: st
     for attempt_no in range(1, max_retries + 2):
         draft, strategy = await agenerate_brd_draft(
             deps, runner=runner, model=model, max_turns=max_turns,
-            max_subsystems=max_subsystems, advisor=advisor,
+            max_subsystems=max_subsystems, min_turns=min_turns,
+            map_concurrency=map_concurrency, advisor=advisor,
             advisor_max_uses=advisor_max_uses)
         brd = _draft_to_brd(draft, deps.repo_id, model, strategy)
         report = await ajudge(brd, deps, runner=runner, model=model)
@@ -88,12 +90,25 @@ def generate_brd_graph_sync(repo_id: str, *, client=None, repo_path=None,
         repo_path = repo["local_path"]
     model = model or resolve_model("brd")
     max_retries = int(os.getenv("BRD_MAX_RETRIES", "1")) if max_retries is None else max_retries
-    # 30 (was 15): under claude-agent-sdk 0.2.87 a map/reduce agent spends turns on
-    # graph-tool calls AND the final structured-output emission costs a turn, so 15
-    # often hit "Reached maximum number of turns" mid-exploration and the agent
-    # returned nothing (-> stub "failed to generate" sections). 30 gives headroom.
-    max_turns = int(os.getenv("BRD_AGENT_MAX_TURNS", "30")) if max_turns is None else max_turns
-    max_subsystems = int(os.getenv("BRD_MAX_SUBSYSTEMS", "12")) if max_subsystems is None else max_subsystems
+    # The per-subsystem turn budget is now ADAPTIVE (orchestrator scales it to each
+    # cluster's size). These are the bounds: floor so even a tiny cluster can
+    # explore + emit (the structured-output emission itself costs a turn under
+    # claude-agent-sdk 0.2.87), cap so a huge cluster can't run away on cost.
+    max_turns = int(os.getenv("BRD_AGENT_MAX_TURNS", "45")) if max_turns is None else max_turns
+    min_turns = int(os.getenv("BRD_AGENT_MIN_TURNS", "14"))
+    # Bound parallel map agents (cost / rate-limit control on large codebases).
+    map_concurrency = int(os.getenv("BRD_MAP_CONCURRENCY", "4"))
+    # Scale the subsystem count to the codebase (~one cluster per program, + a
+    # little), bounded by BRD_MAX_SUBSYSTEMS; overflow folds into a 'misc' cluster.
+    if max_subsystems is None:
+        cap = int(os.getenv("BRD_MAX_SUBSYSTEMS", "24"))
+        try:
+            n_prog = client.run(
+                "MATCH (p:CodeEntity {repo:$r}) WHERE p.kind='Program' "
+                "RETURN count(p) AS c", r=repo_id)[0]["c"]
+        except Exception:  # noqa: BLE001 — fall back to a sane default
+            n_prog = 0
+        max_subsystems = max(4, min(cap, n_prog + 2))
 
     from cobol_modernizer.agent.deps import GraphDeps
     from cobol_modernizer.agent.harness import SdkAgentRunner
@@ -106,7 +121,8 @@ def generate_brd_graph_sync(repo_id: str, *, client=None, repo_path=None,
         advisor = AnthropicAdvisor()
     result = asyncio.run(agenerate_brd_graph(
         deps, runner=runner, model=model, max_retries=max_retries,
-        max_turns=max_turns, max_subsystems=max_subsystems,
+        max_turns=max_turns, max_subsystems=max_subsystems, min_turns=min_turns,
+        map_concurrency=map_concurrency,
         advisor=advisor, advisor_max_uses=advisor_max_uses))
 
     html = render_html(result.brd)
