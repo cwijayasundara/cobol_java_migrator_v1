@@ -19,6 +19,13 @@ export const handlers = [
     repo_slug: "carddemo-mini", programs: 3, copybooks: 1, parse_errors: 0,
     entities: 38, relationships: 30,
   })),
+  http.post("/api/workspaces/:id/ask", async ({ request }) => {
+    const body = (await request.json()) as { question: string };
+    return HttpResponse.json({
+      answer: `Re: ${body.question} — CBPOST1M writes ACCTFILE.`,
+      grounded: true, model: "claude-haiku-4-5-20251001", context_entities: 38,
+    });
+  }),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),
