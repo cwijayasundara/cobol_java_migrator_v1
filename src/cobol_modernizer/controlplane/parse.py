@@ -7,8 +7,10 @@ returns counts. No LLM here — this is the deterministic analysis core wired to
 button so the cockpit's Parse and Graph stages actually do something."""
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +25,7 @@ from cobol_modernizer.controlplane.repos import discover_copybook_dirs
 from cobol_modernizer.ingestion import ingest_parse_results
 from cobol_modernizer.persistence.tables import JourneyStage, Workspace
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["controlplane-parse"])
 
 
@@ -45,20 +48,29 @@ def run_parse(*, session: Session, neo4j, workspace: Workspace, source_root: Pat
     """Parse + ingest the workspace's repo. parser_factory defaults to CobolParser
     (resolved at call time so tests can monkeypatch parse.CobolParser)."""
     factory = parser_factory or CobolParser
-    repo_dir = source_root / workspace.repo_slug
+    slug = workspace.repo_slug
+    repo_dir = source_root / slug
     if not repo_dir.is_dir():
         raise HTTPException(
             status_code=404,
-            detail=f"repo directory '{workspace.repo_slug}' not found under {source_root}")
+            detail=f"repo directory '{slug}' not found under {source_root}")
+    copybook_dirs = tuple(discover_copybook_dirs(repo_dir))
+    logger.info("parse: starting repo=%s dir=%s copybook_dirs=%d (JAVA_HOME=%s, jar=%s)",
+                slug, repo_dir, len(copybook_dirs),
+                "set" if os.environ.get("JAVA_HOME") else "unset",
+                "set" if os.environ.get("COBOL_EXTRACTOR_JAR") else "unset")
+    t0 = time.monotonic()
     parser = factory(
         repo_dir,
         jar_path=os.environ.get("COBOL_EXTRACTOR_JAR"),
-        copybook_dirs=tuple(discover_copybook_dirs(repo_dir)),
+        copybook_dirs=copybook_dirs,
         source_format=os.environ.get("COBOL_MOD_COBOL_FORMAT", "FIXED"),
         java_home=os.environ.get("JAVA_HOME"),
     )
     results = parser.parse_repo()
     if not results:
+        logger.warning("parse: repo=%s — extractor produced NO results "
+                       "(check COBOL_EXTRACTOR_JAR + a real JDK in JAVA_HOME)", slug)
         raise HTTPException(
             status_code=503,
             detail="extractor produced no results — check COBOL_EXTRACTOR_JAR and a "
@@ -67,7 +79,14 @@ def run_parse(*, session: Session, neo4j, workspace: Workspace, source_root: Pat
     programs = sum(1 for r in results for e in r.entities if e.kind.value == "Program")
     copybooks = sum(1 for r in results for e in r.entities if e.kind.value == "Copybook")
     parse_errors = sum(1 for r in results if not r.entities and not r.relationships)
-    counts = ingest_parse_results(neo4j, results, repo=workspace.repo_slug)
+    logger.info("parse: repo=%s extracted %d file(s) -> %d programs, %d copybooks, "
+                "%d parse-error(s) in %.1fs; ingesting into Neo4j…",
+                slug, len(results), programs, copybooks, parse_errors,
+                time.monotonic() - t0)
+    counts = ingest_parse_results(neo4j, results, repo=slug)
+    logger.info("parse: repo=%s INGESTED into Neo4j -> %d entities, %d relationships "
+                "(graph tagged repo=%s); parse+graph stages passed",
+                slug, counts["entities"], counts["relationships"], slug)
 
     _mark_passed(session, workspace.id, ["parse", "graph"])
     session.flush()
@@ -87,10 +106,13 @@ def parse_workspace(wid: str, session: Session = Depends(get_session),
     try:
         return run_parse(session=session, neo4j=neo4j, workspace=ws,
                          source_root=_source_root())
-    except HTTPException:
+    except HTTPException as exc:
+        logger.warning("parse: repo=%s -> %s: %s", ws.repo_slug, exc.status_code, exc.detail)
         raise
     except (Neo4jError, DriverError) as exc:
+        logger.exception("parse: graph store error for repo=%s", ws.repo_slug)
         raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
     except subprocess.CalledProcessError as exc:
+        logger.exception("parse: COBOL extractor failed for repo=%s", ws.repo_slug)
         raise HTTPException(status_code=503,
                             detail=f"COBOL extractor failed (exit {exc.returncode})")
