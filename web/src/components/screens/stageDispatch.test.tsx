@@ -7,8 +7,8 @@ describe("stage dispatcher", () => {
     render(<StageScreen workspaceId="ws-1" stageKey="blueprint" repoSlug="aws-mf-carddemo" />);
     expect(await screen.findByText(/Functional Blueprint/)).toBeInTheDocument();
   });
-  it("renders Seam Studio for the seams stage", () => {
+  it("renders the Seams screen for the seams stage", () => {
     render(<StageScreen workspaceId="ws-1" stageKey="seams" repoSlug="aws-mf-carddemo" />);
-    expect(screen.getByText("Seam Studio")).toBeInTheDocument();
+    expect(screen.getByText("Seam candidates")).toBeInTheDocument();
   });
 });

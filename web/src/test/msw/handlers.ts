@@ -30,6 +30,26 @@ export const handlers = [
       grounded: true, model: "claude-haiku-4-5-20251001", context_entities: 38,
     });
   }),
+  http.post("/api/workspaces/:id/seams", () => HttpResponse.json({
+    repo_slug: "carddemo-mini", count: 2,
+    candidates: [
+      { program: "CBVALDTM", seam_type: "db_reader",
+        score: { weighted: 0.53, normalized: {} }, signals: {},
+        transition: { name: "cdc_read_replica", summary: "" },
+        identity_drift_writer: false, evidence_map: {} },
+      { program: "CBPOST1M", seam_type: "db_writer",
+        score: { weighted: 0.27, normalized: {} }, signals: {},
+        transition: { name: "extract_product_lines", summary: "" },
+        identity_drift_writer: true, evidence_map: {} },
+    ],
+  })),
+  http.post("/api/workspaces/:id/plan", () => HttpResponse.json({
+    repo_slug: "carddemo-mini", acyclic: true, topo_order: ["S1", "S2"],
+    stories: [
+      { id: "S1", title: "Migrate CBVALDTM", seam: "CBVALDTM", depends_on: [], evidence_map: {} },
+      { id: "S2", title: "Migrate CBPOST1M", seam: "CBPOST1M", depends_on: ["S1"], evidence_map: {} },
+    ],
+  })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),
