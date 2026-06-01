@@ -113,6 +113,23 @@ export const handlers = [
       severity: "high", dialect_note: "cobc 3.2 (ibm-strict, ASCII)",
     }],
   })),
+  http.post("/api/workspaces/:id/seams/enrich", () => HttpResponse.json(
+    { status: "running", result: null, error: null },
+    { status: 202 })),
+  http.get("/api/workspaces/:id/seams/enrichment", () => HttpResponse.json({
+    status: "done", error: null,
+    result: {
+      repo_slug: "carddemo-mini",
+      narratives: {
+        CBVALDTM: {
+          program: "CBVALDTM",
+          rationale: "reader, low risk",
+          cited_refs: ["CBVALDTM.100-INIT"],
+          grounded: true,
+        },
+      },
+    },
+  })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),
