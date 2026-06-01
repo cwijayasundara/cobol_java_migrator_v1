@@ -100,6 +100,13 @@ export interface DesignResult {
   repo_slug: string; count: number; designs: ServiceDesignResult[];
 }
 
+// Result of POST .../blueprint (grounded LLM Business Requirements Document).
+export interface BlueprintResult {
+  repo_slug: string; brd_id: string; version: number;
+  rating: string; weighted_score: number; attempts: number;
+  model: string; strategy: string; token_usage: Record<string, number>;
+}
+
 // Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
 export interface AskAnswer {
   answer: string;
@@ -155,6 +162,12 @@ export const api = {
     json<PlanResult>(`/api/workspaces/${workspaceId}/plan`, { method: "POST" }),
   runDesign: (workspaceId: string) =>
     json<DesignResult>(`/api/workspaces/${workspaceId}/design`, { method: "POST" }),
+
+  // ---- blueprint: grounded LLM BRD (slow; needs ANTHROPIC_API_KEY) ----
+  runBlueprint: (workspaceId: string) =>
+    json<BlueprintResult>(`/api/workspaces/${workspaceId}/blueprint`, { method: "POST" }),
+  blueprintHtmlUrl: (workspaceId: string) =>
+    `/api/workspaces/${workspaceId}/blueprint/html`,
 
   // ---- explore: "ask the codebase" (grounded in the Neo4j graph) ----
   askWorkspace: (workspaceId: string, question: string) =>

@@ -59,7 +59,10 @@ async def ajudge(brd: BRD, deps: GraphDeps, *, runner: AgentRunner,
     raw: dict[str, Any] = await runner.run_structured(
         system=JUDGE_SYSTEM,
         prompt="## BRD under review\n```json\n" + brd.model_dump_json() + "\n```",
-        server=None, allowed_tools=[], model=model, max_turns=1, schema=_JUDGE_SCHEMA,
+        # max_turns must be >=2: under claude-agent-sdk 0.2.87 emitting the
+        # structured-output result consumes a turn, so max_turns=1 always errors
+        # with "Reached maximum number of turns (1)" and the judge gets {} (-> low).
+        server=None, allowed_tools=[], model=model, max_turns=2, schema=_JUDGE_SCHEMA,
     )
 
     dims: dict[Dimension, DimensionScore] = {}
