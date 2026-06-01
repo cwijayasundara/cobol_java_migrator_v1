@@ -10,16 +10,23 @@
 Both run over the repo's parsed graph; they 409 if the repo hasn't been parsed."""
 from __future__ import annotations
 
+import asyncio
+import os
+
 from fastapi import APIRouter, Depends, HTTPException
 from neo4j.exceptions import DriverError, Neo4jError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from cobol_modernizer.agent.harness import SdkAgentRunner
+from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.design.adr import default_adrs_for_writer_slice
 from cobol_modernizer.design.context_map import assign_context
 from cobol_modernizer.design.judge import judge_design
 from cobol_modernizer.design.schema import BoundedContext, ServiceDesign
+from cobol_modernizer.enrichment.config import enrich_model, enrich_timeout_s
+from cobol_modernizer.enrichment.seams import enrich_seams
 from cobol_modernizer.persistence.tables import JourneyStage, Workspace
 from cobol_modernizer.planner.dag import delivery_waves, is_acyclic, topo_order
 from cobol_modernizer.planner.dependency import derive_dependencies, stories_from_seam_set
@@ -58,6 +65,26 @@ def _ranked(neo4j, repo: str, limit: int = 25) -> list[dict]:
         raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
 
 
+_KNOWN_REFS_Q = "MATCH (n:CodeEntity {repo:$repo}) RETURN n.qualified_name AS q"
+
+
+def _known_refs(neo4j, slug: str) -> set[str]:
+    return {r["q"] for r in neo4j.run(_KNOWN_REFS_Q, repo=slug)}
+
+
+def _job_view(job: dict | None) -> dict:
+    if job is None:
+        return {"status": "idle", "result": None, "error": None}
+    return {"status": job["status"], "result": job.get("result"),
+            "error": job.get("error")}
+
+
+def _require_llm() -> None:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(status_code=503,
+                            detail="ANTHROPIC_API_KEY not set — enrichment needs an LLM.")
+
+
 @router.post("/workspaces/{wid}/seams")
 def run_seams(wid: str, session: Session = Depends(get_session),
               neo4j=Depends(get_neo4j)) -> dict:
@@ -69,6 +96,42 @@ def run_seams(wid: str, session: Session = Depends(get_session),
     _mark_passed(session, wid, "seams")
     session.flush()
     return {"repo_slug": ws.repo_slug, "count": len(cands), "candidates": cands}
+
+
+@router.post("/workspaces/{wid}/seams/enrich", status_code=202)
+def seams_enrich(wid: str, session: Session = Depends(get_session),
+                 neo4j=Depends(get_neo4j)) -> dict:
+    """Kick off the (multi-minute) batched seam-rationale enrichment as a background
+    job. Deterministic seams are unaffected; this only ADDS narrative."""
+    ws = _workspace(session, wid)
+    _require_llm()
+    slug = ws.repo_slug
+
+    def _job() -> dict:
+        neo = jobs.make_neo4j()
+        try:
+            cands = rank_candidates(neo, repo=slug)
+            known = _known_refs(neo, slug)
+            runner = SdkAgentRunner()
+            narratives = asyncio.run(enrich_seams(
+                cands, known, runner=runner, model=enrich_model("seams"),
+                timeout_s=enrich_timeout_s("seams")))
+            return {"repo_slug": slug, "narratives": narratives,
+                    "token_usage": dict(runner.token_usage)}
+        finally:
+            try:
+                neo.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _job_view(jobs.runner.start("seams-enrich", wid, _job))
+
+
+@router.get("/workspaces/{wid}/seams/enrichment")
+def seams_enrichment(wid: str, session: Session = Depends(get_session),
+                     neo4j=Depends(get_neo4j)) -> dict:
+    _workspace(session, wid)
+    return _job_view(jobs.runner.get("seams-enrich", wid))
 
 
 @router.post("/workspaces/{wid}/plan")
