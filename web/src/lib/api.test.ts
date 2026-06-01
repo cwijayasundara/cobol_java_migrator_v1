@@ -1,6 +1,17 @@
 import { describe, it, expect } from "vitest";
 import { api } from "@/lib/api";
 
+describe("enrichment api", () => {
+  it("exposes enrich + enrichment helpers per stage", () => {
+    expect(typeof api.startSeamsEnrich).toBe("function");
+    expect(typeof api.getSeamsEnrichment).toBe("function");
+    expect(typeof api.startPlanEnrich).toBe("function");
+    expect(typeof api.getPlanEnrichment).toBe("function");
+    expect(typeof api.startDesignEnrich).toBe("function");
+    expect(typeof api.getDesignEnrichment).toBe("function");
+  });
+});
+
 describe("control-plane api client", () => {
   it("lists workspaces from the control plane", async () => {
     const ws = await api.listWorkspaces();

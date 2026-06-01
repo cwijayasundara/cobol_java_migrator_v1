@@ -80,6 +80,7 @@ export interface PlanStory {
 }
 export interface PlanResult {
   repo_slug: string; acyclic: boolean; topo_order: string[]; stories: PlanStory[];
+  delivery_waves?: string[][];
 }
 
 // Service design for one writer slice (POST .../design).
@@ -117,6 +118,17 @@ export interface BuildJob {
   status: JobStatus; result: BuildResult | null; error: string | null;
   started_at: number | null; finished_at: number | null;
 }
+
+// Enrichment result types (LLM-grounded narrative layers over seams/plan/design).
+export interface SeamNarrative { program: string; rationale: string; cited_refs: string[]; grounded: boolean }
+export interface StoryNarrative { story_id: string; invest: Record<string, number>; description: string; acceptance_criteria: string[]; groundedness_failures: string[] }
+export interface PlanDelivery { edge_rationale: Record<string, string>; wave_narrative: { wave: number; narrative: string }[] }
+export interface DesignADRNarrative { number: number; title: string; context: string; decision: string; consequences: string; alternatives: string }
+export interface DesignNarrative { slice_id: string; adrs: DesignADRNarrative[]; component_descriptions: string[]; api_surface: string; data_model_notes: string; cited_refs: string[] }
+export interface SeamsEnrichResult { repo_slug: string; narratives: Record<string, SeamNarrative>; token_usage?: Record<string, number> }
+export interface PlanEnrichResult { repo_slug: string; stories: Record<string, StoryNarrative>; delivery: PlanDelivery; token_usage?: Record<string, number> }
+export interface DesignEnrichResult { repo_slug: string; narratives: Record<string, DesignNarrative>; token_usage?: Record<string, number> }
+export interface EnrichJob<T> { status: JobStatus; result: T | null; error: string | null }
 
 // Result of POST .../build (TDD codegen + Maven scaffold for a writer slice).
 export interface GeneratedFileInfo { path: string; kind: "test" | "main"; evidence: string[] }
@@ -215,6 +227,20 @@ export const api = {
     json<BuildJob>(`/api/workspaces/${workspaceId}/build`, { method: "POST" }),
   getBuildStatus: (workspaceId: string) =>
     json<BuildJob>(`/api/workspaces/${workspaceId}/build`),
+
+  // ---- enrichment: LLM narrative layer over seams/plan/design (POST → 202; GET → poll) ----
+  startSeamsEnrich: (id: string) =>
+    json<EnrichJob<SeamsEnrichResult>>(`/api/workspaces/${id}/seams/enrich`, { method: "POST" }),
+  getSeamsEnrichment: (id: string) =>
+    json<EnrichJob<SeamsEnrichResult>>(`/api/workspaces/${id}/seams/enrichment`),
+  startPlanEnrich: (id: string) =>
+    json<EnrichJob<PlanEnrichResult>>(`/api/workspaces/${id}/plan/enrich`, { method: "POST" }),
+  getPlanEnrichment: (id: string) =>
+    json<EnrichJob<PlanEnrichResult>>(`/api/workspaces/${id}/plan/enrichment`),
+  startDesignEnrich: (id: string) =>
+    json<EnrichJob<DesignEnrichResult>>(`/api/workspaces/${id}/design/enrich`, { method: "POST" }),
+  getDesignEnrichment: (id: string) =>
+    json<EnrichJob<DesignEnrichResult>>(`/api/workspaces/${id}/design/enrichment`),
 
   // ---- verify: deterministic equivalence diff on supplied golden + candidate ----
   runVerify: (workspaceId: string, body: VerifyRequest) =>

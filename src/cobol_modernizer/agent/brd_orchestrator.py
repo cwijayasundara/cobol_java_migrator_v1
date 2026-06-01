@@ -120,6 +120,7 @@ async def _map_one(deps, runner, server, allowed_tools, model, max_turns, sub,
             prompt=prompt_override or _map_prompt(sub["name"], sub["members"]),
             server=server, allowed_tools=allowed_tools, model=model,
             max_turns=max_turns, schema=brd_draft_schema(),
+            label=f"brd-map:{sub['name']}",
         )
         return BRDDraft.model_validate(raw)
     except Exception as exc:  # degrade, don't kill the whole BRD
@@ -160,6 +161,7 @@ async def agenerate_brd_draft(deps: GraphDeps, *, runner: AgentRunner, model: st
             system=REDUCE_SYSTEM, prompt=_reduce_prompt(list(drafts)),
             server=server, allowed_tools=GRAPH_TOOL_NAMES, model=model,
             max_turns=max_turns, schema=brd_draft_schema(),
+            label="brd-reduce",
         )
         return BRDDraft.model_validate(merged), Strategy.map_reduce
     except Exception:

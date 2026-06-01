@@ -34,6 +34,51 @@ _JUDGE_SCHEMA = {
 }
 
 
+_VALID_SEVERITIES = {"low", "medium", "high"}
+
+
+def _norm_dimension(value: Any) -> Dimension | None:
+    """Map a model-emitted dimension string to the Dimension enum, tolerant of
+    case/whitespace drift (e.g. 'Completeness' -> completeness). Weaker/cheaper
+    judge models don't always echo the exact lowercase enum value, and an
+    unhandled mismatch used to crash the whole BRD run."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return Dimension(value.strip().lower())
+    except ValueError:
+        return None
+
+
+def _coerce_score(value: Any) -> int | None:
+    """Parse a 1-5 score, clamping out-of-range and rejecting non-numeric input,
+    so a malformed score can't raise out of the parsing loop."""
+    try:
+        return max(1, min(5, int(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_feedback(raw_feedback: Any) -> list[FeedbackItem]:
+    """Build FeedbackItems defensively: normalize the dimension/severity casing
+    and SKIP any item that's still malformed rather than letting one bad entry
+    (a too-common failure mode for cheaper judge models) abort the run."""
+    out: list[FeedbackItem] = []
+    for f in raw_feedback or []:
+        if not isinstance(f, dict):
+            continue
+        dim = _norm_dimension(f.get("dimension"))
+        severity = str(f.get("severity", "")).strip().lower()
+        if dim is None or severity not in _VALID_SEVERITIES:
+            continue
+        suggestion, target = f.get("suggestion"), f.get("target_section")
+        if not isinstance(suggestion, str) or not isinstance(target, str):
+            continue
+        out.append(FeedbackItem(dimension=dim, severity=severity,
+                                suggestion=suggestion, target_section=target))
+    return out
+
+
 def _groundedness_failures(brd: BRD, known: set[str]) -> list[str]:
     failures: list[str] = []
     for refs in brd.evidence_map.values():
@@ -63,16 +108,18 @@ async def ajudge(brd: BRD, deps: GraphDeps, *, runner: AgentRunner,
         # structured-output result consumes a turn, so max_turns=1 always errors
         # with "Reached maximum number of turns (1)" and the judge gets {} (-> low).
         server=None, allowed_tools=[], model=model, max_turns=2, schema=_JUDGE_SCHEMA,
+        label="brd-judge",
     )
 
     dims: dict[Dimension, DimensionScore] = {}
     for item in raw.get("items", []):
-        try:
-            dim = Dimension(item["dimension"])
-        except ValueError:
+        if not isinstance(item, dict):
             continue
-        dims[dim] = DimensionScore(score=int(item["score"]),
-                                   rationale=item.get("rationale", ""))
+        dim = _norm_dimension(item.get("dimension"))
+        score = _coerce_score(item.get("score"))
+        if dim is None or score is None:     # drop unparseable rows, don't crash
+            continue
+        dims[dim] = DimensionScore(score=score, rationale=item.get("rationale", ""))
     for d in Dimension:                      # default any missing dimension to 3
         dims.setdefault(d, DimensionScore(score=3, rationale="(not scored)"))
 
@@ -83,8 +130,7 @@ async def ajudge(brd: BRD, deps: GraphDeps, *, runner: AgentRunner,
             rationale=prev.rationale + f" [forced to 2 by hallucinated refs: {failures}]")
 
     weighted = sum(dims[d].score * w for d, w in WEIGHTS.items())
-    feedback = [FeedbackItem(**f) for f in raw.get("feedback", [])
-                if {"dimension", "severity", "suggestion", "target_section"} <= set(f)]
+    feedback = _parse_feedback(raw.get("feedback"))
     return JudgeReport(dimensions=dims, weighted_score=weighted,
                        rating=_rate(weighted, dims), feedback=feedback,
                        groundedness_failures=failures)
