@@ -1,8 +1,16 @@
 import { http, HttpResponse } from "msw";
-import { WORKSPACE, STAGES, GATES, BUDGET, RUN, ARTIFACT } from "@/test/fixtures/controlplane";
+import { WORKSPACE, STAGES, GATES, BUDGET, RUN, ARTIFACT, REPOS } from "@/test/fixtures/controlplane";
 
 export const handlers = [
+  http.get("/api/repos", () => HttpResponse.json(REPOS)),
   http.get("/api/workspaces", () => HttpResponse.json([WORKSPACE])),
+  http.post("/api/workspaces", async ({ request }) => {
+    const body = (await request.json()) as { name: string; repo_slug: string; created_by: string };
+    return HttpResponse.json({
+      id: `ws-${body.repo_slug}`, graph_snapshot: null,
+      created_at: "2026-05-30T00:00:00Z", status: "active", ...body,
+    });
+  }),
   http.get("/api/workspaces/:id", () => HttpResponse.json(WORKSPACE)),
   http.get("/api/workspaces/:id/stages", () => HttpResponse.json(STAGES)),
   http.get("/api/workspaces/:id/gates", () => HttpResponse.json(GATES)),

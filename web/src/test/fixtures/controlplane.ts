@@ -1,6 +1,14 @@
 import type {
   Workspace, JourneyStage, Gate, Budget, AgentRun, Artifact,
 } from "@/lib/types";
+import type { RepoInfo } from "@/lib/api";
+
+export const REPOS: RepoInfo[] = [
+  { slug: "aws-mf-mod-carddemo", name: "aws-mf-mod-carddemo",
+    path: "source_code_to_analyse/aws-mf-mod-carddemo", programs: 44, copybooks: 62 },
+  { slug: "carddemo-mini", name: "carddemo-mini",
+    path: "source_code_to_analyse/carddemo-mini", programs: 3, copybooks: 1 },
+];
 
 export const WORKSPACE: Workspace = {
   id: "ws-1", name: "CardDemo", repo_slug: "aws-mf-carddemo",

@@ -9,6 +9,7 @@ def test_router_exposes_all_cockpit_paths():
         "/api/workspaces/{wid}/artifacts", "/api/workspaces/{wid}/artifacts/{aid}",
         "/api/workspaces/{wid}/runs", "/api/workspaces/{wid}/budget",
         "/api/gates/{gate_id}/approval",
+        "/api/repos",
         "/api/graph", "/api/entity/{qname}",
         "/api/workspaces/{wid}/runs/{run_id}/events",
     }
