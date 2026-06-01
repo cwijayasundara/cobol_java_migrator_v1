@@ -107,6 +107,14 @@ export interface BlueprintResult {
   model: string; strategy: string; token_usage: Record<string, number>;
 }
 
+// Result of POST .../build (TDD codegen + Maven scaffold for a writer slice).
+export interface GeneratedFileInfo { path: string; kind: "test" | "main"; evidence: string[] }
+export interface BuildResult {
+  repo_slug: string; slice_id: string; module: string; base_package: string;
+  scaffold_path: string; file_count: number; tests: number; mains: number;
+  files: GeneratedFileInfo[]; evidence_map: Record<string, string[]>;
+}
+
 // Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
 export interface AskAnswer {
   answer: string;
@@ -168,6 +176,10 @@ export const api = {
     json<BlueprintResult>(`/api/workspaces/${workspaceId}/blueprint`, { method: "POST" }),
   blueprintHtmlUrl: (workspaceId: string) =>
     `/api/workspaces/${workspaceId}/blueprint/html`,
+
+  // ---- build: TDD codegen + Maven scaffold (slow; needs ANTHROPIC_API_KEY + BRD) ----
+  runBuild: (workspaceId: string) =>
+    json<BuildResult>(`/api/workspaces/${workspaceId}/build`, { method: "POST" }),
 
   // ---- explore: "ask the codebase" (grounded in the Neo4j graph) ----
   askWorkspace: (workspaceId: string, question: string) =>

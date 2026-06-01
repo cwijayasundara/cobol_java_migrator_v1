@@ -79,6 +79,18 @@ export const handlers = [
   http.get("/api/workspaces/:id/blueprint/html", () =>
     new HttpResponse("<html><body>BRD v1</body></html>",
       { headers: { "Content-Type": "text/html" } })),
+  http.post("/api/workspaces/:id/build", () => HttpResponse.json({
+    repo_slug: "carddemo-mini", slice_id: "posting",
+    module: "carddemo-mini-posting", base_package: "com.cobolmodernizer.carddemomini",
+    scaffold_path: "codegen_output/carddemo-mini-posting", file_count: 2, tests: 1, mains: 1,
+    files: [
+      { path: "src/test/java/com/cobolmodernizer/carddemomini/PostingServiceTest.java",
+        kind: "test", evidence: ["CBPOST1M.WRITE-ACCT"] },
+      { path: "src/main/java/com/cobolmodernizer/carddemomini/PostingService.java",
+        kind: "main", evidence: ["CBPOST1M.UPDATE-ACCT"] },
+    ],
+    evidence_map: { "CBPOST1M.WRITE-ACCT": ["src/test/java/com/cobolmodernizer/carddemomini/PostingServiceTest.java"] },
+  })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),

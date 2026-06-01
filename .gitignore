@@ -20,3 +20,4 @@ benchmark_out/
 source_code_to_analyse/
 brd_output/
 .claude/scheduled_tasks.lock
+codegen_output/
