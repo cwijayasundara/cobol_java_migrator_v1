@@ -66,3 +66,23 @@ def test_seams_enrich_runs_and_polls(monkeypatch):
         assert body["result"]["narratives"]["P1"]["rationale"] == "why"
     finally:
         app.dependency_overrides.clear()
+
+
+def test_plan_enrich_runs_and_polls(monkeypatch):
+    c = _setup(monkeypatch)
+    try:
+        monkeypatch.setattr(analysis, "rank_candidates",
+                            lambda *a, **k: [{"program": "P1", "reads": [], "writes": [],
+                                              "score": {"weighted": 1.0}}])
+
+        async def _fake(stories, waves, known, **kw):
+            return {"stories": {"S1": {"story_id": "S1", "description": "d"}},
+                    "delivery": {"edge_rationale": {}, "wave_narrative": []}}
+        monkeypatch.setattr(analysis, "enrich_plan", _fake)
+
+        assert c.post("/api/workspaces/ws-1/plan/enrich").status_code == 202
+        body = c.get("/api/workspaces/ws-1/plan/enrichment").json()
+        assert body["status"] == "done"
+        assert body["result"]["stories"]["S1"]["description"] == "d"
+    finally:
+        app.dependency_overrides.clear()

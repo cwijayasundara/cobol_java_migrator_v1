@@ -26,6 +26,7 @@ from cobol_modernizer.design.context_map import assign_context
 from cobol_modernizer.design.judge import judge_design
 from cobol_modernizer.design.schema import BoundedContext, ServiceDesign
 from cobol_modernizer.enrichment.config import enrich_model, enrich_timeout_s
+from cobol_modernizer.enrichment.plan import enrich_plan
 from cobol_modernizer.enrichment.seams import enrich_seams
 from cobol_modernizer.persistence.tables import JourneyStage, Workspace
 from cobol_modernizer.planner.dag import delivery_waves, is_acyclic, topo_order
@@ -132,6 +133,44 @@ def seams_enrichment(wid: str, session: Session = Depends(get_session),
                      neo4j=Depends(get_neo4j)) -> dict:
     _workspace(session, wid)
     return _job_view(jobs.runner.get("seams-enrich", wid))
+
+
+@router.post("/workspaces/{wid}/plan/enrich", status_code=202)
+def plan_enrich(wid: str, session: Session = Depends(get_session),
+                neo4j=Depends(get_neo4j)) -> dict:
+    ws = _workspace(session, wid)
+    _require_llm()
+    slug = ws.repo_slug
+
+    def _job() -> dict:
+        neo = jobs.make_neo4j()
+        try:
+            cands = rank_candidates(neo, repo=slug)
+            stories = stories_from_seam_set(cands, repo_id=slug)
+            dag = derive_dependencies(stories, cands, repo_id=slug)
+            waves = delivery_waves(dag) if is_acyclic(dag) else []
+            known = _known_refs(neo, slug)
+            runner = SdkAgentRunner()
+            result = asyncio.run(enrich_plan(
+                [s.model_dump(mode="json") for s in dag.stories], waves, known,
+                runner=runner, model=enrich_model("plan"),
+                timeout_s=enrich_timeout_s("plan")))
+            return {"repo_slug": slug, **result,
+                    "token_usage": dict(runner.token_usage)}
+        finally:
+            try:
+                neo.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _job_view(jobs.runner.start("plan-enrich", wid, _job))
+
+
+@router.get("/workspaces/{wid}/plan/enrichment")
+def plan_enrichment(wid: str, session: Session = Depends(get_session),
+                    neo4j=Depends(get_neo4j)) -> dict:
+    _workspace(session, wid)
+    return _job_view(jobs.runner.get("plan-enrich", wid))
 
 
 @router.post("/workspaces/{wid}/plan")
