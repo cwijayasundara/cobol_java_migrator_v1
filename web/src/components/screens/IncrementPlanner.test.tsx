@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/msw/server";
 import { IncrementPlanner } from "@/components/screens/IncrementPlanner";
+import { STAGES } from "@/test/fixtures/controlplane";
 
 describe("IncrementPlanner", () => {
   it("builds an acyclic plan and lists stories in topo order with deps", async () => {
@@ -23,12 +24,29 @@ describe("IncrementPlanner", () => {
     expect(await screen.findByText(/wave 1/i)).toBeInTheDocument();
   });
 
-  it("merges wave narrative and per-story enrichment after clicking Add detail", async () => {
+  it("merges wave narrative and per-story enrichment after clicking Improve", async () => {
     render(<IncrementPlanner workspaceId="ws-1" />);
     await userEvent.click(screen.getByRole("button", { name: /build plan/i }));
     expect(await screen.findByText(/wave 1/i)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /add detail/i }));
+    await userEvent.click(screen.getByRole("button", { name: /improve/i }));
     expect(await screen.findByText(/ship readers first/i)).toBeInTheDocument();
+  });
+
+  it("auto-loads the plan and shows Improve button when plan stage is already passed", async () => {
+    // Override /stages so the plan stage is already passed
+    server.use(http.get("/api/workspaces/:id/stages", () =>
+      HttpResponse.json(
+        STAGES.map((s) => s.stage_key === "plan" ? { ...s, status: "passed" } : s),
+      ),
+    ));
+
+    render(<IncrementPlanner workspaceId="ws-1" />);
+
+    // Plan content should appear without any button click
+    expect(await screen.findByText("CBVALDTM")).toBeInTheDocument();
+
+    // The Improve button must be visible
+    expect(screen.getByRole("button", { name: /improve/i })).toBeInTheDocument();
   });
 
   it("falls back to the flat numbered render when delivery_waves is absent", async () => {
