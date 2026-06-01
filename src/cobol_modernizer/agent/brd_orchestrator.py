@@ -10,6 +10,7 @@ from cobol_modernizer.agent.deps import GraphDeps
 from cobol_modernizer.agent.graph_tools import GRAPH_TOOL_NAMES, build_graph_server
 from cobol_modernizer.agent.harness import AgentRunner
 from cobol_modernizer.brd.schema import BRDSection, Strategy
+from cobol_modernizer.cost.scaling import turns_for as _turns_for  # shared adaptive budget
 
 ELEVEN_SECTIONS = [
     "Executive Summary", "Business Objectives", "Scope", "Stakeholders",
@@ -34,14 +35,6 @@ repository. Produce exactly these 11 sections in order: {", ".join(ELEVEN_SECTIO
 Deduplicate requirements, reconcile contradictions, keep the most specific wording,
 and preserve EVERY evidence pointer (do not drop entries from any evidence_map).
 Emit one BRDDraft JSON."""
-
-
-def _turns_for(n_members: int, *, lo: int, hi: int, base: int = 12, per: int = 6) -> int:
-    """Per-subsystem turn budget scaled to its size: a 3-entity cluster doesn't
-    need (or should burn) the budget a 300-entity one does. base + 1 turn per `per`
-    members, clamped to [lo, hi]. Keeps small clusters cheap and gives big ones
-    room without one global cap that's wrong for both."""
-    return max(lo, min(hi, base + n_members // per))
 
 
 def _select_subsystems(deps, raw_subs: list[dict], *, max_subsystems: int) -> list[dict]:

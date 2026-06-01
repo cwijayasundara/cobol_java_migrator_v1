@@ -77,17 +77,31 @@ def _generate_slice_graph(slug: str, *, neo4j, repo_path: str,
     from cobol_modernizer.agent.graph_tools import GRAPH_TOOL_NAMES, build_graph_server
     from cobol_modernizer.agent.harness import SdkAgentRunner
     from cobol_modernizer.codegen.generator import generate_slice
-    from cobol_modernizer.cost.tiering import resolve_model
+    from cobol_modernizer.cost.scaling import model_for_size, turns_for
 
     deps = GraphDeps(client=neo4j, repo_id=slug, repo_path=Path(repo_path))
     server = build_graph_server(deps)
     runner = SdkAgentRunner()
-    # The codegen agent explores the graph AND emits a multi-file project (tests
-    # first, then code); 12 turns wasn't enough — it hit the cap and returned
-    # nothing. 40 default, env-overridable for larger slices.
-    max_turns = int(os.environ.get("CODEGEN_AGENT_MAX_TURNS", "40"))
+
+    # Scale the run to the slice's code size (programs + paragraphs): small slices
+    # get a small turn budget on the cheap+fast Haiku tier; larger ones get more
+    # turns on Sonnet. An explicit CODEGEN_MODEL / global override always wins.
+    try:
+        size = neo4j.run(
+            "MATCH (n:CodeEntity {repo:$r}) WHERE n.kind IN ['Program','Paragraph'] "
+            "RETURN count(n) AS c", r=slug)[0]["c"]
+    except Exception:  # noqa: BLE001
+        size = 0
+    lo = int(os.environ.get("CODEGEN_AGENT_MIN_TURNS", "16"))
+    hi = int(os.environ.get("CODEGEN_AGENT_MAX_TURNS", "40"))
+    max_turns = turns_for(size, lo=lo, hi=hi)
+    pinned = os.environ.get("CODEGEN_MODEL") or os.environ.get("COBOL_MOD_LLM_MODEL")
+    model = model_for_size(size, threshold=int(os.environ.get("CODEGEN_SMALL_UNITS", "25")),
+                           small_tier="haiku", large_tier="sonnet", pinned=pinned)
+    logger.info("build: codegen for repo=%s — %d code units -> %d turns, model=%s",
+                slug, size, max_turns, model)
     return asyncio.run(generate_slice(
-        runner=runner, server=server, model=resolve_model("codegen"),
+        runner=runner, server=server, model=model,
         brd_json=brd_json, golden_summary="(no recorded golden master yet)",
         allowed_tools=GRAPH_TOOL_NAMES, max_turns=max_turns))
 
