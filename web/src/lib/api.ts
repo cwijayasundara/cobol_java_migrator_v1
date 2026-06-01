@@ -82,6 +82,24 @@ export interface PlanResult {
   repo_slug: string; acyclic: boolean; topo_order: string[]; stories: PlanStory[];
 }
 
+// Service design for one writer slice (POST .../design).
+export interface ServiceDesignDoc {
+  slice_id: string; context: string; owned_resources: string[];
+  transition_pattern: string; components: string[];
+  evidence_map: Record<string, string[]>;
+}
+export interface DesignAdr {
+  number: number; title: string; status: string; context: string;
+  decision: string; consequences: string; evidence_refs: string[];
+}
+export interface ServiceDesignResult {
+  design: ServiceDesignDoc; adrs: DesignAdr[]; rating: string;
+  data_ownership_ok: boolean; groundedness_failures: string[]; rationale: string;
+}
+export interface DesignResult {
+  repo_slug: string; count: number; designs: ServiceDesignResult[];
+}
+
 // Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
 export interface AskAnswer {
   answer: string;
@@ -135,6 +153,8 @@ export const api = {
     json<SeamsResult>(`/api/workspaces/${workspaceId}/seams`, { method: "POST" }),
   runPlan: (workspaceId: string) =>
     json<PlanResult>(`/api/workspaces/${workspaceId}/plan`, { method: "POST" }),
+  runDesign: (workspaceId: string) =>
+    json<DesignResult>(`/api/workspaces/${workspaceId}/design`, { method: "POST" }),
 
   // ---- explore: "ask the codebase" (grounded in the Neo4j graph) ----
   askWorkspace: (workspaceId: string, question: string) =>

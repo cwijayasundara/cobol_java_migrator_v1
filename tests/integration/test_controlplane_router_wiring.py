@@ -12,6 +12,7 @@ def test_router_exposes_all_cockpit_paths():
         "/api/workspaces/{wid}/parse",
         "/api/workspaces/{wid}/seams",
         "/api/workspaces/{wid}/plan",
+        "/api/workspaces/{wid}/design",
         "/api/workspaces/{wid}/ask",
         "/api/gates/{gate_id}/approval",
         "/api/repos",
