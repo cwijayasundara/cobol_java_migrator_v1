@@ -205,9 +205,17 @@ tests/unit/, tests/integration/
 
 ## Troubleshooting
 
-- **Port already in use** on `docker compose up` → set `POSTGRES_PORT` /
-  `NEO4J_BOLT_PORT` / `NEO4J_HTTP_PORT` (and the matching `POSTGRES_URL` / `NEO4J_URI`)
-  in `.env`, then re-run `./scripts/start-backend.sh`.
+- **Port already in use** → `start-backend.sh` auto-picks a free port; if a clash still
+  surfaces, re-run it (or pin ports via the `*_PORT` vars in `.env`). `BACKEND_PORT`
+  (8000) is not auto-changed — free 8000 or change the cockpit proxy too.
+- **`/api/graph` → 503 / Neo4j `Unauthorized` / `AuthenticationRateLimit`** → the app's
+  `NEO4J_PASSWORD` doesn't match the running Neo4j. Neo4j only applies `NEO4J_AUTH` when
+  its **data volume is empty**, so changing the password later doesn't re-apply. Fix:
+  set `NEO4J_PASSWORD` in `.env` to the volume's password, **or** reset the volume with
+  `docker compose down -v` (the graph is re-ingestable), then re-run
+  `./scripts/start-backend.sh`. After fixing, restart the backend so it picks up the
+  new password (env is read at process start). The endpoints now 503 (not 500) on a
+  graph outage, so the cockpit stays usable — the graph panel is just empty.
 - **Cockpit shows no data** → the backend isn't running or the seed didn't run; re-run
   `./scripts/start-backend.sh` (the seed is idempotent).
 - **Stray `"<name> 2.ext"` files** appear from cloud-sync/Finder conflict copies and are
