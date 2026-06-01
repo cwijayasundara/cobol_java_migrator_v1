@@ -1,6 +1,7 @@
 "use client";
 
 import { RepositoryIntake } from "@/components/screens/RepositoryIntake";
+import { ParseStudio } from "@/components/screens/ParseStudio";
 import { GraphExplorer } from "@/components/screens/GraphExplorer";
 import { BlueprintStudio } from "@/components/screens/BlueprintStudio";
 import { SeamStudio } from "@/components/screens/SeamStudio";
@@ -14,6 +15,7 @@ export function StageScreen(
 ) {
   switch (stageKey) {
     case "intake": return <RepositoryIntake workspaceId={workspaceId} />;
+    case "parse": return <ParseStudio workspaceId={workspaceId} />;
     case "graph":
     case "explore": return <GraphExplorer workspaceId={workspaceId} repoSlug={repoSlug} />;
     case "blueprint": return <BlueprintStudio workspaceId={workspaceId} />;

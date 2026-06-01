@@ -15,6 +15,10 @@ export const handlers = [
   http.get("/api/workspaces/:id/stages", () => HttpResponse.json(STAGES)),
   http.get("/api/workspaces/:id/gates", () => HttpResponse.json(GATES)),
   http.get("/api/workspaces/:id/budget", () => HttpResponse.json(BUDGET)),
+  http.post("/api/workspaces/:id/parse", () => HttpResponse.json({
+    repo_slug: "carddemo-mini", programs: 3, copybooks: 1, parse_errors: 0,
+    entities: 38, relationships: 30,
+  })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),

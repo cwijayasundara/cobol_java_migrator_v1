@@ -91,6 +91,11 @@ The cockpit talks to these (all under `/api`), backed by Postgres + read-only Ne
   `COBOL_SOURCE_ROOT`.
 - `GET/POST /workspaces`, `GET /workspaces/{id}`
 - `GET /workspaces/{id}/{stages,gates,artifacts,runs,budget}`, `GET .../artifacts/{aid}`
+- `POST /workspaces/{id}/parse` — the **Parse** stage's "Run parse" button: runs the
+  ProLeap extractor on the workspace's repo and ingests the code graph into Neo4j
+  (deterministic, no LLM), marking the parse+graph stages passed. Needs `JAVA_HOME` +
+  the extractor JAR (start-backend.sh auto-sets both). The later LLM stages
+  (blueprint/seams/design/build) still need an Anthropic key + the agent harness.
 - `POST /workspaces/{id}/runs` · `POST /gates/{id}/approval` (attributed RBAC gate)
 - `GET /graph?repo=&limit=` · `GET /entity/{qname}` (read-only Neo4j)
 - `GET /workspaces/{id}/runs/{runId}/events` (SSE: replay persisted events + live stream)

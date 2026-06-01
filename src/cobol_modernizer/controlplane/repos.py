@@ -50,6 +50,19 @@ def scan_repos(root: Path) -> list[dict]:
     return repos
 
 
+def discover_copybook_dirs(repo_dir: Path) -> list[str]:
+    """Relative dirs under `repo_dir` that contain *.cpy copybooks — passed to the
+    extractor so COPY members resolve (e.g. 'cpy' for carddemo-mini, 'app/cpy' +
+    'app/cpy-bms' for the full CardDemo). Hidden dirs are pruned."""
+    dirs: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(repo_dir):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if any(f.lower().endswith(".cpy") for f in filenames):
+            rel = os.path.relpath(dirpath, repo_dir)
+            dirs.add("." if rel == "." else rel)
+    return sorted(dirs)
+
+
 @router.get("/repos")
 def list_repos() -> list[dict]:
     """Local COBOL repos available to start a workspace for (read-only scan)."""

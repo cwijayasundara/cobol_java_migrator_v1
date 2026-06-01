@@ -43,6 +43,16 @@ export interface RepoInfo {
   copybooks: number;
 }
 
+// Result of POST /api/workspaces/{id}/parse (extractor + Neo4j ingest).
+export interface ParseResultSummary {
+  repo_slug: string;
+  programs: number;
+  copybooks: number;
+  parse_errors: number;
+  entities: number;
+  relationships: number;
+}
+
 export const api = {
   // ---- local repos available to start a workspace for ----
   listRepos: () => json<RepoInfo[]>("/api/repos"),
@@ -78,6 +88,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+
+  // ---- parse: run the COBOL extractor on the workspace repo + ingest to Neo4j ----
+  parseWorkspace: (workspaceId: string) =>
+    json<ParseResultSummary>(`/api/workspaces/${workspaceId}/parse`, { method: "POST" }),
 
   // ---- budget (cost cap surfaced in the UI, not just spend) ----
   getWorkspaceBudget: (workspaceId: string) =>
