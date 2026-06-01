@@ -1,14 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { forceCollide } from "d3-force-3d";
+import { forceCollide, forceX, forceY } from "d3-force-3d";
 import { api, GraphData, GraphNode } from "@/lib/api";
 import { kindColor, relColor } from "@/lib/colors";
 import { Maximize2, Minimize2, Plus, Minus, Locate } from "lucide-react";
 
 // Base radius for a node, in graph units. Mirrors the library's own sizing
 // (sqrt(val) * nodeRelSize) so collision spacing and custom drawing agree.
-const NODE_REL_SIZE = 8;
+// Bumped from 8 -> 12 so nodes read clearly without zooming in.
+const NODE_REL_SIZE = 12;
 const nodeRadius = (node: any) => Math.sqrt(node.val ?? 1) * NODE_REL_SIZE;
 
 interface Props {
@@ -21,6 +22,7 @@ interface Props {
 export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<any>(null);
+  const didFitRef = useRef(false);
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(true);
   const [ForceGraph, setForceGraph] = useState<any>(null);
@@ -37,6 +39,7 @@ export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
 
   useEffect(() => {
     setLoading(true);
+    didFitRef.current = false; // re-fit once when a new repo's graph settles
     api
       .getGraph(repo, 300)
       .then(setGraphData)
@@ -60,29 +63,37 @@ export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
 
   // Tune the d3 force simulation so clusters sit closer together and don't
   // scatter into tiny far-flung islands: shorter links, capped repulsion range,
-  // and a stronger pull toward the centre.
+  // and — crucially — an x/y pull toward the origin. forceCenter only recenters
+  // the mean each tick; it applies NO attraction, so disconnected nodes (no link
+  // pulling them in) drift to the edges. forceX/forceY gathers every node,
+  // orphans included, into one compact cluster.
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg || !graphData || graphData.nodes.length === 0) return;
 
     const charge = fg.d3Force?.("charge");
     if (charge) {
-      charge.strength(-45);    // weaker repulsion -> nodes pack tighter
-      charge.distanceMax(220); // ignore long-range repulsion between separate clusters
+      charge.strength(-30);    // weaker repulsion -> nodes pack tighter
+      charge.distanceMax(160); // ignore long-range repulsion between separate clusters
     }
     const link = fg.d3Force?.("link");
     if (link) {
-      link.distance(24);  // shorter edges keep connected nodes near each other
-      link.strength(0.7); // pull connected nodes together a little harder
+      link.distance(18);  // shorter edges keep connected nodes near each other
+      link.strength(0.8); // pull connected nodes together a little harder
     }
     const center = fg.d3Force?.("center");
     if (center?.strength) center.strength(1); // keep the whole graph gathered
+
+    // Attractive pull toward the origin — this is what reels in disconnected
+    // nodes so the graph stays compact instead of flinging orphans outward.
+    fg.d3Force?.("x", forceX(0).strength(0.18));
+    fg.d3Force?.("y", forceY(0).strength(0.18));
 
     // Collision force: no two nodes may overlap. Dense clusters spread apart
     // just enough that every node stays individually visible.
     fg.d3Force?.(
       "collide",
-      forceCollide((node: any) => nodeRadius(node) + 4)
+      forceCollide((node: any) => nodeRadius(node) + 3)
         .strength(0.9)
         .iterations(2)
     );
@@ -249,12 +260,12 @@ export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
               // COBOL kinds
               Program: 8,
               Section: 5,
-              Paragraph: 3,
-              Copybook: 3,
+              Paragraph: 4,
+              Copybook: 4,
               // v2 (Phase 1)
-              DataItem: 2,
+              DataItem: 3,
             };
-            return sizes[node.kind] ?? 2;
+            return sizes[node.kind] ?? 3;
           }}
           // Draw nodes ourselves (replace mode) so each gets a crisp dark
           // outline and stays distinct instead of blurring into its neighbors.
@@ -343,6 +354,13 @@ export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
           cooldownTicks={120}
           d3VelocityDecay={0.25}
           warmupTicks={20}
+          onEngineStop={() => {
+            // Frame the (now-compact) graph once it settles, so it fills the
+            // canvas instead of sitting as a small clump in the middle.
+            if (didFitRef.current) return;
+            didFitRef.current = true;
+            graphRef.current?.zoomToFit(500, 50);
+          }}
           enableNodeDrag
           enableZoomInteraction
           enablePanInteraction
