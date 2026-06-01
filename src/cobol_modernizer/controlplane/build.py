@@ -14,8 +14,10 @@ QualityReport parser (codegen.quality_gate) is the seam for a later CI step."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,6 +32,7 @@ from cobol_modernizer.codegen.schema import GeneratedProject
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.persistence.tables import JourneyStage, Workspace
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["controlplane-build"])
 _NEO4J_ERRORS = (Neo4jError, DriverError)
 _PKG_SAFE = re.compile(r"[^a-z0-9]+")
@@ -104,6 +107,8 @@ def run_build(*, session: Session, neo4j, workspace: Workspace,
     brd_json = json.dumps({"repo_id": slug, "version": latest.get("version"),
                            "rating": latest.get("rating")})
 
+    logger.info("build: generating slice for repo=%s (BRD v%s) — multi-minute LLM run",
+                slug, latest.get("version"))
     gen = generate or _generate_slice_graph
     project = gen(slug, neo4j=neo4j, repo_path=str(repo_dir.resolve()),
                   brd_json=brd_json)
@@ -139,13 +144,27 @@ def build_workspace(wid: str, session: Session = Depends(get_session),
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(status_code=503,
                             detail="ANTHROPIC_API_KEY not set — Build needs an LLM.")
+    t0 = time.monotonic()
     try:
-        return run_build(session=session, neo4j=neo4j, workspace=ws,
-                         source_root=_source_root(), output_root=_output_root())
-    except HTTPException:
+        result = run_build(session=session, neo4j=neo4j, workspace=ws,
+                           source_root=_source_root(), output_root=_output_root())
+        logger.info("build: done repo=%s module=%s files=%d in %.1fs",
+                    ws.repo_slug, result["module"], result["file_count"],
+                    time.monotonic() - t0)
+        return result
+    except HTTPException as exc:
+        logger.warning("build: repo=%s -> %s: %s",
+                       ws.repo_slug, exc.status_code, exc.detail)
         raise
     except _NEO4J_ERRORS as exc:
+        logger.exception("build: graph store error for repo=%s", ws.repo_slug)
         raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
     except ValueError as exc:
         # e.g. codegen produced no failing test (TDD violated)
+        logger.warning("build: TDD/codegen rejected for repo=%s: %s", ws.repo_slug, exc)
         raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.exception("build: FAILED for repo=%s after %.1fs",
+                         ws.repo_slug, time.monotonic() - t0)
+        raise HTTPException(status_code=500,
+                            detail=f"build failed: {type(exc).__name__}: {exc}")
