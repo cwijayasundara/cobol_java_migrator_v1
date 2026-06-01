@@ -70,26 +70,38 @@ export const handlers = [
         rationale: "Sole writer of owned resources; all refs grounded." },
     ],
   })),
-  http.post("/api/workspaces/:id/blueprint", () => HttpResponse.json({
-    repo_slug: "carddemo-mini", brd_id: "brd-1", version: 1,
-    rating: "high", weighted_score: 4.4, attempts: 1,
-    model: "claude-sonnet-4-6", strategy: "map_reduce",
-    token_usage: { input: 1200, output: 800, cache_read: 0, cache_creation: 0 },
+  http.post("/api/workspaces/:id/blueprint", () => HttpResponse.json(
+    { status: "running", result: null, error: null, started_at: 1, finished_at: null },
+    { status: 202 })),
+  http.get("/api/workspaces/:id/blueprint", () => HttpResponse.json({
+    status: "done", error: null, started_at: 1, finished_at: 2,
+    result: {
+      repo_slug: "carddemo-mini", brd_id: "brd-1", version: 1,
+      rating: "high", weighted_score: 4.4, attempts: 1,
+      model: "claude-sonnet-4-6", strategy: "map_reduce",
+      token_usage: { input: 1200, output: 800, cache_read: 0, cache_creation: 0 },
+    },
   })),
   http.get("/api/workspaces/:id/blueprint/html", () =>
     new HttpResponse("<html><body>BRD v1</body></html>",
       { headers: { "Content-Type": "text/html" } })),
-  http.post("/api/workspaces/:id/build", () => HttpResponse.json({
-    repo_slug: "carddemo-mini", slice_id: "posting",
-    module: "carddemo-mini-posting", base_package: "com.cobolmodernizer.carddemomini",
-    scaffold_path: "codegen_output/carddemo-mini-posting", file_count: 2, tests: 1, mains: 1,
-    files: [
-      { path: "src/test/java/com/cobolmodernizer/carddemomini/PostingServiceTest.java",
-        kind: "test", evidence: ["CBPOST1M.WRITE-ACCT"] },
-      { path: "src/main/java/com/cobolmodernizer/carddemomini/PostingService.java",
-        kind: "main", evidence: ["CBPOST1M.UPDATE-ACCT"] },
-    ],
-    evidence_map: { "CBPOST1M.WRITE-ACCT": ["src/test/java/com/cobolmodernizer/carddemomini/PostingServiceTest.java"] },
+  http.post("/api/workspaces/:id/build", () => HttpResponse.json(
+    { status: "running", result: null, error: null, started_at: 1, finished_at: null },
+    { status: 202 })),
+  http.get("/api/workspaces/:id/build", () => HttpResponse.json({
+    status: "done", error: null, started_at: 1, finished_at: 2,
+    result: {
+      repo_slug: "carddemo-mini", slice_id: "posting",
+      module: "carddemo-mini-posting", base_package: "com.cobolmodernizer.carddemomini",
+      scaffold_path: "codegen_output/carddemo-mini-posting", file_count: 2, tests: 1, mains: 1,
+      files: [
+        { path: "src/test/java/com/cobolmodernizer/carddemomini/PostingServiceTest.java",
+          kind: "test", evidence: ["CBPOST1M.WRITE-ACCT"] },
+        { path: "src/main/java/com/cobolmodernizer/carddemomini/PostingService.java",
+          kind: "main", evidence: ["CBPOST1M.UPDATE-ACCT"] },
+      ],
+      evidence_map: {},
+    },
   })),
   http.post("/api/workspaces/:id/verify", () => HttpResponse.json({
     repo_slug: "carddemo-mini", verdict: "fail", records_compared: 1, defect_count: 1,

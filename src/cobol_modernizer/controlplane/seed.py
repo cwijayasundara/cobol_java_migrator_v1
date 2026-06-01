@@ -23,7 +23,12 @@ from cobol_modernizer.persistence.tables import (
     AgentRun, Artifact, Budget, Gate, JourneyStage, Workspace,
 )
 
-DEMO_REPO_SLUG = "aws-mf-carddemo"
+# Must match a directory under source_code_to_analyse/ (COBOL_SOURCE_ROOT) so the
+# seeded workspace can actually Parse/Blueprint. carddemo-mini is the small,
+# self-contained sample shipped for exactly this; the full aws-mf-mod-carddemo is
+# heavier to parse. (Was "aws-mf-carddemo", which matched no on-disk folder.)
+DEMO_REPO_SLUG = "carddemo-mini"
+DEMO_NAME = "CardDemo (mini)"
 
 
 def seed_demo(session: Session, *, created_by: str = "cwijay@biz2bricks.ai") -> Workspace:
@@ -35,7 +40,7 @@ def seed_demo(session: Session, *, created_by: str = "cwijay@biz2bricks.ai") -> 
     if existing is not None:
         return existing
 
-    ws = Workspace(name="CardDemo", repo_slug=DEMO_REPO_SLUG,
+    ws = Workspace(name=DEMO_NAME, repo_slug=DEMO_REPO_SLUG,
                    graph_snapshot="snap-001", created_by=created_by, status="active")
     session.add(ws); session.flush()
 

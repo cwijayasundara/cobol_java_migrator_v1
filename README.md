@@ -109,13 +109,16 @@ The cockpit talks to these (all under `/api`), backed by Postgres + read-only Ne
 - `POST /workspaces/{id}/design` — the **Design** stage: a service design per writer
   slice (bounded-context assignment, template ADRs, data-ownership/groundedness gate).
   Deterministic.
-- `POST /workspaces/{id}/blueprint` (+ `GET .../blueprint/html`) — the **Blueprint**
-  stage: a grounded BRD via the subsystem map-reduce + judge pipeline, persisted as a
-  versioned `:BRD` node and served as inline HTML. LLM — needs `ANTHROPIC_API_KEY`.
-- `POST /workspaces/{id}/build` — the **Build** stage: TDD codegen (JUnit tests first,
-  then minimal Spring Boot code) grounded in the graph, scaffolded into a Maven module
-  with the four quality gates. LLM (needs `ANTHROPIC_API_KEY`) + a BRD; `mvn verify`
-  for the gates is a separate host step.
+- `POST /workspaces/{id}/blueprint` → **202** (starts a background job; validates key +
+  parsed graph first), `GET .../blueprint` polls status (`running`/`done`+summary/
+  `failed`+error), `GET .../blueprint/html` serves the rendered BRD once done. The
+  **Blueprint** stage is a multi-minute grounded-BRD run (subsystem map-reduce + judge,
+  persisted as a versioned `:BRD` node). LLM — needs `ANTHROPIC_API_KEY`.
+- `POST /workspaces/{id}/build` → **202** (background job), `GET .../build` polls status.
+  The **Build** stage is TDD codegen (JUnit tests first, then minimal Spring Boot code)
+  grounded in the graph, scaffolded into a Maven module with the four quality gates.
+  LLM (needs `ANTHROPIC_API_KEY`) + a BRD; `mvn verify` for the gates is a separate host
+  step. (Long LLM stages run as background jobs so the UI polls instead of hanging.)
 - `POST /workspaces/{id}/verify` — the **Verify** stage: deterministic field-aware
   equivalence diff of supplied candidate vs golden records (COMP-3 / scale / date
   tolerance), with mismatches seam-linked to the graph. No LLM; pass/fail gate.

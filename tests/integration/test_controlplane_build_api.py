@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from cobol_modernizer.codegen.schema import GeneratedFile, GeneratedProject
 from cobol_modernizer.persistence.tables import Base, Workspace, JourneyStage
 from cobol_modernizer.controlplane import build as bd
+from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.api import app
 from cobol_modernizer.controlplane.deps import get_session, get_neo4j
 
@@ -56,15 +57,24 @@ def _setup(monkeypatch, tmp_path, has_brd=True):
         finally:
             ss.close()
 
+    fake = _FakeNeo4j(has_brd=has_brd)
+    jobs.runner._jobs.clear()
+    monkeypatch.setattr(jobs.runner, "inline", True)
+    monkeypatch.setattr(jobs, "make_session", lambda: Session(eng))
+    monkeypatch.setattr(jobs, "make_neo4j", lambda: fake)
     app.dependency_overrides[get_session] = _ov
-    app.dependency_overrides[get_neo4j] = lambda: _FakeNeo4j(has_brd=has_brd)
+    app.dependency_overrides[get_neo4j] = lambda: fake
     return TestClient(app), eng, tmp_path
 
 
 def test_build_generates_scaffolds_and_writes_files(monkeypatch, tmp_path):
     c, eng, tp = _setup(monkeypatch, tmp_path)
     try:
-        r = c.post("/api/workspaces/ws-1/build").json()
+        resp = c.post("/api/workspaces/ws-1/build")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["status"] == "done"
+        r = body["result"]
         assert r["slice_id"] == "posting" and r["file_count"] == 2
         assert r["tests"] == 1 and r["mains"] == 1
         assert r["base_package"] == "com.cobolmodernizer.carddemomini"
@@ -74,6 +84,9 @@ def test_build_generates_scaffolds_and_writes_files(monkeypatch, tmp_path):
         assert (root / "pom.xml").exists()
         assert (root / "src/test/java/com/cobolmodernizer/x/PostingServiceTest.java").read_text() \
             == "class PostingServiceTest {}"
+        # GET status reflects the finished job
+        st = c.get("/api/workspaces/ws-1/build").json()
+        assert st["status"] == "done" and st["result"]["module"] == "carddemo-mini-posting"
         with Session(eng) as s:
             assert s.execute(select(JourneyStage.status).where(
                 JourneyStage.stage_key == "build")).scalar_one() == "passed"
