@@ -82,10 +82,14 @@ def _generate_slice_graph(slug: str, *, neo4j, repo_path: str,
     deps = GraphDeps(client=neo4j, repo_id=slug, repo_path=Path(repo_path))
     server = build_graph_server(deps)
     runner = SdkAgentRunner()
+    # The codegen agent explores the graph AND emits a multi-file project (tests
+    # first, then code); 12 turns wasn't enough — it hit the cap and returned
+    # nothing. 40 default, env-overridable for larger slices.
+    max_turns = int(os.environ.get("CODEGEN_AGENT_MAX_TURNS", "40"))
     return asyncio.run(generate_slice(
         runner=runner, server=server, model=resolve_model("codegen"),
         brd_json=brd_json, golden_summary="(no recorded golden master yet)",
-        allowed_tools=GRAPH_TOOL_NAMES))
+        allowed_tools=GRAPH_TOOL_NAMES, max_turns=max_turns))
 
 
 def _precheck(neo4j, workspace: Workspace, source_root: Path) -> dict:

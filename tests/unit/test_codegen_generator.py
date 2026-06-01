@@ -45,5 +45,14 @@ async def test_generator_rejects_run_with_no_test_file():
                              brd_json="{}", golden_summary="", allowed_tools=[])
 
 
+async def test_generator_reports_empty_output_distinctly_from_tdd_violation():
+    # runner returned {} (agent hit the turn cap / errored) -> a clear operational
+    # message that names the cap, NOT the misleading "TDD violated".
+    runner = FakeRunner({})
+    with pytest.raises(ValueError, match="no output.*turn cap"):
+        await generate_slice(runner=runner, server=None, model="m", brd_json="{}",
+                             golden_summary="", allowed_tools=[], max_turns=12)
+
+
 def test_codegen_schema_requires_files():
     assert "files" in CODEGEN_SCHEMA["required"]
