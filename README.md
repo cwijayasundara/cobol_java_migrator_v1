@@ -85,6 +85,10 @@ sides. See also `docs/running-the-cockpit.md`.
 
 The cockpit talks to these (all under `/api`), backed by Postgres + read-only Neo4j:
 
+- `GET /repos` — discover local COBOL repos under `source_code_to_analyse/` (the
+  Portfolio's "Available repositories" picker; pick any to start a workspace, no default
+  repo). Only dirs that actually contain COBOL are listed. Scan root overridable via
+  `COBOL_SOURCE_ROOT`.
 - `GET/POST /workspaces`, `GET /workspaces/{id}`
 - `GET /workspaces/{id}/{stages,gates,artifacts,runs,budget}`, `GET .../artifacts/{aid}`
 - `POST /workspaces/{id}/runs` · `POST /gates/{id}/approval` (attributed RBAC gate)

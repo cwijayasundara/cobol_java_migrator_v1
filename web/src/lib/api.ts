@@ -34,7 +34,19 @@ export interface SubmitApprovalBody {
   rationale: string;
 }
 
+// A local COBOL repo discovered under source_code_to_analyse/ (GET /api/repos).
+export interface RepoInfo {
+  slug: string;
+  name: string;
+  path: string;
+  programs: number;
+  copybooks: number;
+}
+
 export const api = {
+  // ---- local repos available to start a workspace for ----
+  listRepos: () => json<RepoInfo[]>("/api/repos"),
+
   // ---- Portfolio / workspaces ----
   listWorkspaces: () => json<Workspace[]>("/api/workspaces"),
   getWorkspace: (id: string) => json<Workspace>(`/api/workspaces/${id}`),
