@@ -33,6 +33,15 @@ def test_create_workspace_seeds_stages_and_budget(cp_client):
     assert budget["cap_usd"] == 50.0 and budget["spent_usd"] == 0.0
 
 
+def test_create_workspace_is_idempotent_per_repo_slug(cp_client):
+    body = {"name": "Mini", "repo_slug": "carddemo-mini", "created_by": "x@y.z"}
+    first = cp_client.post("/api/workspaces", json=body).json()
+    second = cp_client.post("/api/workspaces", json=body).json()
+    assert first["id"] == second["id"]  # same workspace, not a duplicate
+    slugs = [w["repo_slug"] for w in cp_client.get("/api/workspaces").json()]
+    assert slugs.count("carddemo-mini") == 1
+
+
 def test_start_run_creates_running_run(cp_client):
     run = cp_client.post("/api/workspaces/ws-1/runs", json={
         "stage_key": "blueprint", "role": "brd", "started_by": "lead@biz2bricks.ai",
