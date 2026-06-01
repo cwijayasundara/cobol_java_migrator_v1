@@ -88,7 +88,11 @@ def generate_brd_graph_sync(repo_id: str, *, client=None, repo_path=None,
         repo_path = repo["local_path"]
     model = model or resolve_model("brd")
     max_retries = int(os.getenv("BRD_MAX_RETRIES", "1")) if max_retries is None else max_retries
-    max_turns = int(os.getenv("BRD_AGENT_MAX_TURNS", "15")) if max_turns is None else max_turns
+    # 30 (was 15): under claude-agent-sdk 0.2.87 a map/reduce agent spends turns on
+    # graph-tool calls AND the final structured-output emission costs a turn, so 15
+    # often hit "Reached maximum number of turns" mid-exploration and the agent
+    # returned nothing (-> stub "failed to generate" sections). 30 gives headroom.
+    max_turns = int(os.getenv("BRD_AGENT_MAX_TURNS", "30")) if max_turns is None else max_turns
     max_subsystems = int(os.getenv("BRD_MAX_SUBSYSTEMS", "12")) if max_subsystems is None else max_subsystems
 
     from cobol_modernizer.agent.deps import GraphDeps
