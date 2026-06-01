@@ -30,6 +30,10 @@ _HAIKU = "claude-haiku-4-5-20251001"
 _SONNET = "claude-sonnet-4-6"
 _OPUS = "claude-opus-4-8"
 
+# Public tier aliases + lookup (for size-based model selection; see cost/scaling.py).
+HAIKU, SONNET, OPUS = _HAIKU, _SONNET, _OPUS
+TIER_MODELS = {"haiku": _HAIKU, "sonnet": _SONNET, "opus": _OPUS}
+
 _DEFAULTS = {
     "enrichment": _HAIKU,
     "ask": _HAIKU,
