@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Boxes, Play, AlertTriangle, CheckCircle2, ShieldAlert, Sparkles } from "lucide-react";
 import { api, type DesignResult, type DesignEnrichResult } from "@/lib/api";
 import { useJob } from "@/lib/useJob";
@@ -29,6 +29,23 @@ export function DesignStudio({ workspaceId }: { workspaceId: string }) {
     }
   };
 
+  // Auto-load on mount if the stage is already passed (idempotent re-run).
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const stages = await api.listStages(workspaceId);
+        const passed = stages.find((s) => s.stage_key === "design")?.status === "passed";
+        if (passed && alive) {
+          setResult(await api.runDesign(workspaceId));
+        }
+      } catch {
+        /* ignore — leave the screen in manual (button) mode */
+      }
+    })();
+    return () => { alive = false; };
+  }, [workspaceId]);
+
   const narr = enrich.result?.narratives ?? {};
 
   return (
@@ -49,7 +66,7 @@ export function DesignStudio({ workspaceId }: { workspaceId: string }) {
         {result && (
           <button onClick={enrich.run} disabled={enrich.busy}
             className="inline-flex items-center gap-2 px-4 py-2 text-sm rounded bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40">
-            <Sparkles className="w-4 h-4" />{enrich.busy ? "Enriching…" : "Add detail"}
+            <Sparkles className="w-4 h-4" />{enrich.busy ? "Enriching…" : "Improve"}
           </button>
         )}
       </div>
