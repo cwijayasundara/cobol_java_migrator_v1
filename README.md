@@ -13,8 +13,10 @@ reads everything through the control plane.
 
 > **Status:** the full roadmap is implemented — Phase 0 (baseline/persistence/cost)
 > through Phase 6 (deployment & canary), the cross-cutting UI cockpit, and the
-> cockpit↔backend control-plane endpoints. See `docs/plans/INDEX.md` for the
-> roadmap and `docs/plans/*` for the per-phase plans.
+> cockpit↔backend control-plane endpoints. Every journey stage now runs from its
+> "Run" button: Parse, Explore, Seams, Plan, Design and Verify are deterministic;
+> Blueprint and Build call Claude. See `docs/plans/INDEX.md` for the roadmap and
+> `docs/plans/*` for the per-phase plans.
 
 ---
 
@@ -99,7 +101,24 @@ The cockpit talks to these (all under `/api`), backed by Postgres + read-only Ne
   answers NL questions grounded in the parsed Neo4j graph (per-program READS/WRITES/
   CALLS + copybooks) via Claude (cheap `ask`/Haiku tier). Needs `ANTHROPIC_API_KEY` and
   the repo parsed first (otherwise it returns a "run Parse first" hint, no LLM call).
-  The later LLM stages (blueprint/seams/design/build) still need the agent harness.
+- `POST /workspaces/{id}/seams` — the **Seams** stage: ranked strangler-fig seam
+  candidates over the parsed graph (reader/writer split, blast radius, testability,
+  data-ownership, risk). Deterministic, pure Cypher (no LLM).
+- `POST /workspaces/{id}/plan` — the **Plan** stage: an acyclic story DAG
+  (dependency derivation + topological order) from the ranked seams. Deterministic.
+- `POST /workspaces/{id}/design` — the **Design** stage: a service design per writer
+  slice (bounded-context assignment, template ADRs, data-ownership/groundedness gate).
+  Deterministic.
+- `POST /workspaces/{id}/blueprint` (+ `GET .../blueprint/html`) — the **Blueprint**
+  stage: a grounded BRD via the subsystem map-reduce + judge pipeline, persisted as a
+  versioned `:BRD` node and served as inline HTML. LLM — needs `ANTHROPIC_API_KEY`.
+- `POST /workspaces/{id}/build` — the **Build** stage: TDD codegen (JUnit tests first,
+  then minimal Spring Boot code) grounded in the graph, scaffolded into a Maven module
+  with the four quality gates. LLM (needs `ANTHROPIC_API_KEY`) + a BRD; `mvn verify`
+  for the gates is a separate host step.
+- `POST /workspaces/{id}/verify` — the **Verify** stage: deterministic field-aware
+  equivalence diff of supplied candidate vs golden records (COMP-3 / scale / date
+  tolerance), with mismatches seam-linked to the graph. No LLM; pass/fail gate.
 - `POST /workspaces/{id}/runs` · `POST /gates/{id}/approval` (attributed RBAC gate)
 - `GET /graph?repo=&limit=` · `GET /entity/{qname}` (read-only Neo4j)
 - `GET /workspaces/{id}/runs/{runId}/events` (SSE: replay persisted events + live stream)
@@ -199,14 +218,16 @@ PYTHONPATH=src uv run uvicorn cobol_modernizer.api:app --port 8000
 src/cobol_modernizer/
   api.py                         # FastAPI control plane (includes every router)
   controlplane/                  # cockpit endpoints: deps, serializers, stages,
-                                 #   workspaces, graph, events(SSE), seed
+                                 #   workspaces, graph, events(SSE), seed,
+                                 #   parse, ask, analysis(seams+plan+design),
+                                 #   blueprint, build, verify
   contract/, cobol/, parser.py, neo4j_client.py, schema.py, ingestion*.py, queries.py
   brd/, slice/, darklaunch/, equivalence/, seam/, planner/, design/, codegen/, mimic/, deploy/
   cost/ (tiering, policy)        # model tiering + fail-closed caps / kill-switch
   persistence/ (tables, db, migrations/)   # Postgres run/audit/RBAC + Alembic (0001..0004)
   agent/ (harness, graph_ops, brd_judge, …)
   cli.py
-web/                             # Next.js 15 cockpit (5-region shell + 9 stage screens)
+web/                             # Next.js 15 cockpit (5-region shell; every journey stage wired to its backend)
 tools/cobol-extractor/           # ProLeap Java extractor (emits schemaVersion=2)
 scripts/                         # start-backend.sh, start-ui.sh
 docs/plans/                      # per-phase implementation plans + INDEX.md
