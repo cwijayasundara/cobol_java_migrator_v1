@@ -45,10 +45,36 @@ export const handlers = [
   })),
   http.post("/api/workspaces/:id/plan", () => HttpResponse.json({
     repo_slug: "carddemo-mini", acyclic: true, topo_order: ["S1", "S2"],
+    delivery_waves: [["S1"], ["S2"]],
     stories: [
       { id: "S1", title: "Migrate CBVALDTM", seam: "CBVALDTM", depends_on: [], evidence_map: {} },
       { id: "S2", title: "Migrate CBPOST1M", seam: "CBPOST1M", depends_on: ["S1"], evidence_map: {} },
     ],
+  })),
+  http.post("/api/workspaces/:id/plan/enrich", () => HttpResponse.json(
+    { status: "running", result: null, error: null },
+    { status: 202 })),
+  http.get("/api/workspaces/:id/plan/enrichment", () => HttpResponse.json({
+    status: "done", error: null,
+    result: {
+      repo_slug: "carddemo-mini",
+      stories: {
+        S1: {
+          story_id: "S1",
+          invest: { independent: 5, negotiable: 4, valuable: 5, estimable: 4, small: 4, testable: 5 },
+          description: "Extract reader",
+          acceptance_criteria: ["AC1"],
+          groundedness_failures: [],
+        },
+      },
+      delivery: {
+        edge_rationale: { "S2->S1": "P2 writes what P1 reads" },
+        wave_narrative: [
+          { wave: 0, narrative: "ship readers first" },
+          { wave: 1, narrative: "then writers" },
+        ],
+      },
+    },
   })),
   http.post("/api/workspaces/:id/design", () => HttpResponse.json({
     repo_slug: "carddemo-mini", count: 1,

@@ -80,6 +80,7 @@ export interface PlanStory {
 }
 export interface PlanResult {
   repo_slug: string; acyclic: boolean; topo_order: string[]; stories: PlanStory[];
+  delivery_waves?: string[][];
 }
 
 // Service design for one writer slice (POST .../design).
