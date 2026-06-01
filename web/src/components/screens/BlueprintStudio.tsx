@@ -1,43 +1,71 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import Link from "next/link";
-import { api } from "@/lib/api";
-import type { Artifact, Gate } from "@/lib/types";
+import { useState } from "react";
+import { FileText, Play, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { api, type BlueprintResult } from "@/lib/api";
 
+// Blueprint stage: generate a grounded Business Requirements Document via the BRD
+// pipeline (subsystem map-reduce + judge with retry-until-high). This is the one
+// analysis stage that calls Claude, so it's slower and needs ANTHROPIC_API_KEY.
+// Run Parse first. The rendered HTML is served inline from the backend.
 export function BlueprintStudio({ workspaceId }: { workspaceId: string }) {
-  const [brds, setBrds] = useState<Artifact[]>([]);
-  const [gate, setGate] = useState<Gate | null>(null);
-  useEffect(() => {
-    (async () => {
-      const arts = await api.listArtifacts(workspaceId);
-      setBrds(arts.filter((a) => a.kind === "brd"));
-      const gates = await api.listGates(workspaceId);
-      setGate(gates.find((g) => g.gate_key === "brd_groundedness") ?? null);
-    })();
-  }, [workspaceId]);
+  const [result, setResult] = useState<BlueprintResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    setBusy(true); setError(null);
+    try {
+      setResult(await api.runBlueprint(workspaceId));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <div className="p-4 space-y-3">
-      <h3 className="text-sm font-medium text-zinc-300">Functional Blueprint (BRD)</h3>
-      {gate && (
-        <div className="text-xs text-zinc-400">
-          groundedness gate: weighted {String(gate.result.weighted ?? "—")} /
-          threshold {String((gate.threshold as Record<string, unknown>).min_weighted ?? "—")} ·{" "}
-          <span className={gate.status === "passed" ? "text-emerald-400" : "text-amber-400"}>
-            {gate.status}
-          </span>
+    <div className="p-4 space-y-4 max-w-3xl">
+      <div className="flex items-center gap-2">
+        <FileText className="w-4 h-4 text-indigo-400" />
+        <h3 className="text-sm font-medium text-zinc-300">Functional Blueprint (BRD)</h3>
+      </div>
+      <p className="text-xs text-zinc-500">
+        A grounded Business Requirements Document drafted from the parsed graph
+        (subsystem map-reduce, judged and retried until well-grounded). Uses Claude —
+        slower than the deterministic stages. Run Parse first.
+      </p>
+      <button onClick={run} disabled={busy}
+        className="inline-flex items-center gap-2 px-4 py-2 text-sm rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40">
+        <Play className="w-4 h-4" />{busy ? "Generating… (this takes a minute)" : "Generate blueprint"}
+      </button>
+
+      {error && (
+        <div className="flex items-start gap-2 rounded-md border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span className="font-mono break-all">{error}</span>
         </div>
       )}
-      <ul className="space-y-1">
-        {brds.map((b) => (
-          <li key={b.id}>
-            <Link className="text-indigo-400 hover:underline text-sm"
-                  href={`/workspaces/${workspaceId}/artifacts/${b.id}`}>
-              BRD v{b.version}
-            </Link>
-          </li>
-        ))}
-      </ul>
+
+      {result && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-3 text-xs">
+            <span className="font-mono text-zinc-200">BRD v{result.version}</span>
+            <span className={`flex items-center gap-1 ${
+              result.rating === "high" ? "text-emerald-400" : result.rating === "low" ? "text-red-400" : "text-amber-400"}`}>
+              <CheckCircle2 className="w-3.5 h-3.5" />{result.rating} · score {result.weighted_score.toFixed(2)}
+            </span>
+            <span className="text-zinc-500">
+              {result.attempts} attempt{result.attempts === 1 ? "" : "s"} · {result.strategy} · {result.model}
+            </span>
+          </div>
+          <div className="text-xs text-zinc-500">
+            tokens in/out: {result.token_usage.input ?? 0} / {result.token_usage.output ?? 0}
+          </div>
+          <iframe title={`BRD v${result.version}`} src={api.blueprintHtmlUrl(workspaceId)}
+            className="w-full h-[60vh] rounded border border-zinc-800 bg-white" />
+        </div>
+      )}
     </div>
   );
 }

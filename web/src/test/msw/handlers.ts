@@ -70,6 +70,15 @@ export const handlers = [
         rationale: "Sole writer of owned resources; all refs grounded." },
     ],
   })),
+  http.post("/api/workspaces/:id/blueprint", () => HttpResponse.json({
+    repo_slug: "carddemo-mini", brd_id: "brd-1", version: 1,
+    rating: "high", weighted_score: 4.4, attempts: 1,
+    model: "claude-sonnet-4-6", strategy: "map_reduce",
+    token_usage: { input: 1200, output: 800, cache_read: 0, cache_creation: 0 },
+  })),
+  http.get("/api/workspaces/:id/blueprint/html", () =>
+    new HttpResponse("<html><body>BRD v1</body></html>",
+      { headers: { "Content-Type": "text/html" } })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),

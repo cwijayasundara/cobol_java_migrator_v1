@@ -18,3 +18,5 @@ benchmark_out/
 
 # Local COBOL input — drop your own COBOL here; not tracked (may be third-party / large)
 source_code_to_analyse/
+brd_output/
+.claude/scheduled_tasks.lock
