@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from cobol_modernizer.brd.schema import BRDResult, Rating, Strategy
 from cobol_modernizer.persistence.tables import Base, Workspace, JourneyStage
 from cobol_modernizer.controlplane import blueprint as bp
+from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.api import app
 from cobol_modernizer.controlplane.deps import get_session, get_neo4j
 
@@ -65,22 +66,46 @@ def _setup(monkeypatch, tmp_path, entities=40):
             ss.close()
 
     fake = _FakeNeo4j(entities=entities)
+    # run the background job synchronously, building its own session/neo4j from
+    # the test engine + fake (the real factories would hit Postgres/live Neo4j).
+    jobs.runner._jobs.clear()
+    monkeypatch.setattr(jobs.runner, "inline", True)
+    monkeypatch.setattr(jobs, "make_session", lambda: Session(eng))
+    monkeypatch.setattr(jobs, "make_neo4j", lambda: fake)
     app.dependency_overrides[get_session] = _ov
     app.dependency_overrides[get_neo4j] = lambda: fake
     return TestClient(app), eng, fake
 
 
-def test_blueprint_runs_merges_repository_and_marks_stage(monkeypatch, tmp_path):
+def test_blueprint_runs_as_job_merges_repository_and_marks_stage(monkeypatch, tmp_path):
     c, eng, fake = _setup(monkeypatch, tmp_path)
     try:
-        r = c.post("/api/workspaces/ws-1/blueprint").json()
+        resp = c.post("/api/workspaces/ws-1/blueprint")
+        assert resp.status_code == 202
+        # inline runner -> job already finished by the time POST returns
+        body = resp.json()
+        assert body["status"] == "done"
+        r = body["result"]
         assert r["brd_id"] == "brd-1" and r["rating"] == "high"
         assert r["version"] == 1 and r["strategy"] == "map_reduce"
         assert r["token_usage"]["input"] == 1200
         assert fake.merged and fake.merged[0]["slug"] == "carddemo-mini"
+        # GET status reflects the finished job too
+        st = c.get("/api/workspaces/ws-1/blueprint").json()
+        assert st["status"] == "done" and st["result"]["brd_id"] == "brd-1"
         with Session(eng) as s:
             assert s.execute(select(JourneyStage.status).where(
                 JourneyStage.stage_key == "blueprint")).scalar_one() == "passed"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_blueprint_status_reports_persisted_brd_when_no_job(monkeypatch, tmp_path):
+    # no in-process job (e.g. after a restart) but a BRD exists in the graph store
+    c, eng, fake = _setup(monkeypatch, tmp_path)
+    try:
+        st = c.get("/api/workspaces/ws-1/blueprint").json()
+        assert st["status"] == "done" and st["result"]["version"] == 1
     finally:
         app.dependency_overrides.clear()
 

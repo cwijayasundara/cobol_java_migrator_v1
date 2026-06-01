@@ -1,28 +1,19 @@
 "use client";
 
-import { useState } from "react";
 import { Hammer, Play, AlertTriangle, FlaskConical, FileCode2 } from "lucide-react";
 import { api, type BuildResult } from "@/lib/api";
+import { useJob } from "@/lib/useJob";
 
 // Build stage: TDD codegen for a writer slice grounded in the parsed graph (JUnit
 // tests first, then minimal Spring Boot code), scaffolded into a Maven module with
-// the four quality gates. Uses Claude — slow. Run Blueprint first (the BRD is the
+// the four quality gates. Uses Claude — a multi-minute run, so the POST starts a
+// background job and we poll for the result. Run Blueprint first (the BRD is the
 // codegen brief). Compiling + running the gates (mvn verify) is a downstream step.
 export function BuildLab({ workspaceId }: { workspaceId: string }) {
-  const [result, setResult] = useState<BuildResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const run = async () => {
-    setBusy(true); setError(null);
-    try {
-      setResult(await api.runBuild(workspaceId));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const { result, error, busy, run } = useJob<BuildResult>(
+    () => api.startBuild(workspaceId),
+    () => api.getBuildStatus(workspaceId),
+  );
 
   return (
     <div className="p-4 space-y-4 max-w-3xl">

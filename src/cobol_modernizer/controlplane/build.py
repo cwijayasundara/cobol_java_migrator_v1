@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +28,7 @@ from sqlalchemy.orm import Session
 from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.codegen.scaffold import scaffold_module
 from cobol_modernizer.codegen.schema import GeneratedProject
+from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.persistence.tables import JourneyStage, Workspace
 
@@ -88,6 +88,21 @@ def _generate_slice_graph(slug: str, *, neo4j, repo_path: str,
         allowed_tools=GRAPH_TOOL_NAMES))
 
 
+def _precheck(neo4j, workspace: Workspace, source_root: Path) -> dict:
+    """Fast, synchronous validation before queueing the multi-minute codegen job:
+    repo dir present + a BRD exists (the codegen brief). Returns the latest BRD."""
+    slug = workspace.repo_slug
+    if not (source_root / slug).is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail=f"repo directory '{slug}' not found under {source_root}")
+    latest = BRDStorage(neo4j).get_latest(slug)
+    if not latest:
+        raise HTTPException(status_code=409,
+                            detail="no BRD — run the Blueprint stage first")
+    return latest
+
+
 def run_build(*, session: Session, neo4j, workspace: Workspace,
               source_root: Path, output_root: Path,
               generate: Callable[..., GeneratedProject] | None = None) -> dict[str, Any]:
@@ -95,15 +110,7 @@ def run_build(*, session: Session, neo4j, workspace: Workspace,
     defaults to the real graph codegen (resolved here so tests can inject a stub)."""
     slug = workspace.repo_slug
     repo_dir = source_root / slug
-    if not repo_dir.is_dir():
-        raise HTTPException(
-            status_code=404,
-            detail=f"repo directory '{slug}' not found under {source_root}")
-
-    latest = BRDStorage(neo4j).get_latest(slug)
-    if not latest:
-        raise HTTPException(status_code=409,
-                            detail="no BRD — run the Blueprint stage first")
+    latest = _precheck(neo4j, workspace, source_root)
     brd_json = json.dumps({"repo_id": slug, "version": latest.get("version"),
                            "rating": latest.get("rating")})
 
@@ -135,36 +142,55 @@ def run_build(*, session: Session, neo4j, workspace: Workspace,
     }
 
 
-@router.post("/workspaces/{wid}/build")
+def _job_view(job: dict) -> dict:
+    return {"status": job["status"], "result": job.get("result"),
+            "error": job.get("error"), "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at")}
+
+
+@router.post("/workspaces/{wid}/build", status_code=202)
 def build_workspace(wid: str, session: Session = Depends(get_session),
                     neo4j=Depends(get_neo4j)) -> dict:
-    """Sync (not async): the codegen agent owns its own event loop via asyncio.run,
-    so FastAPI must run this in its threadpool. Slow — it makes several LLM calls."""
+    """Kick off the (multi-minute) codegen run as a background job and return 202;
+    the UI polls GET .../build. Validates fast first (key / repo dir / BRD present).
+    A TDD violation surfaces as a 'failed' job (error in the GET status)."""
     ws = _workspace(session, wid)
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(status_code=503,
                             detail="ANTHROPIC_API_KEY not set — Build needs an LLM.")
-    t0 = time.monotonic()
     try:
-        result = run_build(session=session, neo4j=neo4j, workspace=ws,
-                           source_root=_source_root(), output_root=_output_root())
-        logger.info("build: done repo=%s module=%s files=%d in %.1fs",
-                    ws.repo_slug, result["module"], result["file_count"],
-                    time.monotonic() - t0)
-        return result
-    except HTTPException as exc:
-        logger.warning("build: repo=%s -> %s: %s",
-                       ws.repo_slug, exc.status_code, exc.detail)
-        raise
+        _precheck(neo4j, ws, _source_root())
     except _NEO4J_ERRORS as exc:
-        logger.exception("build: graph store error for repo=%s", ws.repo_slug)
         raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
-    except ValueError as exc:
-        # e.g. codegen produced no failing test (TDD violated)
-        logger.warning("build: TDD/codegen rejected for repo=%s: %s", ws.repo_slug, exc)
-        raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        logger.exception("build: FAILED for repo=%s after %.1fs",
-                         ws.repo_slug, time.monotonic() - t0)
-        raise HTTPException(status_code=500,
-                            detail=f"build failed: {type(exc).__name__}: {exc}")
+
+    def _job() -> dict:
+        s = jobs.make_session()
+        neo = jobs.make_neo4j()
+        try:
+            ws2 = s.get(Workspace, wid)
+            result = run_build(session=s, neo4j=neo, workspace=ws2,
+                               source_root=_source_root(), output_root=_output_root())
+            s.commit()
+            return result
+        finally:
+            s.close()
+            try:
+                neo.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    logger.info("build: queued background run for workspace=%s repo=%s",
+                wid, ws.repo_slug)
+    return _job_view(jobs.runner.start("build", wid, _job))
+
+
+@router.get("/workspaces/{wid}/build")
+def build_status(wid: str, session: Session = Depends(get_session),
+                 neo4j=Depends(get_neo4j)) -> dict:
+    """Poll the background codegen job (running / done+manifest / failed+error)."""
+    _workspace(session, wid)
+    job = jobs.runner.get("build", wid)
+    if job is None:
+        return {"status": "idle", "result": None, "error": None,
+                "started_at": None, "finished_at": None}
+    return _job_view(job)

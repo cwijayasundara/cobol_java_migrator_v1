@@ -100,11 +100,22 @@ export interface DesignResult {
   repo_slug: string; count: number; designs: ServiceDesignResult[];
 }
 
-// Result of POST .../blueprint (grounded LLM Business Requirements Document).
+// Result of a finished Blueprint (grounded LLM Business Requirements Document).
 export interface BlueprintResult {
   repo_slug: string; brd_id: string; version: number;
-  rating: string; weighted_score: number; attempts: number;
-  model: string; strategy: string; token_usage: Record<string, number>;
+  rating: string; weighted_score?: number; attempts?: number;
+  model?: string; strategy?: string; token_usage?: Record<string, number>;
+}
+
+// Background-job status shared by the long LLM stages (Blueprint, Build).
+export type JobStatus = "idle" | "running" | "done" | "failed";
+export interface BlueprintJob {
+  status: JobStatus; result: BlueprintResult | null; error: string | null;
+  started_at: number | null; finished_at: number | null;
+}
+export interface BuildJob {
+  status: JobStatus; result: BuildResult | null; error: string | null;
+  started_at: number | null; finished_at: number | null;
 }
 
 // Result of POST .../build (TDD codegen + Maven scaffold for a writer slice).
@@ -191,15 +202,19 @@ export const api = {
   runDesign: (workspaceId: string) =>
     json<DesignResult>(`/api/workspaces/${workspaceId}/design`, { method: "POST" }),
 
-  // ---- blueprint: grounded LLM BRD (slow; needs ANTHROPIC_API_KEY) ----
-  runBlueprint: (workspaceId: string) =>
-    json<BlueprintResult>(`/api/workspaces/${workspaceId}/blueprint`, { method: "POST" }),
+  // ---- blueprint: grounded LLM BRD (multi-minute background job; POST then poll) ----
+  startBlueprint: (workspaceId: string) =>
+    json<BlueprintJob>(`/api/workspaces/${workspaceId}/blueprint`, { method: "POST" }),
+  getBlueprintStatus: (workspaceId: string) =>
+    json<BlueprintJob>(`/api/workspaces/${workspaceId}/blueprint`),
   blueprintHtmlUrl: (workspaceId: string) =>
     `/api/workspaces/${workspaceId}/blueprint/html`,
 
-  // ---- build: TDD codegen + Maven scaffold (slow; needs ANTHROPIC_API_KEY + BRD) ----
-  runBuild: (workspaceId: string) =>
-    json<BuildResult>(`/api/workspaces/${workspaceId}/build`, { method: "POST" }),
+  // ---- build: TDD codegen + Maven scaffold (multi-minute background job; POST then poll) ----
+  startBuild: (workspaceId: string) =>
+    json<BuildJob>(`/api/workspaces/${workspaceId}/build`, { method: "POST" }),
+  getBuildStatus: (workspaceId: string) =>
+    json<BuildJob>(`/api/workspaces/${workspaceId}/build`),
 
   // ---- verify: deterministic equivalence diff on supplied golden + candidate ----
   runVerify: (workspaceId: string, body: VerifyRequest) =>

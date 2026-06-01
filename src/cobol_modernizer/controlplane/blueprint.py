@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from cobol_modernizer.brd.pipeline import generate_brd_graph_sync
 from cobol_modernizer.brd.storage import BRDStorage
+from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.persistence.tables import JourneyStage, Workspace
 
@@ -57,24 +57,32 @@ def _mark_passed(session: Session, wid: str, stage_key: str) -> None:
         st.status = "passed"
 
 
-def run_blueprint(*, session: Session, neo4j, workspace: Workspace,
-                  source_root: Path,
-                  generate: Callable[..., Any] | None = None) -> dict[str, Any]:
-    """Generate + persist a BRD for the workspace's repo. `generate` defaults to
-    the real graph BRD pipeline (resolved here so tests can inject a stub)."""
+def _precheck(neo4j, workspace: Workspace, source_root: Path) -> Path:
+    """Fast, synchronous validation run BEFORE queueing the multi-minute job, so the
+    UI gets immediate 404/409 feedback instead of polling a doomed run. Returns the
+    repo dir. Raises HTTPException on a missing dir or an unparsed graph."""
     slug = workspace.repo_slug
     repo_dir = source_root / slug
     if not repo_dir.is_dir():
         raise HTTPException(
             status_code=404,
             detail=f"repo directory '{slug}' not found under {source_root}")
-    # Fast pre-check: a BRD run is a multi-minute LLM job, so fail fast (instead of
-    # launching the agent against an empty graph) if the repo hasn't been parsed.
     entities = neo4j.run(_COUNT_ENTITIES, repo=slug)[0]["c"]
     if not entities:
         raise HTTPException(
             status_code=409,
             detail=f"'{slug}' has no parsed graph — run the Parse stage first.")
+    return repo_dir
+
+
+def run_blueprint(*, session: Session, neo4j, workspace: Workspace,
+                  source_root: Path,
+                  generate: Callable[..., Any] | None = None) -> dict[str, Any]:
+    """Generate + persist a BRD for the workspace's repo. `generate` defaults to
+    the real graph BRD pipeline (resolved here so tests can inject a stub)."""
+    slug = workspace.repo_slug
+    repo_dir = _precheck(neo4j, workspace, source_root)
+    entities = neo4j.run(_COUNT_ENTITIES, repo=slug)[0]["c"]
     # Storage keys off a :Repository node — ensure one exists for this slug.
     neo4j.run("MERGE (r:Repository {slug: $slug}) "
               "SET r.local_path = $lp, r.name = coalesce(r.name, $slug)",
@@ -100,35 +108,69 @@ def run_blueprint(*, session: Session, neo4j, workspace: Workspace,
     }
 
 
-@router.post("/workspaces/{wid}/blueprint")
+def _job_view(job: dict) -> dict:
+    return {"status": job["status"], "result": job.get("result"),
+            "error": job.get("error"), "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at")}
+
+
+@router.post("/workspaces/{wid}/blueprint", status_code=202)
 def blueprint_workspace(wid: str, session: Session = Depends(get_session),
                         neo4j=Depends(get_neo4j)) -> dict:
-    """Sync (not async): the BRD pipeline owns its own event loop via asyncio.run,
-    so FastAPI must run this in its threadpool. Slow — it makes several LLM calls."""
+    """Kick off the (multi-minute) BRD run as a background job and return 202
+    immediately; the UI polls GET .../blueprint for status. Validates fast first so
+    a missing key / unparsed graph is reported now, not after a long poll."""
     ws = _workspace(session, wid)
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(status_code=503,
                             detail="ANTHROPIC_API_KEY not set — Blueprint needs an LLM.")
-    t0 = time.monotonic()
     try:
-        result = run_blueprint(session=session, neo4j=neo4j, workspace=ws,
-                               source_root=_source_root())
-        logger.info("blueprint: done repo=%s brd=%s v%s rating=%s in %.1fs",
-                    ws.repo_slug, result["brd_id"], result["version"],
-                    result["rating"], time.monotonic() - t0)
-        return result
-    except HTTPException as exc:
-        logger.warning("blueprint: repo=%s -> %s: %s",
-                       ws.repo_slug, exc.status_code, exc.detail)
-        raise
+        _precheck(neo4j, ws, _source_root())
     except _NEO4J_ERRORS as exc:
-        logger.exception("blueprint: graph store error for repo=%s", ws.repo_slug)
         raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
-    except Exception as exc:
-        logger.exception("blueprint: FAILED for repo=%s after %.1fs",
-                         ws.repo_slug, time.monotonic() - t0)
-        raise HTTPException(status_code=500,
-                            detail=f"blueprint failed: {type(exc).__name__}: {exc}")
+
+    def _job() -> dict:
+        s = jobs.make_session()
+        neo = jobs.make_neo4j()
+        try:
+            ws2 = s.get(Workspace, wid)
+            result = run_blueprint(session=s, neo4j=neo, workspace=ws2,
+                                   source_root=_source_root())
+            s.commit()
+            return result
+        finally:
+            s.close()
+            try:
+                neo.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    logger.info("blueprint: queued background run for workspace=%s repo=%s",
+                wid, ws.repo_slug)
+    return _job_view(jobs.runner.start("blueprint", wid, _job))
+
+
+@router.get("/workspaces/{wid}/blueprint")
+def blueprint_status(wid: str, session: Session = Depends(get_session),
+                     neo4j=Depends(get_neo4j)) -> dict:
+    """Poll the background BRD job. After a restart (no in-process job) report a
+    previously-persisted BRD as 'done', else 'idle'."""
+    ws = _workspace(session, wid)
+    job = jobs.runner.get("blueprint", wid)
+    if job is not None:
+        return _job_view(job)
+    try:
+        latest = BRDStorage(neo4j).get_latest(ws.repo_slug)
+    except _NEO4J_ERRORS:
+        latest = None
+    if latest:
+        return {"status": "done", "error": None, "started_at": None,
+                "finished_at": None,
+                "result": {"repo_slug": ws.repo_slug, "brd_id": latest.get("id"),
+                           "version": latest.get("version"),
+                           "rating": latest.get("rating")}}
+    return {"status": "idle", "result": None, "error": None,
+            "started_at": None, "finished_at": None}
 
 
 @router.get("/workspaces/{wid}/blueprint/html", response_class=HTMLResponse)
