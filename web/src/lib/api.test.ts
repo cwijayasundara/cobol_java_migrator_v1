@@ -12,6 +12,14 @@ describe("enrichment api", () => {
   });
 });
 
+describe("domain-design api", () => {
+  it("exposes start/refine/get helpers", () => {
+    expect(typeof api.startDomainDesign).toBe("function");
+    expect(typeof api.refineDomainDesign).toBe("function");
+    expect(typeof api.getDomainDesign).toBe("function");
+  });
+});
+
 describe("blueprint improve api", () => {
   it("exposes improve helpers", () => {
     expect(typeof api.startBlueprintImprove).toBe("function");
