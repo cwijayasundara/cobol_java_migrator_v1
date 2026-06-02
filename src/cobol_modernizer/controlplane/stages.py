@@ -20,12 +20,13 @@ JOURNEY_STAGES: list[StageDef] = [
     StageDef("graph", "Graph", 3, "graph"),
     StageDef("explore", "Explore", 4, None),
     StageDef("blueprint", "Blueprint", 5, "brd_groundedness"),
-    StageDef("seams", "Seams", 6, None),
-    StageDef("plan", "Plan", 7, "stories_dag"),
-    StageDef("domain", "Domain Design", 8, None),
-    StageDef("design", "Design", 9, "design_data_ownership"),
-    StageDef("build", "Build", 10, "code"),
-    StageDef("verify", "Verify", 11, "equivalence"),
+    StageDef("backlog", "Backlog", 6, "backlog_coverage"),
+    StageDef("seams", "Seams", 7, None),
+    StageDef("plan", "Plan", 8, "stories_dag"),
+    StageDef("domain", "Domain Design", 9, None),
+    StageDef("design", "Design", 10, "design_data_ownership"),
+    StageDef("build", "Build", 11, "code"),
+    StageDef("verify", "Verify", 12, "equivalence"),
 ]
 
 

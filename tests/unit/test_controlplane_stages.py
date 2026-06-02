@@ -4,9 +4,9 @@ from cobol_modernizer.controlplane.stages import JOURNEY_STAGES, gate_key_for
 def test_canonical_stages_in_order():
     assert [s.key for s in JOURNEY_STAGES] == [
         "outcome", "intake", "parse", "graph", "explore",
-        "blueprint", "seams", "plan", "domain", "design", "build", "verify",
+        "blueprint", "backlog", "seams", "plan", "domain", "design", "build", "verify",
     ]
-    assert [s.ordinal for s in JOURNEY_STAGES] == list(range(12))
+    assert [s.ordinal for s in JOURNEY_STAGES] == list(range(13))
 
 
 def test_gate_key_mapping():

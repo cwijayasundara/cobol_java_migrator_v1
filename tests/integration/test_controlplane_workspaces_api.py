@@ -9,7 +9,7 @@ def test_list_and_get_workspaces(cp_client):
 def test_stages_gates_artifacts_runs_budget(cp_client):
     stages = cp_client.get("/api/workspaces/ws-1/stages").json()
     assert [s["stage_key"] for s in stages][:2] == ["outcome", "intake"]
-    assert len(stages) == 12
+    assert len(stages) == 13
     gates = cp_client.get("/api/workspaces/ws-1/gates").json()
     assert gates[0]["gate_key"] == "brd_groundedness"
     arts = cp_client.get("/api/workspaces/ws-1/artifacts").json()
@@ -28,7 +28,7 @@ def test_create_workspace_seeds_stages_and_budget(cp_client):
     wid = created["id"]
     assert created["name"] == "Loans" and created["status"] == "active"
     stages = cp_client.get(f"/api/workspaces/{wid}/stages").json()
-    assert len(stages) == 12 and stages[0]["status"] == "running"
+    assert len(stages) == 13 and stages[0]["status"] == "running"
     budget = cp_client.get(f"/api/workspaces/{wid}/budget").json()
     assert budget["cap_usd"] == 50.0 and budget["spent_usd"] == 0.0
 
