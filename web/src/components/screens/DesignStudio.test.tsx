@@ -6,6 +6,31 @@ import { server } from "@/test/msw/server";
 import { DesignStudio } from "@/components/screens/DesignStudio";
 import { STAGES } from "@/test/fixtures/controlplane";
 
+// A Domain Design result whose bounded context owns the design fixture's writer program
+// (CBPOST1M), so the Improve overlay can map the slice -> context DDD.
+const DOMAIN_DONE = {
+  status: "done",
+  error: null,
+  result: {
+    repo_slug: "aws-mf-carddemo",
+    version: 1,
+    rating: "high",
+    contexts: [{
+      name: "Posting", business_capability: "Post transactions",
+      member_programs: ["CBPOST1M"], owned_resources: ["TRANFILE"], depends_on: [],
+      topology: { deployment: "microservice", score: 0.7, inputs: {}, rationale: "" },
+      extraction_rank: 1, identity_drift: false,
+    }],
+    designs: [{
+      context: "Posting",
+      aggregates: [{ name: "Posting", root_entity: "Posting", invariants: ["amount != 0"],
+                     entities: [], value_objects: [], methods: ["post"] }],
+      value_objects: [], domain_services: [], repositories: [], domain_events: [],
+      api_surface: "POST /accounts", cobol_mapping: [],
+    }],
+  },
+};
+
 describe("DesignStudio", () => {
   it("designs writer slices with context, ownership gate, and ADRs", async () => {
     render(<DesignStudio workspaceId="ws-1" />);
@@ -17,33 +42,38 @@ describe("DesignStudio", () => {
     expect(screen.getByText(/ADR-3: Legacy Mimic for parity/)).toBeInTheDocument();
   });
 
-  it("merges LLM elaboration into design cards after clicking Improve", async () => {
+  it("Improve overlays the Domain Design DDD onto each slice (no fresh LLM call)", async () => {
+    server.use(http.get("/api/workspaces/:id/domain-design", () => HttpResponse.json(DOMAIN_DONE)));
     render(<DesignStudio workspaceId="ws-1" />);
-    // load the deterministic designs first
     await userEvent.click(screen.getByRole("button", { name: /design services/i }));
     expect(await screen.findByText("CBPOST1M-slice")).toBeInTheDocument();
 
-    // trigger enrichment
     await userEvent.click(screen.getByRole("button", { name: /improve/i }));
 
-    // api_surface from the enrichment result should appear
-    expect(await screen.findByText(/POST \/accounts/i)).toBeInTheDocument();
+    // The slice now shows its bounded context + that context's API surface from Domain Design.
+    expect(await screen.findByText(/Bounded context:/)).toBeInTheDocument();
+    expect(screen.getByText(/POST \/accounts/)).toBeInTheDocument();
   });
 
-  it("auto-loads designs and shows Improve button when design stage is already passed", async () => {
-    // Override /stages so the design stage is already passed
+  it("Improve tells you to run Domain Design first when none exists", async () => {
+    server.use(http.get("/api/workspaces/:id/domain-design", () =>
+      HttpResponse.json({ status: "idle", result: null, error: null })));
+    render(<DesignStudio workspaceId="ws-1" />);
+    await userEvent.click(screen.getByRole("button", { name: /design services/i }));
+    expect(await screen.findByText("CBPOST1M-slice")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /improve/i }));
+    expect(await screen.findByText(/run the Domain Design stage/i)).toBeInTheDocument();
+  });
+
+  it("auto-loads designs and shows the Improve button when the design stage is already passed", async () => {
     server.use(http.get("/api/workspaces/:id/stages", () =>
       HttpResponse.json(
         STAGES.map((s) => s.stage_key === "design" ? { ...s, status: "passed" } : s),
       ),
     ));
-
     render(<DesignStudio workspaceId="ws-1" />);
-
-    // Design content should appear without any button click
     expect(await screen.findByText("CBPOST1M-slice")).toBeInTheDocument();
-
-    // The Improve button must be visible
     expect(screen.getByRole("button", { name: /improve/i })).toBeInTheDocument();
   });
 });

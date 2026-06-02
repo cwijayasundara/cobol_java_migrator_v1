@@ -1,22 +1,25 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Boxes, Play, AlertTriangle, CheckCircle2, ShieldAlert, Sparkles } from "lucide-react";
-import { api, type DesignResult, type DesignEnrichResult } from "@/lib/api";
-import { useJob } from "@/lib/useJob";
+import { Boxes, Play, Sparkles, AlertTriangle, CheckCircle2, ShieldAlert } from "lucide-react";
+import {
+  api, type DesignResult, type DomainDesignResult, type DomainContext,
+  type DomainContextDesign,
+} from "@/lib/api";
 
-// Design stage: a deterministic service design per WRITER slice — bounded-context
-// assignment from owned resources + template ADRs + the data-ownership /
-// groundedness gate. No LLM. Run Parse first.
+// Deterministic per-WRITER-slice service design (bounded-context assignment from owned
+// resources + template ADRs + the data-ownership / groundedness gate; no LLM).
+//
+// "Improve" does NOT run its own LLM pass. It grounds each slice in the OO/DDD output
+// produced by the Domain Design stage (the previous step): each writer slice is mapped to
+// the bounded context that owns its program, and that context's tactical design (aggregates,
+// API surface, topology) is overlaid onto the slice. Run Domain Design (Decompose) first.
 export function DesignStudio({ workspaceId }: { workspaceId: string }) {
   const [result, setResult] = useState<DesignResult | null>(null);
+  const [domain, setDomain] = useState<DomainDesignResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  const enrich = useJob<DesignEnrichResult>(
-    () => api.startDesignEnrich(workspaceId),
-    () => api.getDesignEnrichment(workspaceId),
-  );
+  const [improving, setImproving] = useState(false);
 
   const run = async () => {
     setBusy(true); setError(null);
@@ -26,6 +29,24 @@ export function DesignStudio({ workspaceId }: { workspaceId: string }) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  // Improve = ground this design in the Domain Design DDD output (no new LLM call).
+  const improve = async () => {
+    setImproving(true); setError(null);
+    try {
+      const job = await api.getDomainDesign(workspaceId);
+      if (!job.result || job.result.contexts.length === 0) {
+        setError("No Domain Design yet — run the Domain Design stage (Decompose) first, then Improve.");
+        setDomain(null);
+        return;
+      }
+      setDomain(job.result);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImproving(false);
     }
   };
 
@@ -46,7 +67,12 @@ export function DesignStudio({ workspaceId }: { workspaceId: string }) {
     return () => { alive = false; };
   }, [workspaceId]);
 
-  const narr = enrich.result?.narratives ?? {};
+  const programOf = (sliceId: string) => sliceId.replace(/-slice$/, "");
+  const ctxForProgram = (prog: string): DomainContext | undefined =>
+    domain?.contexts.find((c) =>
+      c.member_programs.some((m) => m === prog || m.startsWith(prog + ".")));
+  const designByCtx: Record<string, DomainContextDesign> =
+    Object.fromEntries((domain?.designs ?? []).map((d) => [d.context, d]));
 
   return (
     <div className="p-4 space-y-4 max-w-3xl">
@@ -55,8 +81,9 @@ export function DesignStudio({ workspaceId }: { workspaceId: string }) {
         <h3 className="text-sm font-medium text-zinc-300">Service design</h3>
       </div>
       <p className="text-xs text-zinc-500">
-        Per writer slice: bounded-context assignment from owned resources, template
-        ADRs, and a data-ownership / groundedness gate. Deterministic (no LLM). Run Parse first.
+        Per writer slice: bounded-context assignment from owned resources, template ADRs, and a
+        data-ownership / groundedness gate. Deterministic (no LLM). <strong>Improve</strong> grounds
+        each slice in the OO/DDD design from the Domain Design stage — run Domain Design first.
       </p>
       <div className="flex items-center gap-2">
         <button onClick={run} disabled={busy}
@@ -64,9 +91,9 @@ export function DesignStudio({ workspaceId }: { workspaceId: string }) {
           <Play className="w-4 h-4" />{busy ? "Designing…" : "Design services"}
         </button>
         {result && (
-          <button onClick={enrich.run} disabled={enrich.busy}
+          <button onClick={improve} disabled={improving}
             className="inline-flex items-center gap-2 px-4 py-2 text-sm rounded bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40">
-            <Sparkles className="w-4 h-4" />{enrich.busy ? "Enriching…" : "Improve"}
+            <Sparkles className="w-4 h-4" />{improving ? "Improving…" : "Improve"}
           </button>
         )}
       </div>
@@ -78,19 +105,13 @@ export function DesignStudio({ workspaceId }: { workspaceId: string }) {
         </div>
       )}
 
-      {enrich.error && (
-        <div className="flex items-start gap-2 rounded-md border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">
-          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-          <span className="font-mono break-all">{enrich.error}</span>
-        </div>
-      )}
-
       {result && result.designs.length === 0 && (
         <p className="text-xs text-zinc-500">No writer slices found in this repo.</p>
       )}
 
       {result && result.designs.map((d) => {
-        const n = narr[d.design.slice_id];
+        const ctx = ctxForProgram(programOf(d.design.slice_id));
+        const dd = ctx ? designByCtx[ctx.name] : undefined;
         return (
           <div key={d.design.slice_id} className="rounded-md border border-zinc-800 p-3 space-y-2">
             <div className="flex items-center gap-3">
@@ -114,49 +135,40 @@ export function DesignStudio({ workspaceId }: { workspaceId: string }) {
               </div>
             )}
             <ul className="space-y-1">
-              {d.adrs.map((a) => {
-                const enrichedAdr = n?.adrs.find((ea) => ea.number === a.number);
-                return (
-                  <li key={a.number} className="text-xs text-zinc-400 border-l-2 border-zinc-700 pl-2">
-                    <span className="text-zinc-300">ADR-{a.number}: {a.title}</span>
-                    <span className="text-zinc-600"> ({a.status})</span> — {a.decision}
-                    {enrichedAdr && (
-                      <div className="mt-1 space-y-0.5 text-zinc-500">
-                        {enrichedAdr.context && (
-                          <div><span className="text-zinc-600">Context:</span> {enrichedAdr.context}</div>
-                        )}
-                        {enrichedAdr.consequences && (
-                          <div><span className="text-zinc-600">Consequences:</span> {enrichedAdr.consequences}</div>
-                        )}
-                        {enrichedAdr.alternatives && (
-                          <div><span className="text-zinc-600">Alternatives:</span> {enrichedAdr.alternatives}</div>
-                        )}
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
+              {d.adrs.map((a) => (
+                <li key={a.number} className="text-xs text-zinc-400 border-l-2 border-zinc-700 pl-2">
+                  <span className="text-zinc-300">ADR-{a.number}: {a.title}</span>
+                  <span className="text-zinc-600"> ({a.status})</span> — {a.decision}
+                </li>
+              ))}
             </ul>
-            {n && (
-              <div className="space-y-1 pt-1 border-t border-zinc-800">
-                {n.component_descriptions.length > 0 && (
+
+            {/* DDD overlay from the Domain Design stage (after Improve). */}
+            {ctx && (
+              <div className="space-y-1 pt-1 border-t border-indigo-900/50">
+                <div className="text-xs text-indigo-300">
+                  <Sparkles className="inline w-3 h-3 mr-1" />
+                  Bounded context: <strong>{ctx.name}</strong>
+                  {" · "}<span className={ctx.topology?.deployment === "microservice" ? "text-emerald-300" : "text-zinc-300"}>
+                    {ctx.topology?.deployment ?? "n/a"}
+                  </span>{" "}<span className="text-zinc-500">(from Domain Design)</span>
+                </div>
+                {dd && dd.aggregates.length > 0 && (
                   <div className="text-xs text-zinc-400">
-                    <span className="text-zinc-500">Components:</span>
+                    <span className="text-zinc-500">Aggregates:</span>
                     <ul className="mt-0.5 space-y-0.5 pl-2">
-                      {n.component_descriptions.map((desc, i) => (
-                        <li key={i} className="text-zinc-400">{desc}</li>
+                      {dd.aggregates.map((a) => (
+                        <li key={a.name} className="text-zinc-400">
+                          <span className="text-zinc-300">{a.name}</span>
+                          {a.methods.length > 0 && <> — {a.methods.join(", ")}</>}
+                        </li>
                       ))}
                     </ul>
                   </div>
                 )}
-                {n.api_surface && (
+                {dd?.api_surface && (
                   <div className="text-xs text-zinc-400">
-                    <span className="text-zinc-500">API surface:</span> {n.api_surface}
-                  </div>
-                )}
-                {n.data_model_notes && (
-                  <div className="text-xs text-zinc-400">
-                    <span className="text-zinc-500">Data model:</span> {n.data_model_notes}
+                    <span className="text-zinc-500">API surface:</span> {dd.api_surface}
                   </div>
                 )}
               </div>
