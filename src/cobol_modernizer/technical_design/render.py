@@ -31,6 +31,11 @@ def render_html(design: TechnicalDesign) -> str:
             for p in svc.persistence:
                 parts.append(f"<tr><td>{escape(p.resource)}</td><td>{escape(p.access_pattern)}</td></tr>")
             parts.append("</table>")
+        if svc.integrations:
+            parts.append("<table><tr><th>Integration</th><th>Style</th><th>Target</th></tr>")
+            for i in svc.integrations:
+                parts.append(f"<tr><td>{escape(i.name)}</td><td>{escape(i.style)}</td><td>{escape(i.target)}</td></tr>")
+            parts.append("</table>")
         parts.append("</div>")
     parts.append("</body></html>")
     return "".join(parts)
