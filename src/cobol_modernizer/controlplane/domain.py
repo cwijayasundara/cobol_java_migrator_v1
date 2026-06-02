@@ -3,12 +3,17 @@ mirroring brd.storage.BRDStorage. The GET path reads the latest persisted node s
 design survives a server restart (the JobRunner only tracks in-flight progress)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from cobol_modernizer.domain.assemble import assemble
+from cobol_modernizer.domain.decompose import decompose
 from cobol_modernizer.domain.schema import DomainDesign
+from cobol_modernizer.domain.tactical import design_all_contexts
+from cobol_modernizer.seam.signals import raw_signals_for_program
 
 _SAVE = """
 MATCH (r:Repository {slug: $repo_slug})
@@ -55,3 +60,19 @@ class DomainDesignStorage:
     def get_latest(self, repo_slug: str) -> dict | None:
         rows = self.client.run(_LATEST, repo_slug=repo_slug)
         return rows[0]["d"] if rows else None
+
+
+def run_domain_design(client: Any, repo_slug: str, *, brd_text: str, runner: Any,
+                      model: str, timeout_s: float, signals_fn=raw_signals_for_program,
+                      version: int = 0) -> DomainDesign:
+    """Phases 1-3, synchronous wrapper (drives the async agents via asyncio.run).
+    Does NOT persist — the caller persists so it can inject storage/version."""
+    async def _go() -> DomainDesign:
+        dm = await decompose(client, repo_slug, brd_text=brd_text, runner=runner,
+                             model=model, timeout_s=timeout_s, signals_fn=signals_fn)
+        known = {r["q"] for r in client.run(
+            "MATCH (n:CodeEntity {repo:$repo}) RETURN n.qualified_name AS q", repo=repo_slug)}
+        designs = await design_all_contexts(dm.contexts, known_refs=known, runner=runner,
+                                            model=model, timeout_s=timeout_s)
+        return assemble(repo_slug, dm, designs, version=version)
+    return asyncio.run(_go())

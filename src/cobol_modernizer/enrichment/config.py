@@ -8,7 +8,7 @@ import os
 from cobol_modernizer.cost.tiering import GLOBAL_ENV, SONNET
 
 _MODEL_ENV = {"seams": "SEAM_ENRICH_MODEL", "plan": "PLAN_ENRICH_MODEL",
-              "design": "DESIGN_ENRICH_MODEL"}
+              "design": "DESIGN_ENRICH_MODEL", "domain": "DOMAIN_DESIGN_MODEL"}
 
 
 def enrich_model(stage: str) -> str:
