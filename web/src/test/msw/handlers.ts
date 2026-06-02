@@ -1,6 +1,24 @@
 import { http, HttpResponse } from "msw";
 import { WORKSPACE, STAGES, GATES, BUDGET, RUN, ARTIFACT, REPOS } from "@/test/fixtures/controlplane";
 
+// Stateful flag so /domain-design mirrors the real 202+poll job: GET returns
+// {idle} until a decompose/refine POST starts the job, then {done, result}.
+let domainStarted = false;
+
+const DOMAIN_RESULT = {
+  repo_slug: "demo", version: 1, rating: "high",
+  contexts: [{ name: "Posting", business_capability: "Post transactions",
+    member_programs: ["CBTRN02C"], owned_resources: ["TRANSACT"], depends_on: [],
+    topology: { deployment: "microservice", score: 0.71, inputs: {}, rationale: "" },
+    extraction_rank: 1, identity_drift: false }],
+  designs: [{ context: "Posting", aggregates: [{ name: "Transaction",
+    root_entity: "Transaction", invariants: ["amount != 0"], entities: [],
+    value_objects: ["Money"], methods: ["post"] }], value_objects: [],
+    domain_services: ["PostingService"], repositories: ["TransactionRepository"],
+    domain_events: ["TransactionPosted"], api_surface: "POST /transactions",
+    cobol_mapping: [] }],
+};
+
 export const handlers = [
   http.get("/api/repos", () => HttpResponse.json(REPOS)),
   http.get("/api/workspaces", () => HttpResponse.json([WORKSPACE])),
@@ -182,6 +200,19 @@ export const handlers = [
       },
     },
   })),
+  // 202-style async job: POST starts it (running), GET polls to done with result.
+  http.post("/api/workspaces/:id/domain-design", () => {
+    domainStarted = true;
+    return HttpResponse.json({ status: "running", result: null, error: null });
+  }),
+  http.post("/api/workspaces/:id/domain-design/refine", () => {
+    domainStarted = true;
+    return HttpResponse.json({ status: "running", result: null, error: null });
+  }),
+  http.get("/api/workspaces/:id/domain-design", () =>
+    domainStarted
+      ? HttpResponse.json({ status: "done", error: null, result: DOMAIN_RESULT })
+      : HttpResponse.json({ status: "idle", result: null, error: null })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),

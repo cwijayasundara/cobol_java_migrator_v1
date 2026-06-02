@@ -10,8 +10,9 @@ DesignEvidenceMap = dict[str, list[str]]
 
 
 class BoundedContext(str, Enum):
-    """The four CardDemo bounded contexts derived from seams + data ownership
-    (master plan Phase 5). Assignment is deterministic (context_map.py), not LLM."""
+    """Legacy named bounded contexts, kept for back-compat with callers/tests that
+    reference members by name. Context assignment is now GENERIC (context_map.py) and
+    ``ServiceDesign.context`` is a plain ``str`` so any derived label validates."""
     account_management = "account_management"
     card_management = "card_management"
     transaction_processing = "transaction_processing"
@@ -24,7 +25,7 @@ Deployment = Literal["modular_monolith", "microservice"]
 class ServiceDesign(BaseModel):
     slice_id: str
     deployment: Deployment = "modular_monolith"   # modular monolith is the default
-    context: BoundedContext
+    context: str                                   # generic bounded-context label (see context_map.py)
     owned_resources: list[str]                     # VSAM/file/table this service OWNS (writes)
     transition_pattern: str                        # e.g. extract_product_lines+legacy_mimic
     components: list[str]                           # planned Java components

@@ -31,6 +31,17 @@ def get_graph(repo: str | None = None, limit: int = 300,
         raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
 
 
+@router.get("/graph/neighbors")
+def get_graph_neighbors(id: str, repo: str | None = None, limit: int = 50,
+                        client=Depends(get_neo4j)) -> dict:
+    """One-hop neighbors of `id` (qualified_name), shaped like /graph — backs the
+    cockpit's double-click-to-expand. `repo` scopes neighbors to the same repo."""
+    try:
+        return CodeGraphQueries(client).neighbors_of(id, repo=repo, limit=limit)
+    except _NEO4J_ERRORS as exc:
+        raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
+
+
 @router.get("/workspaces/{wid}/graph-summary")
 def graph_summary(wid: str, session: Session = Depends(get_session),
                   client=Depends(get_neo4j)) -> dict:

@@ -159,6 +159,35 @@ class CodeGraphQueries:
         )
         return {"nodes": node_rows, "links": link_rows}
 
+    def neighbors_of(self, qualified_name: str, *, repo: str | None = None,
+                     limit: int = 50) -> dict:
+        """Read-only: the entities one hop from `qualified_name` (either direction)
+        plus the relationships connecting them to it — same {nodes, links} shape as
+        graph_overview. Powers the cockpit's double-click-to-expand: pulls in
+        neighbors that the capped initial overview may have left out."""
+        rows = self.client.run(
+            """
+            MATCH (n:CodeEntity {qualified_name: $q})-[r]-(m:CodeEntity)
+            WHERE $repo IS NULL OR m.repo = $repo
+            RETURN m.qualified_name AS id, m.simple_name AS name, m.kind AS kind,
+                   m.file_path AS file, m.semantic_summary AS summary,
+                   startNode(r).qualified_name AS source,
+                   endNode(r).qualified_name AS target, type(r) AS type
+            LIMIT $limit
+            """,
+            q=qualified_name, repo=repo, limit=limit,
+        )
+        nodes: dict[str, dict] = {}
+        links: dict[tuple[str, str, str], dict] = {}
+        for r in rows:
+            nodes.setdefault(r["id"], {"id": r["id"], "name": r["name"],
+                                      "kind": r["kind"], "file": r["file"],
+                                      "summary": r["summary"]})
+            key = (r["source"], r["target"], r["type"])
+            links.setdefault(key, {"source": r["source"], "target": r["target"],
+                                   "type": r["type"]})
+        return {"nodes": list(nodes.values()), "links": list(links.values())}
+
     def entity_detail(self, qualified_name: str) -> dict | None:
         """Read-only: an entity's props + incoming/outgoing relationships, shaped for
         the cockpit EntityDetail. Returns None if the entity is unknown."""

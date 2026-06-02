@@ -30,5 +30,15 @@ def test_graph_and_entity_endpoints(neo4j_graph):
         assert e["entity"]["qualified_name"] == "CBACT01C"
         assert any(o["relationship"] == "CONTAINS" for o in e["outgoing"])
         assert client.get("/api/entity/NOSUCH").status_code == 404
+
+        # double-click-to-expand: one-hop neighbors of the program (its paragraph).
+        nb = client.get(
+            "/api/graph/neighbors?id=CBACT01C&repo=aws-mf-carddemo").json()
+        assert {n["id"] for n in nb["nodes"]} == {"CBACT01C.1000-MAIN"}
+        assert any(l["type"] == "CONTAINS" and l["source"] == "CBACT01C"
+                   for l in nb["links"])
+        # unknown id -> empty, not an error
+        empty = client.get("/api/graph/neighbors?id=NOSUCH").json()
+        assert empty == {"nodes": [], "links": []}
     finally:
         app.dependency_overrides.pop(get_neo4j, None)

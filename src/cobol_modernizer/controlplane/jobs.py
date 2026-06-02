@@ -42,6 +42,8 @@ class JobRunner:
                 "finished_at": None, "result": None, "error": None,
             }
 
+        logger.info("%s job started for %s", kind, wid)
+
         def _run() -> None:
             t0 = time.monotonic()
             try:

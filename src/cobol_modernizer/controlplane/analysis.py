@@ -21,17 +21,22 @@ import asyncio
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import HTMLResponse
 from neo4j.exceptions import DriverError, Neo4jError
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cobol_modernizer.agent.harness import SdkAgentRunner
+from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
+from cobol_modernizer.controlplane.domain import DomainDesignStorage, run_domain_design
+from cobol_modernizer.domain.render import render_html
 from cobol_modernizer.design.adr import default_adrs_for_writer_slice
 from cobol_modernizer.design.context_map import assign_context
 from cobol_modernizer.design.judge import judge_design
-from cobol_modernizer.design.schema import BoundedContext, ServiceDesign
+from cobol_modernizer.design.schema import ServiceDesign
 from cobol_modernizer.enrichment.config import enrich_model, enrich_timeout_s
 from cobol_modernizer.enrichment.design import enrich_design
 from cobol_modernizer.enrichment.plan import enrich_plan
@@ -191,6 +196,17 @@ def run_plan(wid: str, session: Session = Depends(get_session),
                             detail="no seams to plan — run the Parse stage first")
     stories = stories_from_seam_set(cands, repo_id=ws.repo_slug)
     dag = derive_dependencies(stories, cands, repo_id=ws.repo_slug)
+    # Best-effort: tag stories with their bounded context if a domain-design exists.
+    # Purely optional enrichment — it must NEVER break planning, so swallow anything
+    # (missing graph, malformed JSON, a stub client without .run in tests).
+    try:
+        latest = DomainDesignStorage(neo4j).get_latest(ws.repo_slug)
+        if latest:
+            import json as _json
+            from cobol_modernizer.planner.tagging import tag_stories_with_contexts
+            tag_stories_with_contexts(dag.stories, _json.loads(latest.get("contexts_json") or "[]"))
+    except Exception:  # noqa: BLE001 — story tagging is optional, never fatal to run_plan
+        pass
     acyclic = is_acyclic(dag)
     order = topo_order(dag) if acyclic else []
     waves = delivery_waves(dag) if acyclic else []
@@ -237,7 +253,7 @@ def _compute_designs(neo4j, slug: str) -> list[dict]:
         external = {res: [w for w in writers_of.get(res, []) if w != prog]
                     for res in owned if any(w != prog for w in writers_of.get(res, []))}
         design = ServiceDesign(
-            slice_id=f"{prog}-slice", context=BoundedContext(context),
+            slice_id=f"{prog}-slice", context=context,
             owned_resources=owned, transition_pattern="extract_product_lines+legacy_mimic",
             components=[f"{prog}Service", f"{prog}Repository"],
             evidence_map={"DR-1": [prog]})
@@ -303,3 +319,110 @@ def design_enrichment(wid: str, session: Session = Depends(get_session),
                       neo4j=Depends(get_neo4j)) -> dict:
     _workspace(session, wid)
     return _job_view(jobs.runner.get("design-enrich", wid))
+
+
+class _DomainRefineBody(BaseModel):
+    instruction: str = ""
+
+
+def _brd_text(neo, slug: str) -> str:
+    """Latest BRD as plain text for the decomposition prompt; '' if none yet."""
+    try:
+        latest = BRDStorage(neo).get_latest(slug)
+    except _NEO4J_ERRORS:
+        return ""
+    if not latest:
+        return ""
+    import json as _json
+    secs = latest.get("sections")
+    if secs:
+        try:
+            return "\n\n".join(s.get("body_markdown", "")
+                               for s in _json.loads(secs) if isinstance(s, dict))
+        except Exception:  # noqa: BLE001
+            pass
+    return str(latest.get("html", ""))
+
+
+def _domain_run_and_persist(slug: str, *, instruction: str = "") -> dict:
+    neo = jobs.make_neo4j()
+    try:
+        brd = _brd_text(neo, slug)
+        if instruction:
+            brd = f"{brd}\n\n## Refinement instruction\n{instruction}"
+        runner = SdkAgentRunner()
+        dd = run_domain_design(neo, slug, brd_text=brd, runner=runner,
+                               model=enrich_model("domain"),
+                               timeout_s=enrich_timeout_s("domain"))
+        neo.run("MERGE (r:Repository {slug:$slug})", slug=slug)
+        dd = DomainDesignStorage(neo).save(dd, html=render_html(dd),
+                                           model=enrich_model("domain"),
+                                           token_usage=dict(runner.token_usage),
+                                           evidence_map={})
+        return {"repo_slug": slug, "version": dd.version, "rating": dd.rating,
+                "contexts": [c.model_dump(mode="json") for c in dd.contexts],
+                "designs": [d.model_dump(mode="json") for d in dd.designs],
+                "token_usage": dict(runner.token_usage)}
+    finally:
+        try:
+            neo.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@router.post("/workspaces/{wid}/domain-design", status_code=202)
+def domain_design_start(wid: str, session: Session = Depends(get_session),
+                        neo4j=Depends(get_neo4j)) -> dict:
+    ws = _workspace(session, wid)
+    _require_llm()
+    slug = ws.repo_slug
+    return _job_view(jobs.runner.start("domain-design", wid,
+                                       lambda: _domain_run_and_persist(slug)))
+
+
+@router.post("/workspaces/{wid}/domain-design/refine", status_code=202)
+def domain_design_refine(wid: str, body: _DomainRefineBody,
+                         session: Session = Depends(get_session),
+                         neo4j=Depends(get_neo4j)) -> dict:
+    ws = _workspace(session, wid)
+    _require_llm()
+    instruction = (body.instruction or "").strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="instruction must be non-empty")
+    slug = ws.repo_slug
+    return _job_view(jobs.runner.start("domain-design", wid,
+                                       lambda: _domain_run_and_persist(slug, instruction=instruction)))
+
+
+@router.get("/workspaces/{wid}/domain-design")
+def domain_design_status(wid: str, session: Session = Depends(get_session),
+                         neo4j=Depends(get_neo4j)) -> dict:
+    ws = _workspace(session, wid)
+    job = jobs.runner.get("domain-design", wid)
+    if job is not None:
+        return _job_view(job)
+    try:
+        latest = DomainDesignStorage(neo4j).get_latest(ws.repo_slug)
+    except _NEO4J_ERRORS:
+        latest = None
+    if latest:
+        import json as _json
+        return {"status": "done", "error": None, "result": {
+            "repo_slug": ws.repo_slug, "version": latest.get("version"),
+            "rating": latest.get("rating"),
+            "contexts": _json.loads(latest.get("contexts_json") or "[]"),
+            "designs": _json.loads(latest.get("designs_json") or "[]")}}
+    return {"status": "idle", "result": None, "error": None}
+
+
+@router.get("/workspaces/{wid}/domain-design/html", response_class=HTMLResponse)
+def domain_design_html(wid: str, session: Session = Depends(get_session),
+                       neo4j=Depends(get_neo4j)) -> HTMLResponse:
+    ws = _workspace(session, wid)
+    try:
+        latest = DomainDesignStorage(neo4j).get_latest(ws.repo_slug)
+    except _NEO4J_ERRORS as exc:
+        raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
+    if not latest or not latest.get("html"):
+        raise HTTPException(status_code=404, detail="no domain design yet — run it first")
+    return HTMLResponse(content=latest["html"])

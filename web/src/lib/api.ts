@@ -101,6 +101,22 @@ export interface DesignResult {
   repo_slug: string; count: number; designs: ServiceDesignResult[];
 }
 
+// Domain Design (DDD bounded contexts + aggregates) types.
+export interface DomainTopology { deployment: "module" | "microservice"; score: number;
+  inputs?: Record<string, number>; rationale?: string }
+export interface DomainContext { name: string; business_capability: string;
+  member_programs: string[]; owned_resources: string[];
+  depends_on: { target: string; style: "sync" | "async"; reason: string }[];
+  topology: DomainTopology | null; extraction_rank: number; identity_drift: boolean }
+export interface DomainAggregate { name: string; root_entity: string; invariants: string[];
+  entities: string[]; value_objects: string[]; methods: string[] }
+export interface DomainContextDesign { context: string; aggregates: DomainAggregate[];
+  value_objects: string[]; domain_services: string[]; repositories: string[];
+  domain_events: string[]; api_surface: string;
+  cobol_mapping: { cobol_ref: string; maps_to: string; note: string }[] }
+export interface DomainDesignResult { repo_slug: string; version: number; rating: string;
+  contexts: DomainContext[]; designs: DomainContextDesign[] }
+
 // Result of a finished Blueprint (grounded LLM Business Requirements Document).
 export interface BlueprintResult {
   repo_slug: string; brd_id: string; version: number;
@@ -259,6 +275,17 @@ export const api = {
   getDesignEnrichment: (id: string) =>
     json<EnrichJob<DesignEnrichResult>>(`/api/workspaces/${id}/design/enrichment`),
 
+  // ---- domain design: DDD bounded contexts + aggregates (POST → 202; GET → poll; refine with instruction) ----
+  startDomainDesign: (id: string) =>
+    json<EnrichJob<DomainDesignResult>>(`/api/workspaces/${id}/domain-design`, { method: "POST" }),
+  refineDomainDesign: (id: string, instruction: string) =>
+    json<EnrichJob<DomainDesignResult>>(
+      `/api/workspaces/${id}/domain-design/refine`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction }) }),
+  getDomainDesign: (id: string) =>
+    json<EnrichJob<DomainDesignResult>>(`/api/workspaces/${id}/domain-design`),
+
   // ---- verify: deterministic equivalence diff on supplied golden + candidate ----
   runVerify: (workspaceId: string, body: VerifyRequest) =>
     json<VerifyResult>(`/api/workspaces/${workspaceId}/verify`, {
@@ -297,6 +324,13 @@ export const api = {
     if (repo) params.set("repo", repo);
     params.set("limit", String(limit));
     return json<GraphData>(`/api/graph?${params}`);
+  },
+  // One-hop neighbors of a node (double-click-to-expand). Same {nodes,links} shape.
+  getNeighbors: (id: string, repo?: string, limit = 50) => {
+    const params = new URLSearchParams({ id });
+    if (repo) params.set("repo", repo);
+    params.set("limit", String(limit));
+    return json<GraphData>(`/api/graph/neighbors?${params}`);
   },
   getEntity: (qname: string) => json<EntityDetail>(`/api/entity/${qname}`),
 

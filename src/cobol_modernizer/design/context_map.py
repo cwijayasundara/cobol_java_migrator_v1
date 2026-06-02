@@ -1,29 +1,17 @@
-"""Deterministic bounded-context assignment from data ownership.
+"""Deterministic, GENERIC bounded-context assignment from data ownership.
 
-A program belongs to the context that owns the data it WRITES. Writer-set
-comes from the v2 graph (READS/WRITES/EXECUTES_* with intent), computed in
-Cypher in Phase 1/4 — zero LLM in this path."""
+A program belongs to the context that owns the data it WRITES. The context
+label is derived generically from the names of the owned resources — no
+hardcoded resource->context map. Writer-set comes from the v2 graph
+(READS/WRITES/EXECUTES_* with intent), computed in Cypher in Phase 1/4 —
+zero LLM in this path.
+
+NOTE: this is the legacy DETERMINISTIC fallback. The LLM domain-design stage
+does not use this module."""
 from __future__ import annotations
 
-from collections import Counter
+import re
 from typing import Protocol
-
-# CardDemo VSAM/file -> bounded context. Grounded in the four Phase-5 contexts.
-RESOURCE_CONTEXT: dict[str, str] = {
-    "ACCTDAT": "account_management",
-    "ACCTFILE": "account_management",
-    "CUSTDAT": "account_management",
-    "CARDDAT": "card_management",
-    "CARDFILE": "card_management",
-    "CXACAIX": "card_management",
-    "TRANSACT": "transaction_processing",
-    "TRANFILE": "transaction_processing",
-    "TCATBAL": "transaction_processing",
-    "TCATBALF": "transaction_processing",
-    "DALYTRAN": "transaction_processing",
-    "BILLPAY": "bill_pay_reporting",
-    "RPTFILE": "bill_pay_reporting",
-}
 
 
 class _WriterDeps(Protocol):
@@ -35,17 +23,22 @@ def owned_resources(deps: _WriterDeps, program: str) -> list[str]:
     return sorted(set(deps.writer_resources(program)))
 
 
-def assign_context(deps: _WriterDeps, program: str) -> str:
-    owned = owned_resources(deps, program)
-    if not owned:
-        raise ValueError(f"{program} has no owned (written) resources; "
-                         f"reader-only programs are not assigned a context")
-    tally: Counter[str] = Counter()
-    for res in owned:
-        ctx = RESOURCE_CONTEXT.get(res)
-        if ctx:
-            tally[ctx] += 1
-    if not tally:
-        raise ValueError(f"{program} owns resources {owned} with no known context")
-    # dominant context wins; ties broken by name for determinism
-    return sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+def assign_context_generic(adapter, program: str) -> str:
+    """Derive a bounded-context label generically from the resources a program writes —
+    the longest common alpha prefix of its owned resources, lowercased. No hardcoded map."""
+    resources = [r for r in adapter.writer_resources(program) if r]
+    if not resources:
+        raise ValueError(f"{program} writes no resources")
+    tokens = [re.sub(r"[^A-Za-z]", "", r).upper() for r in resources]
+    tokens = [t for t in tokens if t] or [re.sub(r"[^A-Za-z]", "", program).upper()]
+    prefix = tokens[0]
+    for t in tokens[1:]:
+        while not t.startswith(prefix) and len(prefix) > 3:
+            prefix = prefix[:-1]
+    base = prefix if len(prefix) >= 3 else tokens[0]
+    return f"{base.lower()}_context"
+
+
+def assign_context(adapter: _WriterDeps, program: str) -> str:
+    """Back-compat alias; delegates to the generic implementation."""
+    return assign_context_generic(adapter, program)
