@@ -401,7 +401,8 @@ def _backlog_json_for_domain(neo, slug: str) -> str:
         if not latest:
             return ""
         return _json.dumps({"stories": _json.loads(latest.get("stories_json") or "[]")})
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — story injection is best-effort, never fatal to domain run
+        logger.warning("could not read backlog for domain %s — proceeding without it", slug, exc_info=True)
         return ""
 
 
