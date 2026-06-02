@@ -7,7 +7,8 @@ Deterministic (no LLM) — run over the parsed graph, 409 if not yet parsed:
 - POST /api/workspaces/{id}/plan — an acyclic story DAG derived from those seams
   (deterministic dependency derivation + topological order + delivery waves; the
   LLM INVEST judge from the full pipeline is intentionally skipped here).
-- POST /api/workspaces/{id}/design — per-writer-slice bounded-context design + ADRs.
+  (The deterministic writer-slice design POST has been retired; the cockpit's
+  Design stage now lives in controlplane/technical_design.py.)
 
 LLM enrichment (opt-in, multi-minute background jobs; ANTHROPIC_API_KEY required) —
 these only ADD narrative on top of the deterministic output and degrade to
@@ -317,23 +318,6 @@ def _compute_designs(neo4j, slug: str) -> list[dict]:
             "rationale": report.rationale,
         })
     return designs
-
-
-@router.post("/workspaces/{wid}/design")
-def run_design(wid: str, session: Session = Depends(get_session),
-               neo4j=Depends(get_neo4j)) -> dict:
-    """Deterministic service design for each WRITER slice: bounded-context
-    assignment (from owned/written resources) + template ADRs (modular monolith,
-    Extract Product Lines, Legacy Mimic) + the data-ownership/groundedness gate.
-    No LLM."""
-    ws = _workspace(session, wid)
-    try:
-        designs = _compute_designs(neo4j, ws.repo_slug)
-    except _NEO4J_ERRORS as exc:
-        raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
-    _mark_passed(session, wid, "design")
-    session.flush()
-    return {"repo_slug": ws.repo_slug, "count": len(designs), "designs": designs}
 
 
 @router.post("/workspaces/{wid}/design/enrich", status_code=202)

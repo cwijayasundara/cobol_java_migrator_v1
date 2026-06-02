@@ -12,7 +12,7 @@ def test_router_exposes_all_cockpit_paths():
         "/api/workspaces/{wid}/parse",
         "/api/workspaces/{wid}/seams",
         "/api/workspaces/{wid}/plan",
-        "/api/workspaces/{wid}/design",
+        "/api/workspaces/{wid}/technical-design",
         "/api/workspaces/{wid}/blueprint",
         "/api/workspaces/{wid}/blueprint/html",
         "/api/workspaces/{wid}/build",
