@@ -5,8 +5,8 @@ import { OutcomeOverview } from "@/components/screens/OutcomeOverview";
 describe("OutcomeOverview", () => {
   it("shows journey progress, graph stats, budget, and a next-step link", async () => {
     render(<OutcomeOverview workspaceId="ws-1" repoSlug="aws-mf-carddemo" />);
-    // journey progress (fixture: 5 stages passed of 12 canonical stages)
-    expect(await screen.findByText(/5 \/ 12 stages passed/)).toBeInTheDocument();
+    // journey progress (fixture: 5 stages passed of 13 canonical stages)
+    expect(await screen.findByText(/5 \/ 13 stages passed/)).toBeInTheDocument();
     // graph stats from graph-summary
     expect(screen.getByText(/40 entities · 29 relationships/)).toBeInTheDocument();
     // budget vs cap

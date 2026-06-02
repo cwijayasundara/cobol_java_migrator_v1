@@ -195,6 +195,18 @@ export interface BacklogJob {
   error: string | null;
 }
 
+// Background-job status for the Technical Design stage (POST/GET .../technical-design).
+export interface TechnicalDesignResultSummary {
+  repo_slug: string;
+  version: number;
+  services: number;
+}
+export interface TechnicalDesignJob {
+  status: JobStatus;
+  result: TechnicalDesignResultSummary | null;
+  error: string | null;
+}
+
 // Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
 export interface AskAnswer {
   answer: string;
@@ -359,4 +371,12 @@ export const api = {
     json<BacklogJob>(`/api/workspaces/${workspaceId}/backlog`),
   backlogHtmlUrl: (workspaceId: string) =>
     `/api/workspaces/${workspaceId}/backlog/html`,
+
+  // ---- technical design: LLM service contracts (POST → job; GET → poll; html → rendered view) ----
+  startTechnicalDesign: (workspaceId: string) =>
+    json<TechnicalDesignJob>(`/api/workspaces/${workspaceId}/technical-design`, { method: "POST" }),
+  getTechnicalDesignStatus: (workspaceId: string) =>
+    json<TechnicalDesignJob>(`/api/workspaces/${workspaceId}/technical-design`),
+  technicalDesignHtmlUrl: (workspaceId: string) =>
+    `/api/workspaces/${workspaceId}/technical-design/html`,
 };

@@ -223,6 +223,16 @@ export const handlers = [
   http.get("/api/workspaces/:id/backlog/html", () =>
     new HttpResponse("<html><body>Backlog v1</body></html>",
       { headers: { "Content-Type": "text/html" } })),
+  http.post("/api/workspaces/:id/technical-design", () =>
+    HttpResponse.json({ status: "running", result: null, error: null }, { status: 202 })),
+  http.get("/api/workspaces/:id/technical-design", () =>
+    HttpResponse.json({
+      status: "done", error: null,
+      result: { repo_slug: "carddemo-mini", version: 1, services: 3 },
+    })),
+  http.get("/api/workspaces/:id/technical-design/html", () =>
+    new HttpResponse("<html><body>Technical Design v1</body></html>",
+      { headers: { "Content-Type": "text/html" } })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),

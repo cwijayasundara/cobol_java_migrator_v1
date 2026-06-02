@@ -7,7 +7,8 @@ describe("NextStageButton", () => {
     const cases: Array<[string, string, string]> = [
       ["graph", "Explore", "explore"],
       ["explore", "Blueprint", "blueprint"],
-      ["blueprint", "Seams", "seams"],
+      ["blueprint", "Backlog", "backlog"],
+      ["backlog", "Seams", "seams"],
       ["seams", "Plan", "plan"],
       ["plan", "Domain Design", "domain"],
       ["domain", "Design", "design"],
