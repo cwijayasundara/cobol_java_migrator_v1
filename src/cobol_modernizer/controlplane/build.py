@@ -82,10 +82,11 @@ def scan_generated_test_refs(project_dir, acceptance_criteria_ids: list[str]) ->
             except OSError:
                 continue
     haystack = "\n".join(blobs)
-    return sorted({ac for ac in acceptance_criteria_ids if ac and ac in haystack})
+    return sorted({ac for ac in acceptance_criteria_ids
+                   if ac and re.search(r"\b" + re.escape(ac) + r"\b", haystack)})
 
 
-def _record_generated_test_refs(session, *, workspace_id: str, project_dir,
+def _record_generated_test_refs(session: Session, *, workspace_id: str, project_dir,
                                 acceptance_criteria_ids: list[str]) -> None:
     """Persist which acceptance-criterion ids the generated tests cite, as a
     versioned Artifact the Verify stage's story-behavior gate reads."""
