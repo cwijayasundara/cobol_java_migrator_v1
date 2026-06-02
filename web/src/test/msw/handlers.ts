@@ -182,6 +182,23 @@ export const handlers = [
       },
     },
   })),
+  http.post("/api/workspaces/:id/domain-design", () =>
+    HttpResponse.json({ status: "done", result: {
+      repo_slug: "demo", version: 1, rating: "high",
+      contexts: [{ name: "Posting", business_capability: "Post transactions",
+        member_programs: ["CBTRN02C"], owned_resources: ["TRANSACT"], depends_on: [],
+        topology: { deployment: "microservice", score: 0.71, inputs: {}, rationale: "" },
+        extraction_rank: 1, identity_drift: false }],
+      designs: [{ context: "Posting", aggregates: [{ name: "Transaction",
+        root_entity: "Transaction", invariants: ["amount != 0"], entities: [],
+        value_objects: ["Money"], methods: ["post"] }], value_objects: [],
+        domain_services: ["PostingService"], repositories: ["TransactionRepository"],
+        domain_events: ["TransactionPosted"], api_surface: "POST /transactions",
+        cobol_mapping: [] }] }, error: null })),
+  http.post("/api/workspaces/:id/domain-design/refine", () =>
+    HttpResponse.json({ status: "running", result: null, error: null }, { status: 202 })),
+  http.get("/api/workspaces/:id/domain-design", () =>
+    HttpResponse.json({ status: "idle", result: null, error: null })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),

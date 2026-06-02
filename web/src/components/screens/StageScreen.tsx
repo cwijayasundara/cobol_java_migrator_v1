@@ -9,6 +9,7 @@ import { BlueprintStudio } from "@/components/screens/BlueprintStudio";
 import { SeamStudio } from "@/components/screens/SeamStudio";
 import { IncrementPlanner } from "@/components/screens/IncrementPlanner";
 import { DesignStudio } from "@/components/screens/DesignStudio";
+import { DomainStudio } from "@/components/screens/DomainStudio";
 import { BuildLab } from "@/components/screens/BuildLab";
 import { EquivalenceLab } from "@/components/screens/EquivalenceLab";
 
@@ -25,6 +26,7 @@ export function StageScreen(
     case "seams": return <SeamStudio workspaceId={workspaceId} />;
     case "plan": return <IncrementPlanner workspaceId={workspaceId} />;
     case "design": return <DesignStudio workspaceId={workspaceId} />;
+    case "domain": return <DomainStudio workspaceId={workspaceId} />;
     case "build": return <BuildLab workspaceId={workspaceId} />;
     case "verify": return <EquivalenceLab workspaceId={workspaceId} />;
     default:
