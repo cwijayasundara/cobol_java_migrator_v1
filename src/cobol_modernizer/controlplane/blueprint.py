@@ -25,7 +25,9 @@ from neo4j.exceptions import DriverError, Neo4jError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from cobol_modernizer.brd.pipeline import generate_brd_graph_sync
+from pydantic import BaseModel
+
+from cobol_modernizer.brd.pipeline import generate_brd_graph_sync, improve_brd_graph_sync
 from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
@@ -108,7 +110,14 @@ def run_blueprint(*, session: Session, neo4j, workspace: Workspace,
     }
 
 
-def _job_view(job: dict) -> dict:
+class _ImproveBody(BaseModel):
+    instruction: str
+
+
+def _job_view(job: dict | None) -> dict:
+    if job is None:
+        return {"status": "idle", "result": None, "error": None,
+                "started_at": None, "finished_at": None}
     return {"status": job["status"], "result": job.get("result"),
             "error": job.get("error"), "started_at": job.get("started_at"),
             "finished_at": job.get("finished_at")}
@@ -185,3 +194,53 @@ def blueprint_html(wid: str, session: Session = Depends(get_session),
         raise HTTPException(status_code=404,
                             detail="no BRD yet — run the Blueprint stage first")
     return HTMLResponse(content=latest["html"])
+
+
+@router.post("/workspaces/{wid}/blueprint/improve", status_code=202)
+def blueprint_improve(wid: str, body: _ImproveBody,
+                      session: Session = Depends(get_session),
+                      neo4j=Depends(get_neo4j)) -> dict:
+    """Refine the latest BRD per a free-text instruction (graph-grounded) as a
+    background job, saving a new version. Validates fast: needs the key, a non-empty
+    instruction, and an existing BRD."""
+    ws = _workspace(session, wid)
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(status_code=503,
+                            detail="ANTHROPIC_API_KEY not set — Improve needs an LLM.")
+    instruction = (body.instruction or "").strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="instruction must be non-empty")
+    try:
+        if BRDStorage(neo4j).get_latest(ws.repo_slug) is None:
+            raise HTTPException(status_code=409,
+                                detail="no BRD yet — generate a blueprint first")
+    except _NEO4J_ERRORS as exc:
+        raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
+
+    slug = ws.repo_slug
+    repo_dir = _source_root() / slug
+
+    def _job() -> dict:
+        neo = jobs.make_neo4j()
+        try:
+            result = improve_brd_graph_sync(slug, instruction, client=neo,
+                                            repo_path=str(repo_dir.resolve()))
+            return {"repo_slug": slug, "brd_id": result.brd_id,
+                    "version": result.version,
+                    "rating": result.rating.value if hasattr(result.rating, "value") else result.rating,
+                    "weighted_score": result.weighted_score, "model": result.model,
+                    "token_usage": dict(result.token_usage)}
+        finally:
+            try:
+                neo.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _job_view(jobs.runner.start("blueprint-improve", wid, _job))
+
+
+@router.get("/workspaces/{wid}/blueprint/improve")
+def blueprint_improve_status(wid: str, session: Session = Depends(get_session),
+                             neo4j=Depends(get_neo4j)) -> dict:
+    _workspace(session, wid)
+    return _job_view(jobs.runner.get("blueprint-improve", wid))

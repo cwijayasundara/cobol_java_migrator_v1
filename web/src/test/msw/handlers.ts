@@ -111,6 +111,10 @@ export const handlers = [
   http.get("/api/workspaces/:id/blueprint/html", () =>
     new HttpResponse("<html><body>BRD v1</body></html>",
       { headers: { "Content-Type": "text/html" } })),
+  http.post("/api/workspaces/:id/blueprint/improve", () =>
+    HttpResponse.json({ status: "running", result: null, error: null }, { status: 202 })),
+  http.get("/api/workspaces/:id/blueprint/improve", () =>
+    HttpResponse.json({ status: "idle", result: null, error: null })),
   http.post("/api/workspaces/:id/build", () => HttpResponse.json(
     { status: "running", result: null, error: null, started_at: 1, finished_at: null },
     { status: 202 })),

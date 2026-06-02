@@ -100,6 +100,63 @@ async def agenerate_brd_graph(deps: GraphDeps, *, runner: AgentRunner, model: st
                           strategy=final_brd.strategy)
 
 
+def improve_brd_graph_sync(repo_id: str, instruction: str, *, client=None,
+                           repo_path=None, model: str | None = None,
+                           max_turns: int | None = None,
+                           storage: "BRDStorage | None" = None) -> BRDResult:
+    """Refine the latest BRD per `instruction` (graph-grounded), re-judge, save a NEW
+    version. Raises ValueError if no BRD exists yet (endpoint maps this to 409)."""
+    from cobol_modernizer.agent.brd_improve import agenerate_brd_improvement
+    from cobol_modernizer.agent.brd_judge import ajudge
+    from cobol_modernizer.agent.deps import GraphDeps
+    from cobol_modernizer.agent.harness import SdkAgentRunner
+
+    if client is None:
+        from cobol_modernizer.neo4j_client import Neo4jClient
+        client = Neo4jClient()
+    if repo_path is None:
+        from cobol_modernizer.repo_manager import RepoManager
+        repo = RepoManager(client).get(repo_id)
+        if repo is None or not repo.get("local_path"):
+            raise ValueError(f"Repo {repo_id} not registered or missing local_path")
+        repo_path = repo["local_path"]
+    if storage is None:
+        storage = BRDStorage(client)
+
+    latest = storage.get_latest(repo_id)
+    if not latest:
+        raise ValueError(f"no BRD to improve for {repo_id} — generate a blueprint first")
+    draft = BRDStorage.reconstruct_draft(latest)
+    current_brd = (draft.model_dump_json() if draft is not None
+                   else (latest.get("html") or ""))
+
+    model = model or resolve_model("brd")
+    judge_pin = os.getenv("BRD_JUDGE_MODEL") or os.getenv(GLOBAL_ENV)
+    judge_model = judge_pin or HAIKU
+    max_turns = int(os.getenv("BRD_AGENT_MAX_TURNS", "45")) if max_turns is None else max_turns
+    timeout_s = float(os.getenv("BLUEPRINT_IMPROVE_TIMEOUT_S", "600"))
+
+    deps = GraphDeps(client=client, repo_id=repo_id, repo_path=Path(repo_path))
+    runner = SdkAgentRunner()
+    wall_start = time.monotonic()
+    improved, strategy = asyncio.run(agenerate_brd_improvement(
+        deps, current_brd=current_brd, instruction=instruction, runner=runner,
+        model=model, max_turns=max_turns, timeout_s=timeout_s))
+    brd = _draft_to_brd(improved, repo_id, model, strategy)
+    report = asyncio.run(ajudge(brd, deps, runner=runner, model=judge_model))
+    _log_timing(repo_id, 0, False, model, runner, time.monotonic() - wall_start)
+
+    html = render_html(brd)
+    return storage.save(
+        repo_id=repo_id, html=html, judge_report=report,
+        attempt_history=[AttemptRecord(attempt=1, rating=report.rating,
+                                       weighted_score=report.weighted_score,
+                                       feedback=report.feedback)],
+        model=model, strategy=strategy, token_usage=dict(runner.token_usage),
+        sections=[s.model_dump(mode="json") for s in brd.sections],
+        evidence_map=brd.evidence_map)
+
+
 def generate_brd_graph_sync(repo_id: str, *, client=None, repo_path=None,
                             max_retries: int | None = None, model: str | None = None,
                             max_turns: int | None = None,
@@ -184,4 +241,6 @@ def generate_brd_graph_sync(repo_id: str, *, client=None, repo_path=None,
         attempt_history=result.attempt_history, model=model,
         strategy=result.strategy,
         token_usage=dict(runner.token_usage),
+        sections=[s.model_dump(mode="json") for s in result.brd.sections],
+        evidence_map=result.brd.evidence_map,
     )
