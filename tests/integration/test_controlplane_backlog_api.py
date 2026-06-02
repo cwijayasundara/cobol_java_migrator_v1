@@ -105,3 +105,23 @@ def test_backlog_post_generates_persists_and_creates_gate(monkeypatch):
     finally:
         app.dependency_overrides.clear()
         jobs.runner.inline = False
+
+
+def test_backlog_post_surfaces_generation_failure(monkeypatch):
+    from cobol_modernizer.controlplane import backlog as bl
+
+    async def _boom(**_kw):
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(bl, "generate_backlog_payload", _boom)
+    client, _ = _client(monkeypatch)
+    try:
+        r = client.post("/api/workspaces/ws-1/backlog")
+        assert r.status_code in (200, 202)
+        failed = client.get("/api/workspaces/ws-1/backlog").json()
+        assert failed["status"] == "failed"
+        assert failed["error"]
+        assert "llm down" in failed["error"]
+    finally:
+        app.dependency_overrides.clear()
+        jobs.runner.inline = False

@@ -33,6 +33,7 @@ router = APIRouter(prefix="/api", tags=["controlplane-backlog"])
 _NEO4J_ERRORS = (Neo4jError, DriverError)
 
 _GRAPH_REFS_Q = "MATCH (n:CodeEntity {repo:$repo}) RETURN n.qualified_name AS q"
+_DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
 def _coverage_min() -> float:
@@ -51,8 +52,11 @@ def _workspace(session: Session, wid: str) -> Workspace:
 
 def _job_view(job: dict | None) -> dict:
     if job is None:
-        return {"status": "idle", "result": None, "error": None}
-    return {"status": job["status"], "result": job.get("result"), "error": job.get("error")}
+        return {"status": "idle", "result": None, "error": None,
+                "started_at": None, "finished_at": None}
+    return {"status": job["status"], "result": job.get("result"),
+            "error": job.get("error"), "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at")}
 
 
 def _requirement_ids(sections: list[dict]) -> set[str]:
@@ -73,8 +77,15 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
     brd = BRDStorage(neo4j).get_latest(slug)
     if not brd:
         raise HTTPException(status_code=409, detail=f"no BRD for '{slug}' — run Blueprint first")
-    sections = json.loads(brd.get("sections") or "[]") if isinstance(brd.get("sections"), str) \
-        else (brd.get("sections") or [])
+    raw_sections = brd.get("sections")
+    if isinstance(raw_sections, str):
+        try:
+            sections = json.loads(raw_sections or "[]")
+        except json.JSONDecodeError:
+            logger.warning("backlog: malformed BRD sections JSON for %s — treating as empty", slug)
+            sections = []
+    else:
+        sections = raw_sections or []
     known_refs = [r["q"] for r in neo4j.run(_GRAPH_REFS_Q, repo=slug) if r.get("q")]
     known_req_ids = _requirement_ids(sections)
 
@@ -83,13 +94,17 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
               slug=slug)
 
     gen = generate or generate_backlog_payload
-    raw = asyncio.run(gen(runner=SdkAgentRunner(), model=os.environ.get("BACKLOG_MODEL", "claude-sonnet-4-6"),
+    raw = asyncio.run(gen(runner=SdkAgentRunner(), model=os.environ.get("BACKLOG_MODEL", _DEFAULT_MODEL),
                           timeout_s=float(os.environ.get("BACKLOG_TIMEOUT_S", "300")),
                           brd_sections=sections, known_refs=known_refs,
                           known_requirement_ids=sorted(known_req_ids)))
     backlog = parse_backlog_payload(raw, repo_slug=slug, known_refs=set(known_refs),
                                     known_requirement_ids=known_req_ids)
-    seam_candidates = rank_candidates(neo4j, repo=slug)
+    try:
+        seam_candidates = rank_candidates(neo4j, repo=slug)
+    except _NEO4J_ERRORS:
+        logger.warning("backlog: seam ranking failed for %s — deriving DAG without seams", slug)
+        seam_candidates = []
     dag = derive_story_dependencies(backlog.stories, seam_candidates, repo_slug=slug)
     backlog.stories = dag.stories
     backlog.evidence_map = {s.id: s.evidence_refs for s in backlog.stories}
@@ -99,8 +114,9 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
     BacklogStorage(neo4j).save(backlog, coverage=coverage,
                                html=render_html(backlog, coverage))
 
-    passed = report.coverage_ratio >= _coverage_min()
-    threshold = {"min_coverage": _coverage_min()}
+    min_cov = _coverage_min()
+    passed = report.coverage_ratio >= min_cov
+    threshold = {"min_coverage": min_cov}
     result = {"coverage_ratio": report.coverage_ratio, "uncovered": report.uncovered_refs[:50]}
     upsert_gate(session, workspace.id, "backlog", "backlog_coverage",
                 passed=passed, result=result, threshold=threshold)
