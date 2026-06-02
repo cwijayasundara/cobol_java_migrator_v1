@@ -36,7 +36,7 @@ from cobol_modernizer.domain.render import render_html
 from cobol_modernizer.design.adr import default_adrs_for_writer_slice
 from cobol_modernizer.design.context_map import assign_context
 from cobol_modernizer.design.judge import judge_design
-from cobol_modernizer.design.schema import BoundedContext, ServiceDesign
+from cobol_modernizer.design.schema import ServiceDesign
 from cobol_modernizer.enrichment.config import enrich_model, enrich_timeout_s
 from cobol_modernizer.enrichment.design import enrich_design
 from cobol_modernizer.enrichment.plan import enrich_plan
@@ -250,7 +250,7 @@ def _compute_designs(neo4j, slug: str) -> list[dict]:
         external = {res: [w for w in writers_of.get(res, []) if w != prog]
                     for res in owned if any(w != prog for w in writers_of.get(res, []))}
         design = ServiceDesign(
-            slice_id=f"{prog}-slice", context=BoundedContext(context),
+            slice_id=f"{prog}-slice", context=context,
             owned_resources=owned, transition_pattern="extract_product_lines+legacy_mimic",
             components=[f"{prog}Service", f"{prog}Repository"],
             evidence_map={"DR-1": [prog]})

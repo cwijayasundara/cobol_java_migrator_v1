@@ -21,7 +21,7 @@ def test_service_design_carries_evidence_map_and_data_ownership():
         components=["PostingService", "AccountBalanceRepository"],
         evidence_map={"DR-1": ["CBTRN02C", "CBTRN02C.2800-UPDATE-ACCOUNT-REC"]},
     )
-    assert d.context is BoundedContext.transaction_processing
+    assert d.context == BoundedContext.transaction_processing  # context is now a plain str
     assert "ACCTDAT" in d.owned_resources
     assert d.evidence_map["DR-1"] == ["CBTRN02C", "CBTRN02C.2800-UPDATE-ACCOUNT-REC"]
 
