@@ -149,3 +149,19 @@ async def test_generator_directs_agent_to_assert_domain_design():
     sent = (runner.calls[0]["system"] + runner.calls[0]["prompt"]).lower()
     assert "domain design" in sent
     assert "invariant" in sent
+
+
+async def test_generator_directs_agent_to_turn_acceptance_criteria_into_tests():
+    runner = FakeRunner(PAYLOAD)
+    await generate_slice(
+        runner=runner,
+        server=None,
+        model="m",
+        brd_json='{"backlog":{"stories":[{"id":"US-1","acceptance_criteria":[{"id":"AC-1","statement":"valid transaction updates balance"}]}]}}',
+        golden_summary="",
+        allowed_tools=[],
+    )
+    sent = (runner.calls[0]["system"] + runner.calls[0]["prompt"]).lower()
+    assert "acceptance criteria" in sent
+    assert "ac-1" in sent
+    assert "valid transaction updates balance" in sent

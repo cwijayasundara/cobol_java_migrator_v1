@@ -45,7 +45,10 @@ CODEGEN_SYSTEM = (
     "production code (kind='main') modelled on the design's aggregates and services. "
     "Every file MUST list the design/BRD refs (and any graph entity ids) it is "
     "grounded in. Do NOT invent behavior absent from the BRD/design (accidental legacy "
-    "behavior is excluded)."
+    "behavior is excluded). "
+    "If backlog stories are present, every acceptance criterion MUST become at least "
+    "one JUnit assertion and the generated test evidence MUST cite the story id and "
+    "acceptance criterion id."
 )
 
 
@@ -125,7 +128,9 @@ async def generate_slice(*, runner, server, model: str, brd_json: str,
         f"## Golden-master summary (the oracle)\n{golden_summary}\n"
         f"{_source_pack_section(source_pack)}"
         "Emit the failing tests first (assert the domain design's invariants and "
-        "api_surface), then the code."
+        "api_surface), then the code. "
+        "If the brief includes backlog stories, convert their acceptance criteria into "
+        "tests before writing production code."
     )
     raw = await runner.run_structured(
         system=CODEGEN_SYSTEM, prompt=prompt, server=server,
