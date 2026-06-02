@@ -9,31 +9,19 @@ import { useJob } from "@/lib/useJob";
 // deployment recommendation + full DDD tactical design. Replaces the 1:1 writer-slice mapping.
 export function DomainStudio({ workspaceId }: { workspaceId: string }) {
   const [instruction, setInstruction] = useState("");
-  const [decomposed, setDecomposed] = useState<DomainDesignResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
-  // Decompose drives the long job directly (POST → done) rather than via useJob,
-  // because useJob's on-mount "idle" poll would otherwise clobber the result.
-  const run = async () => {
-    setBusy(true); setError(null);
-    try {
-      const job = await api.startDomainDesign(workspaceId);
-      if (job.error) setError(job.error);
-      if (job.result) setDecomposed(job.result);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Refinement keeps the job hook (an LLM pass): start with the typed instruction, poll to done.
+  // /domain-design is an async background job: POST → 202 {running}, then poll
+  // GET until {done, result}. useJob drives the 202→poll→done lifecycle; on mount
+  // the GET reads {idle} so nothing is shown until Decompose is clicked.
+  const job = useJob<DomainDesignResult>(
+    () => api.startDomainDesign(workspaceId),
+    () => api.getDomainDesign(workspaceId),
+  );
   const refine = useJob<DomainDesignResult>(
     () => api.refineDomainDesign(workspaceId, instruction),
     () => api.getDomainDesign(workspaceId),
   );
-  const result = refine.result ?? decomposed;
+  const result = refine.result ?? job.result;
 
   const contexts = [...(result?.contexts ?? [])].sort(
     (a, b) => (a.extraction_rank || 0) - (b.extraction_rank || 0));
@@ -50,9 +38,9 @@ export function DomainStudio({ workspaceId }: { workspaceId: string }) {
         recommendation, strangler-fig extraction order, and full DDD tactical design. Run Blueprint first.
       </p>
       <div className="flex items-center gap-2">
-        <button onClick={run} disabled={busy}
+        <button onClick={job.run} disabled={job.busy}
           className="inline-flex items-center gap-2 px-4 py-2 text-sm rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40">
-          <Play className="w-4 h-4" />{busy ? "Decomposing…" : "Decompose"}
+          <Play className="w-4 h-4" />{job.busy ? "Decomposing…" : "Decompose"}
         </button>
       </div>
 
@@ -68,10 +56,10 @@ export function DomainStudio({ workspaceId }: { workspaceId: string }) {
         </div>
       )}
 
-      {(error || refine.error) && (
+      {(job.error || refine.error) && (
         <div className="flex items-start gap-2 rounded-md border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-          <span className="font-mono break-all">{error || refine.error}</span>
+          <span className="font-mono break-all">{job.error || refine.error}</span>
         </div>
       )}
 
