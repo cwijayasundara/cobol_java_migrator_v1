@@ -196,6 +196,14 @@ def run_plan(wid: str, session: Session = Depends(get_session),
                             detail="no seams to plan — run the Parse stage first")
     stories = stories_from_seam_set(cands, repo_id=ws.repo_slug)
     dag = derive_dependencies(stories, cands, repo_id=ws.repo_slug)
+    try:
+        latest = DomainDesignStorage(neo4j).get_latest(ws.repo_slug)
+        if latest:
+            import json as _json
+            from cobol_modernizer.planner.tagging import tag_stories_with_contexts
+            tag_stories_with_contexts(dag.stories, _json.loads(latest.get("contexts_json") or "[]"))
+    except _NEO4J_ERRORS:
+        pass
     acyclic = is_acyclic(dag)
     order = topo_order(dag) if acyclic else []
     waves = delivery_waves(dag) if acyclic else []

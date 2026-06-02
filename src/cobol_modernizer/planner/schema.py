@@ -21,6 +21,8 @@ class Story(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     invest: InvestScore | None = None
     evidence_map: EvidenceMap = Field(default_factory=dict)
+    context: str | None = None          # bounded context (from domain-design), if known
+    topology: str | None = None         # "module" | "microservice", if known
 
 
 class StoryDAG(BaseModel):
