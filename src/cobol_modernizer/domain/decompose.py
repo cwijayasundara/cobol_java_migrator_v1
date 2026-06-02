@@ -117,15 +117,28 @@ def _apply_topology(client: Any, repo: str, dm: DecompositionMap,
     assign_extraction_ranks(dm.contexts, inbound=inbound, business=business)
 
 
+def build_decomposition_prompt(*, brd_text: str, graph_summary: dict,
+                               backlog_json: str = "") -> str:
+    """The decomposition user prompt: BRD + graph coupling summary, and — when a
+    business backlog has been generated — the epics/stories so contexts trace to
+    business capabilities rather than COBOL structure."""
+    prompt = ("## BRD\n" + brd_text + "\n\n## Graph coupling summary\n```json\n"
+              + json.dumps(graph_summary) + "\n```\n")
+    if backlog_json.strip():
+        prompt += "\n## Business backlog\n```json\n" + backlog_json + "\n```\n"
+    prompt += ("Decompose into business-capability bounded contexts. Every writer "
+               "program must be assigned exactly once.")
+    return prompt
+
+
 async def decompose(client: Any, repo: str, *, brd_text: str, runner: Any, model: str,
                     timeout_s: float, signals_fn: SignalsFn = raw_signals_for_program,
-                    max_repairs: int = 2) -> DecompositionMap:
+                    max_repairs: int = 2, backlog_json: str = "") -> DecompositionMap:
     writers = _writers(client, repo)
     known = _known_refs(client, repo) | _brd_requirement_ids(brd_text)
     summary = graph_coupling_summary(client, repo)
-    base_prompt = ("## BRD\n" + brd_text + "\n\n## Graph coupling summary\n```json\n"
-                   + json.dumps(summary) + "\n```\nDecompose into business-capability "
-                   "bounded contexts. Every writer program must be assigned exactly once.")
+    base_prompt = build_decomposition_prompt(brd_text=brd_text, graph_summary=summary,
+                                             backlog_json=backlog_json)
     violations: list[str] = []
     for attempt in range(max_repairs + 1):
         prompt = base_prompt

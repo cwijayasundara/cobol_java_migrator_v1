@@ -63,12 +63,13 @@ class DomainDesignStorage:
 
 def run_domain_design(client: Any, repo_slug: str, *, brd_text: str, runner: Any,
                       model: str, timeout_s: float, signals_fn=raw_signals_for_program,
-                      version: int = 0) -> DomainDesign:
+                      version: int = 0, backlog_json: str = "") -> DomainDesign:
     """Phases 1-3, synchronous wrapper (drives the async agents via asyncio.run).
     Does NOT persist — the caller persists so it can inject storage/version."""
     async def _go() -> DomainDesign:
         dm = await decompose(client, repo_slug, brd_text=brd_text, runner=runner,
-                             model=model, timeout_s=timeout_s, signals_fn=signals_fn)
+                             model=model, timeout_s=timeout_s, signals_fn=signals_fn,
+                             backlog_json=backlog_json)
         known = {r["q"] for r in client.run(
             "MATCH (n:CodeEntity {repo:$repo}) RETURN n.qualified_name AS q", repo=repo_slug)}
         designs = await design_all_contexts(dm.contexts, known_refs=known, runner=runner,
