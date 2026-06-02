@@ -36,12 +36,15 @@ def brd_logic_coverage(
     evidence_map: Mapping[str, Sequence[str]],
     exclusions: Mapping[str, str] | None = None,
 ) -> LogicCoverageReport:
+    _ = brd_sections  # Reserved for future requirement-aware filtering.
     all_refs = _all_graph_refs(neo4j, repo_slug)
     excluded = dict(exclusions or {})
-    covered = [r for r in _covered_refs(evidence_map) if r in all_refs]
+    eligible_refs = [r for r in all_refs if r not in excluded]
+    eligible_set = set(eligible_refs)
+    covered = [r for r in _covered_refs(evidence_map) if r in eligible_set]
     covered_set = set(covered)
-    uncovered = [r for r in all_refs if r not in covered_set and r not in excluded]
-    effective_total = max(0, len(all_refs) - len([r for r in excluded if r in all_refs]))
+    uncovered = [r for r in eligible_refs if r not in covered_set]
+    effective_total = len(eligible_refs)
     ratio = (len(covered) / effective_total) if effective_total else 1.0
     return LogicCoverageReport(
         repo_slug=repo_slug,

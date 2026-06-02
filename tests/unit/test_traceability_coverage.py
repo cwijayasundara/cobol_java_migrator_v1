@@ -40,3 +40,20 @@ def test_brd_logic_coverage_accepts_intentional_exclusions():
 
     assert "CBPOST1M.2100-POST-TRAN" not in report.uncovered_refs
     assert report.exclusions["CBPOST1M.2100-POST-TRAN"] == "technical flow covered by program"
+
+
+def test_brd_logic_coverage_excluded_covered_refs_do_not_inflate_ratio():
+    report = brd_logic_coverage(
+        FakeNeo4j(),
+        "carddemo-mini",
+        brd_sections=[],
+        evidence_map={
+            "FR-1": ["CBPOST1M", "CBPOST1M.2100-POST-TRAN", "CBPOST1M.DT-AMOUNT"]
+        },
+        exclusions={"CBPOST1M.DT-AMOUNT": "field-level detail covered by transaction flow"},
+    )
+
+    assert report.total_refs == 2
+    assert report.covered_refs == ["CBPOST1M", "CBPOST1M.2100-POST-TRAN"]
+    assert report.coverage_ratio == 1.0
+    assert report.coverage_ratio <= 1.0
