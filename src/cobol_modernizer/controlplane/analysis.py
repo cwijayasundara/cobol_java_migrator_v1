@@ -390,6 +390,21 @@ def _brd_text(neo, slug: str) -> str:
     return str(latest.get("html", ""))
 
 
+def _backlog_json_for_domain(neo, slug: str) -> str:
+    """The persisted backlog's stories as a compact JSON string for the decomposition
+    prompt, or '' when no backlog exists (domain then grounds on the BRD alone). Never
+    raises — story injection is best-effort context, not a hard dependency."""
+    try:
+        from cobol_modernizer.backlog.storage import BacklogStorage
+        import json as _json
+        latest = BacklogStorage(neo).get_latest(slug)
+        if not latest:
+            return ""
+        return _json.dumps({"stories": _json.loads(latest.get("stories_json") or "[]")})
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _domain_run_and_persist(slug: str, *, wid: str | None = None,
                             instruction: str = "") -> dict:
     neo = jobs.make_neo4j()
@@ -403,7 +418,8 @@ def _domain_run_and_persist(slug: str, *, wid: str | None = None,
                                # decomposition over the BRD + graph summary is heavier than
                                # a narrative enrich; give it real headroom (override via
                                # DOMAIN_ENRICH_TIMEOUT_S).
-                               timeout_s=enrich_timeout_s("domain", default=300.0))
+                               timeout_s=enrich_timeout_s("domain", default=300.0),
+                               backlog_json=_backlog_json_for_domain(neo, slug))
         neo.run("MERGE (r:Repository {slug:$slug})", slug=slug)
         dd = DomainDesignStorage(neo).save(dd, html=render_html(dd),
                                            model=enrich_model("domain"),
