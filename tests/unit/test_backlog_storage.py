@@ -45,3 +45,10 @@ def test_get_latest_returns_node_or_none():
     BacklogStorage(neo).save(_backlog(), coverage={}, html="", model="")
     node = BacklogStorage(neo).get_latest("carddemo-mini")
     assert node["version"] == 1
+
+
+def test_save_twice_increments_version_on_get_latest():
+    neo = FakeNeo4j()
+    BacklogStorage(neo).save(_backlog(), coverage={}, html="", model="")
+    BacklogStorage(neo).save(_backlog(), coverage={}, html="", model="")
+    assert BacklogStorage(neo).get_latest("carddemo-mini")["version"] == 2
