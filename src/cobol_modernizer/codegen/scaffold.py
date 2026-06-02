@@ -1,4 +1,4 @@
-"""Deterministic Spring Boot 3.3 / Java 25 Maven module scaffold with all four
+"""Deterministic Spring Boot 4.0.6 / Java 25 Maven module scaffold with all four
 quality gates wired (ArchUnit, SpotBugs+FindSecBugs, Error Prone, Checkstyle).
 No LLM here — the agent only fills in src code/tests."""
 from __future__ import annotations
@@ -11,7 +11,7 @@ _POM = """<?xml version="1.0" encoding="UTF-8"?>
   <parent>
     <groupId>org.springframework.boot</groupId>
     <artifactId>spring-boot-starter-parent</artifactId>
-    <version>3.3.4</version>
+    <version>4.0.6</version>
   </parent>
   <groupId>com.cobolmodernizer</groupId>
   <artifactId>{module}</artifactId>
@@ -24,6 +24,19 @@ _POM = """<?xml version="1.0" encoding="UTF-8"?>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>runtime</scope>
     </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
