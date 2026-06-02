@@ -6,6 +6,8 @@ import {
   api, type DesignResult, type DomainDesignResult, type DomainContext,
   type DomainContextDesign,
 } from "@/lib/api";
+import { MermaidDiagram } from "@/components/MermaidDiagram";
+import { contextMapMermaid } from "@/lib/domainMermaid";
 
 // Deterministic per-WRITER-slice service design (bounded-context assignment from owned
 // resources + template ADRs + the data-ownership / groundedness gate; no LLM).
@@ -103,6 +105,12 @@ export function DesignStudio({ workspaceId }: { workspaceId: string }) {
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
           <span className="font-mono break-all">{error}</span>
         </div>
+      )}
+
+      {/* Context map from the Domain Design DDD (shown after Improve). */}
+      {domain && domain.contexts.length > 0 && (
+        <MermaidDiagram caption="Context map (from Domain Design) — contexts, topology & dependencies"
+          chart={contextMapMermaid(domain)} />
       )}
 
       {result && result.designs.length === 0 && (
