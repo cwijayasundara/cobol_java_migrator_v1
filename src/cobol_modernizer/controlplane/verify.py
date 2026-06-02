@@ -13,6 +13,7 @@ with defects marks it failed (this is a real gate, not a checkbox)."""
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -28,9 +29,10 @@ from cobol_modernizer.equivalence.golden import InMemoryGoldenStore
 from cobol_modernizer.equivalence.lab import EquivalenceLab
 from cobol_modernizer.equivalence.seam_link import resolve_source_seam
 from cobol_modernizer.equivalence.tolerance import load_ruleset
-from cobol_modernizer.persistence.tables import Artifact, JourneyStage, Workspace
+from cobol_modernizer.persistence.tables import Artifact, Gate, JourneyStage, Workspace
 from cobol_modernizer.slice.gates import story_behavior_gate
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["controlplane-verify"])
 _NEO4J_ERRORS = (Neo4jError, DriverError)
 
@@ -73,7 +75,7 @@ class VerifyRequest(BaseModel):
 
 
 def evaluate_story_behavior(session: Session, workspace_id: str, *, stories: list[dict],
-                            generated_test_refs: list[str], equivalence_verdict: str) -> "Gate":
+                            generated_test_refs: list[str], equivalence_verdict: str) -> Gate:
     """Aggregate per-story behavior gates into one verify-stage story_behavior gate.
     A normalized equivalence verdict of 'pass' maps to story_behavior_gate's 'passed'."""
     # story_behavior_gate expects 'passed' (not 'pass'); normalize here.
@@ -149,18 +151,19 @@ def run_verify(*, session: Session, neo4j, workspace: Workspace,
     try:
         backlog_node = BacklogStorage(neo4j).get_latest(workspace.repo_slug)
         stories = json.loads(backlog_node.get("stories_json") or "[]") if backlog_node else []
-    except _NEO4J_ERRORS:
-        stories = []
-    if stories:
-        refs_art = session.execute(
-            select(Artifact).where(Artifact.workspace_id == workspace.id,
-                                   Artifact.kind == "generated_test_refs")
-            .order_by(Artifact.version.desc())
-        ).scalars().first()
-        test_refs = (refs_art.evidence_map or {}).get("acceptance_criteria", []) if refs_art else []
-        evaluate_story_behavior(session, workspace.id, stories=stories,
-                                generated_test_refs=test_refs,
-                                equivalence_verdict=result.report.verdict)
+        if stories:
+            refs_art = session.execute(
+                select(Artifact).where(Artifact.workspace_id == workspace.id,
+                                       Artifact.kind == "generated_test_refs")
+                .order_by(Artifact.version.desc())
+            ).scalars().first()
+            test_refs = (refs_art.evidence_map or {}).get("acceptance_criteria", []) if refs_art else []
+            evaluate_story_behavior(session, workspace.id, stories=stories,
+                                    generated_test_refs=test_refs,
+                                    equivalence_verdict=result.report.verdict)
+    except Exception:  # noqa: BLE001 — story gate is additive; never break equivalence verify
+        logger.warning("verify: story-behavior gate evaluation failed; equivalence verdict stands",
+                       exc_info=True)
 
     session.flush()
     return {
