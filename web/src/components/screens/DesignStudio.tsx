@@ -12,6 +12,8 @@ export function DesignStudio({ workspaceId }: { workspaceId: string }) {
   const { result, error, busy, run } = useJob<TechnicalDesignResultSummary>(
     () => api.startTechnicalDesign(workspaceId),
     () => api.getTechnicalDesignStatus(workspaceId),
+    5000,
+    30000,
   );
 
   return (

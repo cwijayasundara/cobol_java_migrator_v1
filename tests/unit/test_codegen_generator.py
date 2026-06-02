@@ -26,6 +26,17 @@ class SequencedRunner:
         return self.payloads[idx]
 
 
+class HangingRunner:
+    def __init__(self):
+        self.calls = []
+
+    async def run_structured(self, **kw):
+        import asyncio
+        self.calls.append(kw)
+        await asyncio.sleep(60)
+        return {"files": []}
+
+
 _MAIN_ONLY = {"files": [
     {"path": "src/main/java/com/x/PostingService.java", "kind": "main",
      "content": "class PostingService {}", "evidence": ["CBTRN02C.2800-UPDATE"]}]}
@@ -72,6 +83,14 @@ async def test_generator_reports_empty_output_distinctly_from_tdd_violation():
     with pytest.raises(ValueError, match="no output.*turn cap"):
         await generate_slice(runner=runner, server=None, model="m", brd_json="{}",
                              golden_summary="", allowed_tools=[], max_turns=12)
+
+
+async def test_generator_times_out_slow_agent_call():
+    runner = HangingRunner()
+    with pytest.raises(ValueError, match="timed out"):
+        await generate_slice(runner=runner, server=None, model="m", brd_json="{}",
+                             golden_summary="", allowed_tools=[], timeout_s=0.01)
+    assert len(runner.calls) == 1
 
 
 def test_codegen_schema_requires_files():

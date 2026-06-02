@@ -18,10 +18,20 @@ class FakeNeo4j:
 
     def run(self, query, **params):
         if "(d:DomainDesign)" in query or "HAS_DOMAIN_DESIGN" in query:
-            return [{"d": {"version": 1, "contexts_json": json.dumps([{"name": "Posting"}]),
+            return [{"d": {"version": 1, "contexts_json": json.dumps([{
+                "name": "Posting",
+                "member_programs": ["CBPOST1M"],
+                "owned_resources": ["ACCTFILE"],
+                "topology": {"deployment": "module"},
+            }]),
                            "designs_json": "[]"}}]
         if "(b:Backlog)" in query or "HAS_BACKLOG" in query:
-            return [{"b": {"version": 1, "stories_json": json.dumps([{"id": "US-1"}]),
+            return [{"b": {"version": 1, "stories_json": json.dumps([{
+                "id": "US-1",
+                "title": "Post card transaction",
+                "context": "Posting",
+                "evidence_refs": ["CBPOST1M"],
+            }]),
                            "epics_json": "[]"}}]
         if "RETURN n.qualified_name AS q" in query:
             return [{"q": "CBPOST1M"}]
@@ -87,20 +97,22 @@ def _empty_payload(**_kw):
     return asyncio.sleep(0, result={})
 
 
-def test_technical_design_empty_payload_fails_job(monkeypatch):
-    # run_batched returns {} on an LLM error/timeout/turn-cap; the stage must FAIL the
-    # job, not persist an empty 0-service design and report success.
+def test_technical_design_empty_payload_uses_deterministic_fallback(monkeypatch):
+    # run_batched returns {} on an LLM error/timeout/turn-cap, including external
+    # billing failures. The stage should still produce a conservative graph-grounded
+    # design so migration planning remains usable without another model call.
     client, eng = _client(monkeypatch)
     monkeypatch.setattr(td, "generate_technical_design_payload", _empty_payload)
     jobs.runner._jobs.pop(("technical_design", "ws-1"), None)
     try:
         client.post("/api/workspaces/ws-1/technical-design")
         done = client.get("/api/workspaces/ws-1/technical-design").json()
-        assert done["status"] == "failed"
-        assert "no output" in (done["error"] or "")
+        assert done["status"] == "done"
+        assert done["result"]["services"] == 1
+        assert done["result"]["generation_mode"] == "deterministic_fallback"
         with Session(eng) as s:
             saved = s.execute(select(Gate).where(Gate.workspace_id == "ws-1")).scalars().all()
-            assert all(g.gate_key != "design_data_ownership" for g in saved)
+            assert {g.gate_key for g in saved} == {"design_data_ownership"}
     finally:
         app.dependency_overrides.clear()
         jobs.runner.inline = False

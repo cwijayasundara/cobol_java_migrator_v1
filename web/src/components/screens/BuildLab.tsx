@@ -13,6 +13,8 @@ export function BuildLab({ workspaceId }: { workspaceId: string }) {
   const { result, error, busy, run } = useJob<BuildResult>(
     () => api.startBuild(workspaceId),
     () => api.getBuildStatus(workspaceId),
+    5000,
+    30000,
   );
 
   return (

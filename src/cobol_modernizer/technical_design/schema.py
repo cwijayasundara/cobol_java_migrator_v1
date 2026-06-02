@@ -11,12 +11,14 @@ class ApiContract(BaseModel):
     path: str
     request_model: str = ""
     response_model: str = ""
+    details: str = ""
 
 
 class PersistenceDesign(BaseModel):
     resource: str
     access_pattern: Literal["legacy-mimic", "repository", "event-sourced", "read-replica"]
     owner_service: str = ""
+    details: str = ""
 
 
 class IntegrationContract(BaseModel):

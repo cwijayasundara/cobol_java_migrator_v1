@@ -243,7 +243,8 @@ def _generate_slice_graph(slug: str, *, neo4j, repo_path: str,
     return asyncio.run(generate_slice(
         runner=runner, server=server, model=model, source_pack=pack,
         brd_json=brd_json, golden_summary="(no recorded golden master yet)",
-        allowed_tools=allowed_tools, max_turns=max_turns))
+        allowed_tools=allowed_tools, max_turns=max_turns,
+        timeout_s=float(os.environ.get("CODEGEN_TIMEOUT_S", "120"))))
 
 
 def _brd_requirements(brd_node: dict) -> list[dict]:

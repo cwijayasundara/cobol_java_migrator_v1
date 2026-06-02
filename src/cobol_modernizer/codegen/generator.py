@@ -10,6 +10,7 @@ the engine runs a focused *repair* pass that asks ONLY for the missing failing
 tests, then merges them ahead of the code — so TDD is recovered, not re-run."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -86,7 +87,8 @@ def _mains_digest(mains: list[GeneratedFile]) -> str:
 async def _emit_tests_only(*, runner, server, model: str, brd_json: str,
                            golden_summary: str, allowed_tools: list[str],
                            max_turns: int, mains: list[GeneratedFile],
-                           source_pack: str = "") -> list[GeneratedFile]:
+                           source_pack: str = "",
+                           timeout_s: float = 120.0) -> list[GeneratedFile]:
     prompt = (
         f"## Migration brief — BRD requirements + DDD/OO domain design\n"
         f"```json\n{brd_json}\n```\n"
@@ -96,10 +98,10 @@ async def _emit_tests_only(*, runner, server, model: str, brd_json: str,
         f"{_mains_digest(mains)}\n"
         "Emit ONLY the missing failing test files (kind='test')."
     )
-    raw = await runner.run_structured(
-        system=TESTS_ONLY_SYSTEM, prompt=prompt, server=server,
+    raw = await _run_codegen_call(
+        runner=runner, system=TESTS_ONLY_SYSTEM, prompt=prompt, server=server,
         allowed_tools=allowed_tools, model=model, max_turns=max_turns,
-        schema=CODEGEN_SCHEMA, label="codegen-test-repair")
+        schema=CODEGEN_SCHEMA, label="codegen-test-repair", timeout_s=timeout_s)
     return _files_from(raw, only="test")
 
 
@@ -118,10 +120,27 @@ def _source_pack_section(source_pack: str) -> str:
     )
 
 
+async def _run_codegen_call(*, runner, system: str, prompt: str, server,
+                            allowed_tools: list[str], model: str, max_turns: int,
+                            schema: dict[str, Any], label: str,
+                            timeout_s: float) -> dict[str, Any]:
+    try:
+        return await asyncio.wait_for(
+            runner.run_structured(
+                system=system, prompt=prompt, server=server,
+                allowed_tools=allowed_tools, model=model, max_turns=max_turns,
+                schema=schema, label=label),
+            timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        logger.warning("codegen %s timed out after %.0fs", label, timeout_s)
+        raise ValueError(f"codegen {label} timed out after {timeout_s:.0f}s") from exc
+
+
 async def generate_slice(*, runner, server, model: str, brd_json: str,
                          golden_summary: str, allowed_tools: list[str],
                          max_turns: int = 40, repair_attempts: int = 2,
-                         source_pack: str = "") -> GeneratedProject:
+                         source_pack: str = "",
+                         timeout_s: float = 120.0) -> GeneratedProject:
     prompt = (
         f"## Migration brief — BRD requirements + DDD/OO domain design\n"
         f"```json\n{brd_json}\n```\n"
@@ -132,10 +151,10 @@ async def generate_slice(*, runner, server, model: str, brd_json: str,
         "If the brief includes backlog stories, convert their acceptance criteria into "
         "tests before writing production code."
     )
-    raw = await runner.run_structured(
-        system=CODEGEN_SYSTEM, prompt=prompt, server=server,
+    raw = await _run_codegen_call(
+        runner=runner, system=CODEGEN_SYSTEM, prompt=prompt, server=server,
         allowed_tools=allowed_tools, model=model, max_turns=max_turns,
-        schema=CODEGEN_SCHEMA, label="codegen")
+        schema=CODEGEN_SCHEMA, label="codegen", timeout_s=timeout_s)
     files = _files_from(raw)
     # Distinguish "the agent returned nothing" (hit the turn cap / errored — the
     # runner swallows it to {}) from a TDD shortfall (emitted code but no test). The
@@ -157,7 +176,8 @@ async def generate_slice(*, runner, server, model: str, brd_json: str,
         tests = await _emit_tests_only(
             runner=runner, server=server, model=model, brd_json=brd_json,
             golden_summary=golden_summary, allowed_tools=allowed_tools,
-            max_turns=max_turns, mains=mains, source_pack=source_pack)
+            max_turns=max_turns, mains=mains, source_pack=source_pack,
+            timeout_s=timeout_s)
 
     if not tests:
         raise ValueError(

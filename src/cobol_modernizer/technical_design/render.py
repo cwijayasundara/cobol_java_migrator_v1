@@ -22,14 +22,16 @@ def render_html(design: TechnicalDesign) -> str:
         if svc.story_ids:
             parts.append(f"<p>stories: {escape(', '.join(svc.story_ids))}</p>")
         if svc.api_contracts:
-            parts.append("<table><tr><th>API</th><th>Method</th><th>Path</th></tr>")
+            parts.append("<table><tr><th>API</th><th>Method</th><th>Path</th><th>Details</th></tr>")
             for a in svc.api_contracts:
-                parts.append(f"<tr><td>{escape(a.name)}</td><td>{escape(a.method)}</td><td>{escape(a.path)}</td></tr>")
+                parts.append(f"<tr><td>{escape(a.name)}</td><td>{escape(a.method)}</td>"
+                             f"<td>{escape(a.path)}</td><td>{escape(a.details)}</td></tr>")
             parts.append("</table>")
         if svc.persistence:
-            parts.append("<table><tr><th>Resource</th><th>Access pattern</th></tr>")
+            parts.append("<table><tr><th>Resource</th><th>Access pattern</th><th>Details</th></tr>")
             for p in svc.persistence:
-                parts.append(f"<tr><td>{escape(p.resource)}</td><td>{escape(p.access_pattern)}</td></tr>")
+                parts.append(f"<tr><td>{escape(p.resource)}</td><td>{escape(p.access_pattern)}</td>"
+                             f"<td>{escape(p.details)}</td></tr>")
             parts.append("</table>")
         if svc.integrations:
             parts.append("<table><tr><th>Integration</th><th>Style</th><th>Target</th></tr>")

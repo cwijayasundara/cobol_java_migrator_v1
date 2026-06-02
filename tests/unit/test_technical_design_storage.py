@@ -52,6 +52,19 @@ def test_render_html_lists_services_and_contracts():
     assert "ACCTFILE" in html
 
 
+def test_render_html_preserves_persistence_details():
+    design = TechnicalDesign(repo_slug="carddemo-mini", services=[
+        TechnicalService(name="posting-service", bounded_context="Posting", deployment="module",
+                         persistence=[PersistenceDesign(
+                             resource="ACCTFILE",
+                             access_pattern="legacy-mimic",
+                             details="read-by-key then rewrite-by-key in one transaction",
+                         )])])
+    html = render_html(design)
+    assert "read-by-key" in html
+    assert "rewrite-by-key" in html
+
+
 def test_render_html_escapes_special_characters():
     design = TechnicalDesign(repo_slug="repo<>&", services=[
         TechnicalService(name="svc<x>", bounded_context="Posting", deployment="module",

@@ -24,6 +24,7 @@ from cobol_modernizer.controlplane.gates_util import upsert_gate
 from cobol_modernizer.persistence.tables import Workspace
 from cobol_modernizer.seam.service import rank_candidates
 from cobol_modernizer.technical_design.generator import (
+    fallback_technical_design_payload,
     generate_technical_design_payload,
     parse_technical_design_payload,
 )
@@ -104,12 +105,14 @@ def run_technical_design(*, session: Session, neo4j, workspace: Workspace,
                           backlog_json=json.dumps({"stories": stories}),
                           seam_waves_json=json.dumps(seam_waves),
                           graph_summary={"refs": sorted(known_refs)[:200]}))
+    generation_mode = "llm"
     if not raw:
-        # run_batched swallows an LLM error/timeout/turn-cap to {}. Fail the job loudly
-        # rather than persist an empty 0-service design and report success.
-        raise HTTPException(status_code=502,
-                            detail="technical design generation returned no output "
-                                   "(LLM error, timeout, or turn cap) — see server logs")
+        logger.warning("technical_design: LLM returned no output for %s; using "
+                       "deterministic fallback", slug)
+        raw = fallback_technical_design_payload(contexts=contexts, stories=stories,
+                                                seam_waves=seam_waves,
+                                                known_refs=known_refs)
+        generation_mode = "deterministic_fallback"
     design = parse_technical_design_payload(raw, repo_slug=slug, known_refs=known_refs,
                                             known_story_ids=known_story_ids,
                                             known_contexts=known_contexts)
@@ -121,7 +124,8 @@ def run_technical_design(*, session: Session, neo4j, workspace: Workspace,
                 threshold={"unique_writer_ownership": True})
     session.flush()
     return {"repo_slug": slug, "services": len(design.services),
-            "data_ownership_ok": ok, "version": design.version}
+            "data_ownership_ok": ok, "version": design.version,
+            "generation_mode": generation_mode}
 
 
 @router.post("/workspaces/{wid}/technical-design", status_code=202)
