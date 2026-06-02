@@ -26,7 +26,7 @@ def cp_client():
                            graph_snapshot="snap-001", created_by="cwijay@biz2bricks.ai",
                            created_at=TS, status="active"))
         keys = ["outcome", "intake", "parse", "graph", "explore", "blueprint",
-                "seams", "plan", "domain", "design", "build", "verify"]
+                "backlog", "seams", "plan", "domain", "design", "build", "verify"]
         for i, k in enumerate(keys):
             seed.add(JourneyStage(id=f"stg-{k}", workspace_id="ws-1", stage_key=k,
                                   ordinal=i,

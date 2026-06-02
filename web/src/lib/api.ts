@@ -83,24 +83,6 @@ export interface PlanResult {
   delivery_waves?: string[][];
 }
 
-// Service design for one writer slice (POST .../design).
-export interface ServiceDesignDoc {
-  slice_id: string; context: string; owned_resources: string[];
-  transition_pattern: string; components: string[];
-  evidence_map: Record<string, string[]>;
-}
-export interface DesignAdr {
-  number: number; title: string; status: string; context: string;
-  decision: string; consequences: string; evidence_refs: string[];
-}
-export interface ServiceDesignResult {
-  design: ServiceDesignDoc; adrs: DesignAdr[]; rating: string;
-  data_ownership_ok: boolean; groundedness_failures: string[]; rationale: string;
-}
-export interface DesignResult {
-  repo_slug: string; count: number; designs: ServiceDesignResult[];
-}
-
 // Domain Design (DDD bounded contexts + aggregates) types.
 export interface DomainTopology { deployment: "module" | "microservice"; score: number;
   inputs?: Record<string, number>; rationale?: string }
@@ -181,6 +163,32 @@ export interface VerifyResult {
   open_questions: string[]; defects: EquivalenceDefect[];
 }
 
+// Background-job status for the Backlog stage (POST/GET .../backlog).
+export interface BacklogResultSummary {
+  repo_slug: string;
+  version: number;
+  epics: number;
+  stories: number;
+  coverage_ratio: number | null;
+}
+export interface BacklogJob {
+  status: JobStatus;
+  result: BacklogResultSummary | null;
+  error: string | null;
+}
+
+// Background-job status for the Technical Design stage (POST/GET .../technical-design).
+export interface TechnicalDesignResultSummary {
+  repo_slug: string;
+  version: number;
+  services: number;
+}
+export interface TechnicalDesignJob {
+  status: JobStatus;
+  result: TechnicalDesignResultSummary | null;
+  error: string | null;
+}
+
 // Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
 export interface AskAnswer {
   answer: string;
@@ -234,8 +242,6 @@ export const api = {
     json<SeamsResult>(`/api/workspaces/${workspaceId}/seams`, { method: "POST" }),
   runPlan: (workspaceId: string) =>
     json<PlanResult>(`/api/workspaces/${workspaceId}/plan`, { method: "POST" }),
-  runDesign: (workspaceId: string) =>
-    json<DesignResult>(`/api/workspaces/${workspaceId}/design`, { method: "POST" }),
 
   // ---- blueprint: grounded LLM BRD (multi-minute background job; POST then poll) ----
   startBlueprint: (workspaceId: string) =>
@@ -337,4 +343,20 @@ export const api = {
   // SSE URL is consumed by useAgentStream via EventSource (not fetch).
   runEventsUrl: (workspaceId: string, runId: string) =>
     `/api/workspaces/${workspaceId}/runs/${runId}/events`,
+
+  // ---- backlog: Agile backlog generator (POST → job; GET → poll; html → rendered view) ----
+  startBacklog: (workspaceId: string) =>
+    json<BacklogJob>(`/api/workspaces/${workspaceId}/backlog`, { method: "POST" }),
+  getBacklogStatus: (workspaceId: string) =>
+    json<BacklogJob>(`/api/workspaces/${workspaceId}/backlog`),
+  backlogHtmlUrl: (workspaceId: string) =>
+    `/api/workspaces/${workspaceId}/backlog/html`,
+
+  // ---- technical design: LLM service contracts (POST → job; GET → poll; html → rendered view) ----
+  startTechnicalDesign: (workspaceId: string) =>
+    json<TechnicalDesignJob>(`/api/workspaces/${workspaceId}/technical-design`, { method: "POST" }),
+  getTechnicalDesignStatus: (workspaceId: string) =>
+    json<TechnicalDesignJob>(`/api/workspaces/${workspaceId}/technical-design`),
+  technicalDesignHtmlUrl: (workspaceId: string) =>
+    `/api/workspaces/${workspaceId}/technical-design/html`,
 };

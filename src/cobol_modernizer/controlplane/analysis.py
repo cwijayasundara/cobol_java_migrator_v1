@@ -7,7 +7,8 @@ Deterministic (no LLM) — run over the parsed graph, 409 if not yet parsed:
 - POST /api/workspaces/{id}/plan — an acyclic story DAG derived from those seams
   (deterministic dependency derivation + topological order + delivery waves; the
   LLM INVEST judge from the full pipeline is intentionally skipped here).
-- POST /api/workspaces/{id}/design — per-writer-slice bounded-context design + ADRs.
+  (The deterministic writer-slice design POST has been retired; the cockpit's
+  Design stage now lives in controlplane/technical_design.py.)
 
 LLM enrichment (opt-in, multi-minute background jobs; ANTHROPIC_API_KEY required) —
 these only ADD narrative on top of the deterministic output and degrade to
@@ -319,23 +320,6 @@ def _compute_designs(neo4j, slug: str) -> list[dict]:
     return designs
 
 
-@router.post("/workspaces/{wid}/design")
-def run_design(wid: str, session: Session = Depends(get_session),
-               neo4j=Depends(get_neo4j)) -> dict:
-    """Deterministic service design for each WRITER slice: bounded-context
-    assignment (from owned/written resources) + template ADRs (modular monolith,
-    Extract Product Lines, Legacy Mimic) + the data-ownership/groundedness gate.
-    No LLM."""
-    ws = _workspace(session, wid)
-    try:
-        designs = _compute_designs(neo4j, ws.repo_slug)
-    except _NEO4J_ERRORS as exc:
-        raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
-    _mark_passed(session, wid, "design")
-    session.flush()
-    return {"repo_slug": ws.repo_slug, "count": len(designs), "designs": designs}
-
-
 @router.post("/workspaces/{wid}/design/enrich", status_code=202)
 def design_enrich(wid: str, refresh: bool = False,
                   session: Session = Depends(get_session),
@@ -390,6 +374,22 @@ def _brd_text(neo, slug: str) -> str:
     return str(latest.get("html", ""))
 
 
+def _backlog_json_for_domain(neo, slug: str) -> str:
+    """The persisted backlog's stories as a compact JSON string for the decomposition
+    prompt, or '' when no backlog exists (domain then grounds on the BRD alone). Never
+    raises — story injection is best-effort context, not a hard dependency."""
+    try:
+        from cobol_modernizer.backlog.storage import BacklogStorage
+        import json as _json
+        latest = BacklogStorage(neo).get_latest(slug)
+        if not latest:
+            return ""
+        return _json.dumps({"stories": _json.loads(latest.get("stories_json") or "[]")})
+    except Exception:  # noqa: BLE001 — story injection is best-effort, never fatal to domain run
+        logger.warning("could not read backlog for domain %s — proceeding without it", slug, exc_info=True)
+        return ""
+
+
 def _domain_run_and_persist(slug: str, *, wid: str | None = None,
                             instruction: str = "") -> dict:
     neo = jobs.make_neo4j()
@@ -403,7 +403,8 @@ def _domain_run_and_persist(slug: str, *, wid: str | None = None,
                                # decomposition over the BRD + graph summary is heavier than
                                # a narrative enrich; give it real headroom (override via
                                # DOMAIN_ENRICH_TIMEOUT_S).
-                               timeout_s=enrich_timeout_s("domain", default=300.0))
+                               timeout_s=enrich_timeout_s("domain", default=300.0),
+                               backlog_json=_backlog_json_for_domain(neo, slug))
         neo.run("MERGE (r:Repository {slug:$slug})", slug=slug)
         dd = DomainDesignStorage(neo).save(dd, html=render_html(dd),
                                            model=enrich_model("domain"),

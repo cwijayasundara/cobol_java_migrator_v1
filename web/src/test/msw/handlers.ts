@@ -94,26 +94,6 @@ export const handlers = [
       },
     },
   })),
-  http.post("/api/workspaces/:id/design", () => HttpResponse.json({
-    repo_slug: "carddemo-mini", count: 1,
-    designs: [
-      { design: { slice_id: "CBPOST1M-slice", context: "transaction_processing",
-          owned_resources: ["ACCTFILE", "TRANFILE"],
-          transition_pattern: "extract_product_lines+legacy_mimic",
-          components: ["CBPOST1MService", "CBPOST1MRepository"],
-          evidence_map: { "DR-1": ["CBPOST1M"] } },
-        adrs: [
-          { number: 1, title: "Modular monolith deployment", status: "accepted",
-            context: "", decision: "Deploy as a module", consequences: "", evidence_refs: ["CBPOST1M"] },
-          { number: 2, title: "Extract Product Lines transition", status: "accepted",
-            context: "", decision: "Strangle by product line", consequences: "", evidence_refs: ["CBPOST1M"] },
-          { number: 3, title: "Legacy Mimic for parity", status: "accepted",
-            context: "", decision: "Mimic legacy behaviour", consequences: "", evidence_refs: ["CBPOST1M"] },
-        ],
-        rating: "high", data_ownership_ok: true, groundedness_failures: [],
-        rationale: "Sole writer of owned resources; all refs grounded." },
-    ],
-  })),
   http.post("/api/workspaces/:id/blueprint", () => HttpResponse.json(
     { status: "running", result: null, error: null, started_at: 1, finished_at: null },
     { status: 202 })),
@@ -213,6 +193,26 @@ export const handlers = [
     domainStarted
       ? HttpResponse.json({ status: "done", error: null, result: DOMAIN_RESULT })
       : HttpResponse.json({ status: "idle", result: null, error: null })),
+  http.post("/api/workspaces/:id/backlog", () =>
+    HttpResponse.json({ status: "running", result: null, error: null }, { status: 202 })),
+  http.get("/api/workspaces/:id/backlog", () =>
+    HttpResponse.json({
+      status: "done", error: null,
+      result: { repo_slug: "carddemo-mini", version: 1, epics: 2, stories: 5, coverage_ratio: 0.86 },
+    })),
+  http.get("/api/workspaces/:id/backlog/html", () =>
+    new HttpResponse("<html><body>Backlog v1</body></html>",
+      { headers: { "Content-Type": "text/html" } })),
+  http.post("/api/workspaces/:id/technical-design", () =>
+    HttpResponse.json({ status: "running", result: null, error: null }, { status: 202 })),
+  http.get("/api/workspaces/:id/technical-design", () =>
+    HttpResponse.json({
+      status: "done", error: null,
+      result: { repo_slug: "carddemo-mini", version: 1, services: 3 },
+    })),
+  http.get("/api/workspaces/:id/technical-design/html", () =>
+    new HttpResponse("<html><body>Technical Design v1</body></html>",
+      { headers: { "Content-Type": "text/html" } })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),

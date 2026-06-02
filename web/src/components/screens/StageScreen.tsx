@@ -6,6 +6,7 @@ import { ParseStudio } from "@/components/screens/ParseStudio";
 import { GraphExplorer } from "@/components/screens/GraphExplorer";
 import { ExploreChat } from "@/components/screens/ExploreChat";
 import { BlueprintStudio } from "@/components/screens/BlueprintStudio";
+import { BacklogStudio } from "@/components/screens/BacklogStudio";
 import { SeamStudio } from "@/components/screens/SeamStudio";
 import { IncrementPlanner } from "@/components/screens/IncrementPlanner";
 import { DesignStudio } from "@/components/screens/DesignStudio";
@@ -23,6 +24,7 @@ export function StageScreen(
     case "graph": return <GraphExplorer workspaceId={workspaceId} repoSlug={repoSlug} />;
     case "explore": return <ExploreChat workspaceId={workspaceId} repoSlug={repoSlug} />;
     case "blueprint": return <BlueprintStudio workspaceId={workspaceId} />;
+    case "backlog": return <BacklogStudio workspaceId={workspaceId} />;
     case "seams": return <SeamStudio workspaceId={workspaceId} />;
     case "plan": return <IncrementPlanner workspaceId={workspaceId} />;
     case "design": return <DesignStudio workspaceId={workspaceId} />;

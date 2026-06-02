@@ -1,7 +1,7 @@
 """Seed a demo workspace so the cockpit shows real data against a live backend.
 
 Mirrors the cockpit's MSW fixture (web/src/test/fixtures/controlplane.ts):
-a CardDemo workspace + the 11 journey stages + a BRD groundedness gate +
+a CardDemo workspace + the 13 journey stages + a BRD groundedness gate +
 a workspace budget + one running BRD agent run (with a couple of events) +
 a BRD artifact carrying an evidence_map.
 

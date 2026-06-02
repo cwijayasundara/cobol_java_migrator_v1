@@ -30,7 +30,7 @@ from cobol_modernizer.codegen.scaffold import scaffold_module
 from cobol_modernizer.codegen.schema import GeneratedProject
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
-from cobol_modernizer.persistence.tables import JourneyStage, Workspace
+from cobol_modernizer.persistence.tables import Artifact, JourneyStage, Workspace
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["controlplane-build"])
@@ -64,6 +64,43 @@ def _mark_passed(session: Session, wid: str, stage_key: str) -> None:
                                    JourneyStage.stage_key == stage_key)
     ).scalars().all():
         st.status = "passed"
+
+
+def scan_generated_test_refs(project_dir, acceptance_criteria_ids: list[str]) -> list[str]:
+    """Which acceptance-criterion ids the generated test sources actually cite. Codegen
+    is instructed to cite story/AC ids in test comments/names; we grep the generated
+    *Test.java files for each id. Returns the subset found (deterministic, sorted)."""
+    root = Path(project_dir)
+    if not root.is_dir():
+        return []
+    blobs: list[str] = []
+    for path in root.rglob("*.java"):
+        name = path.name.lower()
+        if "test" in name:
+            try:
+                blobs.append(path.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+    haystack = "\n".join(blobs)
+    return sorted({ac for ac in acceptance_criteria_ids
+                   if ac and re.search(r"\b" + re.escape(ac) + r"\b", haystack)})
+
+
+def _record_generated_test_refs(session: Session, *, workspace_id: str, project_dir,
+                                acceptance_criteria_ids: list[str]) -> None:
+    """Persist which acceptance-criterion ids the generated tests cite, as a
+    versioned Artifact the Verify stage's story-behavior gate reads."""
+    refs = scan_generated_test_refs(project_dir, acceptance_criteria_ids)
+    prev = session.execute(
+        select(Artifact).where(Artifact.workspace_id == workspace_id,
+                               Artifact.kind == "generated_test_refs")
+    ).scalars().all()
+    version = max((a.version for a in prev), default=0) + 1
+    session.add(Artifact(workspace_id=workspace_id, kind="generated_test_refs",
+                         version=version, object_uri="inline://generated_test_refs",
+                         content_hash="sha256:refs",
+                         evidence_map={"acceptance_criteria": refs}))
+    session.flush()
 
 
 def _target_refs(brief: dict) -> list[str]:
@@ -350,6 +387,14 @@ def run_build(*, session: Session, neo4j, workspace: Workspace,
         dest = root / f.path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f.content, encoding="utf-8")
+
+    backlog = _backlog_brief(neo4j, slug)
+    ac_ids = [c.get("id") for s in (backlog or {}).get("stories", [])
+              for c in s.get("acceptance_criteria", []) if c.get("id")] if backlog else []
+    if ac_ids:
+        _record_generated_test_refs(session, workspace_id=workspace.id,
+                                    project_dir=root,
+                                    acceptance_criteria_ids=ac_ids)
 
     _mark_passed(session, workspace.id, "build")
     session.flush()

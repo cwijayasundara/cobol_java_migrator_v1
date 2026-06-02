@@ -14,6 +14,7 @@ export const STAGES: StageDef[] = [
   { key: "graph", label: "Graph", gateKey: "graph" },
   { key: "explore", label: "Explore", gateKey: null },
   { key: "blueprint", label: "Blueprint", gateKey: "brd_groundedness" },
+  { key: "backlog", label: "Backlog", gateKey: "backlog_coverage" },
   { key: "seams", label: "Seams", gateKey: null },
   { key: "plan", label: "Plan", gateKey: "stories_dag" },
   { key: "domain", label: "Domain Design", gateKey: null },
@@ -32,7 +33,7 @@ export interface PhaseDef {
 /** The three workflow phases, grouping the canonical stages into bands. */
 export const PHASES: PhaseDef[] = [
   { key: "understand", label: "Understand", stageKeys: ["outcome", "intake", "parse", "graph", "explore"] },
-  { key: "design", label: "Design", stageKeys: ["blueprint", "seams", "plan", "domain", "design"] },
+  { key: "design", label: "Design", stageKeys: ["blueprint", "backlog", "seams", "plan", "domain", "design"] },
   { key: "migrate", label: "Migrate", stageKeys: ["build", "verify"] },
 ];
 
@@ -57,6 +58,7 @@ export const ADVANCEABLE_STAGES: ReadonlySet<string> = new Set([
   "graph",
   "explore",
   "blueprint",
+  "backlog",
   "seams",
   "plan",
   "domain",
