@@ -49,3 +49,30 @@ def advance_if_approved(policy: CostPolicy, *, workspace_id: str, run_id: str,
         return False
     policy.check(workspace_id=workspace_id, run_id=run_id)  # raises on cap
     return True
+
+
+def story_behavior_gate(
+    *,
+    story_id: str,
+    acceptance_criteria_ids: list[str],
+    generated_test_refs: list[str],
+    equivalence_verdict: str,
+) -> dict:
+    """Verification-precedes-trust gate for a single story: generated code is accepted
+    only when (1) every acceptance criterion has at least one generated test citing it
+    and (2) the behavioral equivalence/golden-master check has passed. A missing
+    criterion or a non-passing equivalence verdict fails the gate with a reason."""
+    missing = [ac for ac in acceptance_criteria_ids if ac not in generated_test_refs]
+    if missing:
+        return {
+            "story_id": story_id,
+            "passed": False,
+            "reason": "missing generated tests for acceptance criteria: " + ", ".join(missing),
+        }
+    if equivalence_verdict != "passed":
+        return {
+            "story_id": story_id,
+            "passed": False,
+            "reason": f"equivalence verdict is {equivalence_verdict}",
+        }
+    return {"story_id": story_id, "passed": True, "reason": "acceptance and equivalence passed"}
