@@ -213,6 +213,16 @@ export const handlers = [
     domainStarted
       ? HttpResponse.json({ status: "done", error: null, result: DOMAIN_RESULT })
       : HttpResponse.json({ status: "idle", result: null, error: null })),
+  http.post("/api/workspaces/:id/backlog", () =>
+    HttpResponse.json({ status: "running", result: null, error: null }, { status: 202 })),
+  http.get("/api/workspaces/:id/backlog", () =>
+    HttpResponse.json({
+      status: "done", error: null,
+      result: { repo_slug: "carddemo-mini", version: 1, epics: 2, stories: 5, coverage_ratio: 0.86 },
+    })),
+  http.get("/api/workspaces/:id/backlog/html", () =>
+    new HttpResponse("<html><body>Backlog v1</body></html>",
+      { headers: { "Content-Type": "text/html" } })),
   http.get("/api/workspaces/:id/runs", () => HttpResponse.json([RUN])),
   http.get("/api/workspaces/:id/artifacts", () => HttpResponse.json([ARTIFACT])),
   http.get("/api/workspaces/:id/artifacts/:aid", () => HttpResponse.json(ARTIFACT)),

@@ -181,6 +181,20 @@ export interface VerifyResult {
   open_questions: string[]; defects: EquivalenceDefect[];
 }
 
+// Background-job status for the Backlog stage (POST/GET .../backlog).
+export interface BacklogResultSummary {
+  repo_slug: string;
+  version: number;
+  epics: number;
+  stories: number;
+  coverage_ratio: number | null;
+}
+export interface BacklogJob {
+  status: JobStatus;
+  result: BacklogResultSummary | null;
+  error: string | null;
+}
+
 // Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
 export interface AskAnswer {
   answer: string;
@@ -337,4 +351,12 @@ export const api = {
   // SSE URL is consumed by useAgentStream via EventSource (not fetch).
   runEventsUrl: (workspaceId: string, runId: string) =>
     `/api/workspaces/${workspaceId}/runs/${runId}/events`,
+
+  // ---- backlog: Agile backlog generator (POST → job; GET → poll; html → rendered view) ----
+  startBacklog: (workspaceId: string) =>
+    json<BacklogJob>(`/api/workspaces/${workspaceId}/backlog`, { method: "POST" }),
+  getBacklogStatus: (workspaceId: string) =>
+    json<BacklogJob>(`/api/workspaces/${workspaceId}/backlog`),
+  backlogHtmlUrl: (workspaceId: string) =>
+    `/api/workspaces/${workspaceId}/backlog/html`,
 };

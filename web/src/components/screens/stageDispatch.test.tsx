@@ -11,4 +11,8 @@ describe("stage dispatcher", () => {
     render(<StageScreen workspaceId="ws-1" stageKey="seams" repoSlug="aws-mf-carddemo" />);
     expect(screen.getByText("Seam candidates")).toBeInTheDocument();
   });
+  it("dispatches the backlog stage to BacklogStudio", () => {
+    render(<StageScreen workspaceId="ws-1" stageKey="backlog" repoSlug="carddemo-mini" />);
+    expect(screen.getByText(/Business Backlog/i)).toBeInTheDocument();
+  });
 });
