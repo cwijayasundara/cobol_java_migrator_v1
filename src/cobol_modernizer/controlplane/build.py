@@ -242,6 +242,53 @@ def _domain_design_brief(neo4j, slug: str) -> dict | None:
     }
 
 
+def _backlog_brief(neo4j, slug: str) -> dict | None:
+    """The persisted business backlog (epics + user stories with acceptance criteria)
+    as a plain dict. None when no backlog has been generated — codegen then grounds on
+    the BRD/design alone. Defensive: a graph hiccup degrades to None."""
+    try:
+        rows = neo4j.run(
+            """
+            MATCH (r:Repository {slug: $repo_slug})-[:HAS_BACKLOG]->(b:Backlog)
+            RETURN b ORDER BY b.version DESC LIMIT 1
+            """,
+            repo_slug=slug,
+        )
+    except _NEO4J_ERRORS:
+        return None
+    if not rows:
+        return None
+    node = rows[0]["b"]
+    return {
+        "version": node.get("version"),
+        "epics": json.loads(node.get("epics_json") or "[]"),
+        "stories": json.loads(node.get("stories_json") or "[]"),
+    }
+
+
+def _technical_design_brief(neo4j, slug: str) -> dict | None:
+    """The persisted technical/target architecture (services with API/persistence/
+    integration contracts) as a plain dict. None when none has been generated.
+    Defensive: a graph hiccup degrades to None."""
+    try:
+        rows = neo4j.run(
+            """
+            MATCH (r:Repository {slug: $repo_slug})-[:HAS_TECHNICAL_DESIGN]->(t:TechnicalDesign)
+            RETURN t ORDER BY t.version DESC LIMIT 1
+            """,
+            repo_slug=slug,
+        )
+    except _NEO4J_ERRORS:
+        return None
+    if not rows:
+        return None
+    node = rows[0]["t"]
+    return {
+        "version": node.get("version"),
+        "services": json.loads(node.get("services_json") or "[]"),
+    }
+
+
 def _codegen_brief(neo4j, slug: str, brd_node: dict) -> str:
     """Assemble the codegen brief the TDD agent reasons over: the BRD's real
     requirement text PLUS the DDD/OO domain design. Version/rating metadata alone
@@ -257,6 +304,12 @@ def _codegen_brief(neo4j, slug: str, brd_node: dict) -> str:
     design = _domain_design_brief(neo4j, slug)
     if design:
         brief["domain_design"] = design
+    backlog = _backlog_brief(neo4j, slug)
+    if backlog:
+        brief["backlog"] = backlog
+    technical = _technical_design_brief(neo4j, slug)
+    if technical:
+        brief["technical_design"] = technical
     return json.dumps(brief)
 
 
