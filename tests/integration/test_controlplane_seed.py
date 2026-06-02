@@ -20,7 +20,7 @@ def test_seed_creates_full_demo_journey():
     ws = seed_demo(s); s.commit()
     assert ws.repo_slug == DEMO_REPO_SLUG
     stages = s.execute(select(JourneyStage).where(JourneyStage.workspace_id == ws.id)).scalars().all()
-    assert len(stages) == 11
+    assert len(stages) == 12
     assert s.execute(select(Gate).where(Gate.workspace_id == ws.id)).scalars().first().gate_key == "brd_groundedness"
     assert s.execute(select(Budget).where(Budget.workspace_id == ws.id)).scalars().first().cap_usd == 50
     run = s.execute(select(AgentRun).where(AgentRun.workspace_id == ws.id)).scalars().first()
