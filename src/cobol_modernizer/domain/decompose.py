@@ -4,6 +4,7 @@ extraction order, then runs deterministic gates with a bounded repair loop."""
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 from cobol_modernizer.domain.gates import run_phase1_gates
@@ -14,8 +15,19 @@ from cobol_modernizer.domain.schema import (
 from cobol_modernizer.domain.topology import (
     assign_extraction_ranks, deployment_for, extract_score,
 )
-from cobol_modernizer.enrichment.base import run_batched
+from cobol_modernizer.enrichment.base import ground_refs, run_batched
 from cobol_modernizer.seam.signals import raw_signals_for_program
+
+# BRD requirement ids (FR-1, NFR-2, SM-3, A-2, C-1 …) are legitimate citation targets
+# alongside graph entities — the decompose prompt explicitly asks the model to cite them.
+_BRD_ID_RE = re.compile(r"\b[A-Z]{1,4}-\d+\b")
+
+
+def _brd_requirement_ids(brd_text: str) -> set[str]:
+    """Requirement ids that actually appear in the BRD the agent was given. Grounding
+    cited_refs against these (plus graph entities) stops the groundedness gate from
+    rejecting valid BRD citations — the bug that made every run fail when a BRD existed."""
+    return set(_BRD_ID_RE.findall(brd_text or ""))
 
 DECOMPOSE_SYSTEM = (
     "You are a software architect decomposing a legacy COBOL system into business-capability "
@@ -51,14 +63,19 @@ def _known_refs(client: Any, repo: str) -> set[str]:
     return {r["q"] for r in client.run(_KNOWN_REFS_Q, repo=repo)}
 
 
-def _parse(raw: dict, repo: str) -> DecompositionMap:
+def _parse(raw: dict, repo: str, known: set[str]) -> DecompositionMap:
     contexts = []
     for c in raw.get("contexts", []):
         if isinstance(c, dict) and isinstance(c.get("name"), str):
             try:
-                contexts.append(BoundedContextDecl.model_validate(c))
+                decl = BoundedContextDecl.model_validate(c)
             except Exception:  # noqa: BLE001 — skip malformed; gates catch coverage gaps
                 continue
+            # Sanitize cited_refs to the grounded subset (graph entities + BRD ids) so the
+            # groundedness gate focuses on STRUCTURAL member_programs; a stray invented
+            # citation is dropped, not fatal to a multi-minute run.
+            decl.cited_refs, _ = ground_refs(decl.cited_refs, known)
+            contexts.append(decl)
     return DecompositionMap(repo_slug=repo, contexts=contexts,
                             unassigned_programs=list(raw.get("unassigned_programs", [])),
                             cited_refs=list(raw.get("cited_refs", [])))
@@ -104,7 +121,7 @@ async def decompose(client: Any, repo: str, *, brd_text: str, runner: Any, model
                     timeout_s: float, signals_fn: SignalsFn = raw_signals_for_program,
                     max_repairs: int = 2) -> DecompositionMap:
     writers = _writers(client, repo)
-    known = _known_refs(client, repo)
+    known = _known_refs(client, repo) | _brd_requirement_ids(brd_text)
     summary = graph_coupling_summary(client, repo)
     base_prompt = ("## BRD\n" + brd_text + "\n\n## Graph coupling summary\n```json\n"
                    + json.dumps(summary) + "\n```\nDecompose into business-capability "
@@ -118,7 +135,7 @@ async def decompose(client: Any, repo: str, *, brd_text: str, runner: Any, model
         raw = await run_batched(runner=runner, system=DECOMPOSE_SYSTEM, prompt=prompt,
                                 schema=DECOMP_SCHEMA, model=model, timeout_s=timeout_s,
                                 label="domain-decompose")
-        dm = _parse(raw, repo)
+        dm = _parse(raw, repo, known)
         _apply_topology(client, repo, dm, signals_fn)
         violations = run_phase1_gates(dm.contexts, writers, known)
         if not violations:

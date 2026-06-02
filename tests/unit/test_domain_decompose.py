@@ -53,6 +53,29 @@ async def test_decompose_assigns_topology_ranks_and_passes_gates():
 
 
 @pytest.mark.asyncio
+async def test_decompose_grounds_brd_requirement_ids_and_drops_invented():
+    """Regression: BRD requirement ids present in the BRD (FR-1, NFR-2) are valid
+    citations and must NOT trip the groundedness gate; an invented id (FR-99) is
+    dropped rather than failing the whole run."""
+    class _BrdRunner:
+        async def run_structured(self, **kw):
+            return {"contexts": [
+                {"name": "Acct", "business_capability": "accounts", "member_programs": ["P1"],
+                 "owned_resources": ["R1"], "depends_on": [],
+                 "cited_refs": ["P1", "FR-1", "FR-99"]},
+                {"name": "Tx", "business_capability": "transactions", "member_programs": ["P2"],
+                 "owned_resources": ["R2"], "depends_on": [], "cited_refs": ["P2", "NFR-2"]}],
+                "unassigned_programs": [], "cited_refs": []}
+    brd = "FR-1: post a transaction. NFR-2: respond fast."   # has FR-1/NFR-2, not FR-99
+    dm = await decompose(_StubClient(), "repo", brd_text=brd, runner=_BrdRunner(),
+                         model="m", timeout_s=5, signals_fn=_signals)
+    acct = next(c for c in dm.contexts if c.name == "Acct")
+    assert "FR-1" in acct.cited_refs        # BRD id in the BRD text -> grounded
+    assert "P1" in acct.cited_refs          # graph entity -> grounded
+    assert "FR-99" not in acct.cited_refs   # invented -> dropped, not fatal
+
+
+@pytest.mark.asyncio
 async def test_decompose_raises_on_unrepairable_gate_violation():
     class _BadRunner:
         async def run_structured(self, **kw):
