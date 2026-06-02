@@ -88,3 +88,13 @@ def test_improve_409_when_no_brd(monkeypatch):
                       json={"instruction": "expand NFRs"}).status_code == 409
     finally:
         app.dependency_overrides.clear()
+
+
+def test_improve_status_idle_when_no_job(monkeypatch):
+    c = _setup(monkeypatch)
+    try:
+        r = c.get("/api/workspaces/ws-1/blueprint/improve")
+        assert r.status_code == 200
+        assert r.json()["status"] == "idle"
+    finally:
+        app.dependency_overrides.clear()

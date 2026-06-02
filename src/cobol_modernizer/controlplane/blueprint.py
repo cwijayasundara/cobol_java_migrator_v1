@@ -114,7 +114,10 @@ class _ImproveBody(BaseModel):
     instruction: str
 
 
-def _job_view(job: dict) -> dict:
+def _job_view(job: dict | None) -> dict:
+    if job is None:
+        return {"status": "idle", "result": None, "error": None,
+                "started_at": None, "finished_at": None}
     return {"status": job["status"], "result": job.get("result"),
             "error": job.get("error"), "started_at": job.get("started_at"),
             "finished_at": job.get("finished_at")}

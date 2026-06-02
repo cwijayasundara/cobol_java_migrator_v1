@@ -114,9 +114,7 @@ export const handlers = [
   http.post("/api/workspaces/:id/blueprint/improve", () =>
     HttpResponse.json({ status: "running", result: null, error: null }, { status: 202 })),
   http.get("/api/workspaces/:id/blueprint/improve", () =>
-    HttpResponse.json({ status: "done", error: null,
-      result: { repo_slug: "demo", brd_id: "b2", version: 2, rating: "high",
-                weighted_score: 4.4, model: "claude-sonnet-4-6" } })),
+    HttpResponse.json({ status: "idle", result: null, error: null })),
   http.post("/api/workspaces/:id/build", () => HttpResponse.json(
     { status: "running", result: null, error: null, started_at: 1, finished_at: null },
     { status: 202 })),
