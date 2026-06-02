@@ -2,6 +2,7 @@ import asyncio
 
 from cobol_modernizer.backlog.generator import (
     BACKLOG_SCHEMA,
+    BACKLOG_SYSTEM,
     build_backlog_prompt,
     generate_backlog_payload,
 )
@@ -35,3 +36,4 @@ def test_generate_backlog_payload_returns_raw_dict():
     assert raw == {"epics": [], "stories": []}
     assert "FR-1" in runner.calls[0]["prompt"]
     assert runner.calls[0]["schema"] is BACKLOG_SCHEMA
+    assert runner.calls[0]["system"] is BACKLOG_SYSTEM
