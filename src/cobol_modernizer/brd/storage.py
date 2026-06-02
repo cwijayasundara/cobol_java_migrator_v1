@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cobol_modernizer.agent.brd_schema import BRDDraft
 from cobol_modernizer.brd.schema import (
     AttemptRecord, BRDResult, JudgeReport, Strategy,
 )
@@ -44,6 +45,8 @@ class BRDStorage:
         model: str,
         strategy: Strategy,
         token_usage: dict[str, int],
+        sections: list[dict] | None = None,
+        evidence_map: dict[str, list[str]] | None = None,
     ) -> BRDResult:
         brd_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc)
@@ -66,6 +69,8 @@ class BRDStorage:
                 model: $model,
                 strategy: $strategy,
                 token_usage: $token_usage,
+                sections: $sections,
+                evidence_map: $evidence_map,
                 created_at: $created_at
             })
             CREATE (r)-[:HAS_BRD]->(b)
@@ -82,6 +87,8 @@ class BRDStorage:
             model=model,
             strategy=strategy.value,
             token_usage=json.dumps(token_usage),
+            sections=json.dumps(sections) if sections is not None else None,
+            evidence_map=json.dumps(evidence_map) if evidence_map is not None else None,
             created_at=created_at.isoformat(),
         )
 
@@ -115,6 +122,22 @@ class BRDStorage:
             repo_id=repo_id,
         )
         return rows[0]["b"] if rows else None
+
+    @staticmethod
+    def reconstruct_draft(node: dict) -> BRDDraft | None:
+        """Rebuild the structured BRDDraft from a stored :BRD node. Returns None for
+        legacy nodes that predate structured persistence (caller falls back to html)."""
+        sections = node.get("sections")
+        evidence = node.get("evidence_map")
+        if not sections:
+            return None
+        try:
+            return BRDDraft.model_validate({
+                "sections": json.loads(sections),
+                "evidence_map": json.loads(evidence) if evidence else {},
+            })
+        except Exception:  # noqa: BLE001 — malformed legacy data -> fall back to html
+            return None
 
     def list_versions(self, repo_id: str) -> list[dict]:
         return self.client.run(
