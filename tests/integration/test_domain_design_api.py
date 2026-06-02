@@ -44,7 +44,7 @@ def _setup(monkeypatch):
     monkeypatch.setattr(jobs, "make_neo4j", lambda: fake)
     # Stub out the heavy run-and-persist so the route runs without Neo4j/Anthropic.
     monkeypatch.setattr(an, "_domain_run_and_persist",
-                        lambda slug, *, instruction="": dict(_STUB))
+                        lambda slug, *, wid=None, instruction="": dict(_STUB))
     app.dependency_overrides[get_session] = _ov
     app.dependency_overrides[get_neo4j] = lambda: fake
     return TestClient(app)

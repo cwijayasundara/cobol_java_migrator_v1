@@ -344,7 +344,8 @@ def _brd_text(neo, slug: str) -> str:
     return str(latest.get("html", ""))
 
 
-def _domain_run_and_persist(slug: str, *, instruction: str = "") -> dict:
+def _domain_run_and_persist(slug: str, *, wid: str | None = None,
+                            instruction: str = "") -> dict:
     neo = jobs.make_neo4j()
     try:
         brd = _brd_text(neo, slug)
@@ -359,6 +360,17 @@ def _domain_run_and_persist(slug: str, *, instruction: str = "") -> dict:
                                            model=enrich_model("domain"),
                                            token_usage=dict(runner.token_usage),
                                            evidence_map={})
+        if wid:
+            # Light the "domain" journey node green (best-effort; no-op if the row
+            # isn't seeded, e.g. a workspace created before this stage existed).
+            s = jobs.make_session()
+            try:
+                _mark_passed(s, wid, "domain")
+                s.commit()
+            except Exception:  # noqa: BLE001 — stage marking must never fail the job
+                s.rollback()
+            finally:
+                s.close()
         return {"repo_slug": slug, "version": dd.version, "rating": dd.rating,
                 "contexts": [c.model_dump(mode="json") for c in dd.contexts],
                 "designs": [d.model_dump(mode="json") for d in dd.designs],
@@ -377,7 +389,7 @@ def domain_design_start(wid: str, session: Session = Depends(get_session),
     _require_llm()
     slug = ws.repo_slug
     return _job_view(jobs.runner.start("domain-design", wid,
-                                       lambda: _domain_run_and_persist(slug)))
+                                       lambda: _domain_run_and_persist(slug, wid=wid)))
 
 
 @router.post("/workspaces/{wid}/domain-design/refine", status_code=202)
@@ -391,7 +403,7 @@ def domain_design_refine(wid: str, body: _DomainRefineBody,
         raise HTTPException(status_code=400, detail="instruction must be non-empty")
     slug = ws.repo_slug
     return _job_view(jobs.runner.start("domain-design", wid,
-                                       lambda: _domain_run_and_persist(slug, instruction=instruction)))
+                                       lambda: _domain_run_and_persist(slug, wid=wid, instruction=instruction)))
 
 
 @router.get("/workspaces/{wid}/domain-design")

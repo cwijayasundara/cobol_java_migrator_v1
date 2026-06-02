@@ -1,4 +1,4 @@
-"""The 11 canonical cockpit journey stages (backend source of truth, mirroring
+"""The canonical cockpit journey stages (backend source of truth, mirroring
 web/src/lib/stages.ts) and their gate-key mapping."""
 from __future__ import annotations
 
@@ -22,9 +22,10 @@ JOURNEY_STAGES: list[StageDef] = [
     StageDef("blueprint", "Blueprint", 5, "brd_groundedness"),
     StageDef("seams", "Seams", 6, None),
     StageDef("plan", "Plan", 7, "stories_dag"),
-    StageDef("design", "Design", 8, "design_data_ownership"),
-    StageDef("build", "Build", 9, "code"),
-    StageDef("verify", "Verify", 10, "equivalence"),
+    StageDef("domain", "Domain Design", 8, None),
+    StageDef("design", "Design", 9, "design_data_ownership"),
+    StageDef("build", "Build", 10, "code"),
+    StageDef("verify", "Verify", 11, "equivalence"),
 ]
 
 

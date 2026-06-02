@@ -9,7 +9,8 @@ describe("NextStageButton", () => {
       ["explore", "Blueprint", "blueprint"],
       ["blueprint", "Seams", "seams"],
       ["seams", "Plan", "plan"],
-      ["plan", "Design", "design"],
+      ["plan", "Domain Design", "domain"],
+      ["domain", "Design", "design"],
       ["design", "Build", "build"],
       ["build", "Verify", "verify"],
     ];
