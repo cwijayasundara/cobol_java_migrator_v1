@@ -354,7 +354,10 @@ def _domain_run_and_persist(slug: str, *, wid: str | None = None,
         runner = SdkAgentRunner()
         dd = run_domain_design(neo, slug, brd_text=brd, runner=runner,
                                model=enrich_model("domain"),
-                               timeout_s=enrich_timeout_s("domain"))
+                               # decomposition over the BRD + graph summary is heavier than
+                               # a narrative enrich; give it real headroom (override via
+                               # DOMAIN_ENRICH_TIMEOUT_S).
+                               timeout_s=enrich_timeout_s("domain", default=300.0))
         neo.run("MERGE (r:Repository {slug:$slug})", slug=slug)
         dd = DomainDesignStorage(neo).save(dd, html=render_html(dd),
                                            model=enrich_model("domain"),
