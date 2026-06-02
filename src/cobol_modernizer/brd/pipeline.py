@@ -184,4 +184,6 @@ def generate_brd_graph_sync(repo_id: str, *, client=None, repo_path=None,
         attempt_history=result.attempt_history, model=model,
         strategy=result.strategy,
         token_usage=dict(runner.token_usage),
+        sections=[s.model_dump(mode="json") for s in result.brd.sections],
+        evidence_map=result.brd.evidence_map,
     )
