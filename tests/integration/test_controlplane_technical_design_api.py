@@ -82,6 +82,30 @@ def test_technical_design_post_persists_and_gates(monkeypatch):
         jobs.runner.inline = False
 
 
+def _empty_payload(**_kw):
+    import asyncio
+    return asyncio.sleep(0, result={})
+
+
+def test_technical_design_empty_payload_fails_job(monkeypatch):
+    # run_batched returns {} on an LLM error/timeout/turn-cap; the stage must FAIL the
+    # job, not persist an empty 0-service design and report success.
+    client, eng = _client(monkeypatch)
+    monkeypatch.setattr(td, "generate_technical_design_payload", _empty_payload)
+    jobs.runner._jobs.pop(("technical_design", "ws-1"), None)
+    try:
+        client.post("/api/workspaces/ws-1/technical-design")
+        done = client.get("/api/workspaces/ws-1/technical-design").json()
+        assert done["status"] == "failed"
+        assert "no output" in (done["error"] or "")
+        with Session(eng) as s:
+            saved = s.execute(select(Gate).where(Gate.workspace_id == "ws-1")).scalars().all()
+            assert all(g.gate_key != "design_data_ownership" for g in saved)
+    finally:
+        app.dependency_overrides.clear()
+        jobs.runner.inline = False
+
+
 def test_technical_design_status_idle_before_generation(monkeypatch):
     client, _eng = _client(monkeypatch)
     jobs.runner._jobs.pop(("technical_design", "ws-1"), None)

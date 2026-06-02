@@ -96,8 +96,15 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
     gen = generate or generate_backlog_payload
     raw = asyncio.run(gen(runner=SdkAgentRunner(), model=os.environ.get("BACKLOG_MODEL", _DEFAULT_MODEL),
                           timeout_s=float(os.environ.get("BACKLOG_TIMEOUT_S", "300")),
+                          max_turns=int(os.environ.get("BACKLOG_MAX_TURNS", "6")),
                           brd_sections=sections, known_refs=known_refs,
                           known_requirement_ids=sorted(known_req_ids)))
+    if not raw:
+        # run_batched swallows an LLM error/timeout/turn-cap to {}. Fail the job loudly
+        # rather than persist an empty backlog and report success.
+        raise HTTPException(status_code=502,
+                            detail="backlog generation returned no output "
+                                   "(LLM error, timeout, or turn cap) — see server logs")
     backlog = parse_backlog_payload(raw, repo_slug=slug, known_refs=set(known_refs),
                                     known_requirement_ids=known_req_ids)
     try:

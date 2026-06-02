@@ -99,10 +99,17 @@ def run_technical_design(*, session: Session, neo4j, workspace: Workspace,
     raw = asyncio.run(gen(runner=SdkAgentRunner(),
                           model=os.environ.get("TECHNICAL_DESIGN_MODEL", _DEFAULT_MODEL),
                           timeout_s=float(os.environ.get("TECHNICAL_DESIGN_TIMEOUT_S", "300")),
+                          max_turns=int(os.environ.get("TECHNICAL_DESIGN_MAX_TURNS", "6")),
                           ddd_json=json.dumps({"contexts": contexts}),
                           backlog_json=json.dumps({"stories": stories}),
                           seam_waves_json=json.dumps(seam_waves),
                           graph_summary={"refs": sorted(known_refs)[:200]}))
+    if not raw:
+        # run_batched swallows an LLM error/timeout/turn-cap to {}. Fail the job loudly
+        # rather than persist an empty 0-service design and report success.
+        raise HTTPException(status_code=502,
+                            detail="technical design generation returned no output "
+                                   "(LLM error, timeout, or turn cap) — see server logs")
     design = parse_technical_design_payload(raw, repo_slug=slug, known_refs=known_refs,
                                             known_story_ids=known_story_ids,
                                             known_contexts=known_contexts)

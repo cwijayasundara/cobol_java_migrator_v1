@@ -144,9 +144,14 @@ def build_backlog_prompt(*, brd_sections: list[dict], known_refs: list[str],
 
 async def generate_backlog_payload(*, runner, model: str, timeout_s: float,
                                    brd_sections: list[dict], known_refs: list[str],
-                                   known_requirement_ids: list[str]) -> dict:
+                                   known_requirement_ids: list[str],
+                                   max_turns: int = 6) -> dict:
+    # max_turns default 6 (not run_batched's 2): emitting the structured-output result
+    # consumes a turn under claude-agent-sdk 0.2.87, and a real backlog needs a few
+    # reasoning turns before it; 2 risks hitting the turn cap and returning {}.
+    # Override via BACKLOG_MAX_TURNS.
     prompt = build_backlog_prompt(brd_sections=brd_sections, known_refs=known_refs,
                                   known_requirement_ids=known_requirement_ids)
     return await run_batched(runner=runner, system=BACKLOG_SYSTEM, prompt=prompt,
                              schema=BACKLOG_SCHEMA, model=model, timeout_s=timeout_s,
-                             label="backlog-generate")
+                             label="backlog-generate", max_turns=max_turns)

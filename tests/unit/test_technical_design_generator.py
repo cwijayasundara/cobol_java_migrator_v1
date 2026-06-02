@@ -59,6 +59,15 @@ def test_generate_returns_raw_payload():
     assert raw == {"services": []}
     assert runner.calls[0]["schema"] is TECHNICAL_DESIGN_SCHEMA
     assert runner.calls[0]["system"] is TECHNICAL_DESIGN_SYSTEM
+    assert runner.calls[0]["max_turns"] == 6  # default headroom above run_batched's 2
+
+
+def test_generate_forwards_custom_max_turns():
+    runner = FakeRunner({"services": []})
+    asyncio.run(generate_technical_design_payload(
+        runner=runner, model="m", timeout_s=5.0, ddd_json="{}", backlog_json="{}",
+        seam_waves_json="[]", graph_summary={}, max_turns=9))
+    assert runner.calls[0]["max_turns"] == 9
 
 
 def test_parse_coerces_out_of_enum_literals():

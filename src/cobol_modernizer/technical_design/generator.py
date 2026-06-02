@@ -155,10 +155,15 @@ def parse_technical_design_payload(raw: dict, *, repo_slug: str, known_refs: set
 
 async def generate_technical_design_payload(*, runner, model: str, timeout_s: float,
                                             ddd_json: str, backlog_json: str,
-                                            seam_waves_json: str, graph_summary: dict) -> dict:
+                                            seam_waves_json: str, graph_summary: dict,
+                                            max_turns: int = 6) -> dict:
+    # max_turns default 6 (not run_batched's 2): under claude-agent-sdk 0.2.87 emitting
+    # the structured-output result consumes a turn, and this large DDD+backlog+seams
+    # prompt needs a few reasoning turns before it — 2 reliably hits the turn cap and
+    # returns {} (an empty design). Override via TECHNICAL_DESIGN_MAX_TURNS.
     prompt = build_technical_design_prompt(ddd_json=ddd_json, backlog_json=backlog_json,
                                            seam_waves_json=seam_waves_json,
                                            graph_summary=graph_summary)
     return await run_batched(runner=runner, system=TECHNICAL_DESIGN_SYSTEM, prompt=prompt,
                              schema=TECHNICAL_DESIGN_SCHEMA, model=model, timeout_s=timeout_s,
-                             label="technical-design-generate")
+                             label="technical-design-generate", max_turns=max_turns)
