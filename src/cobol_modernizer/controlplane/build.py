@@ -66,44 +66,198 @@ def _mark_passed(session: Session, wid: str, stage_key: str) -> None:
         st.status = "passed"
 
 
+def _target_refs(brief: dict) -> list[str]:
+    """The COBOL entities this slice is about, named deterministically by the domain
+    design: each context's member_programs + every cobol_mapping.cobol_ref. Deduped,
+    order-preserving. Empty when no design has been run (caller falls back)."""
+    refs: list[str] = []
+    dd = brief.get("domain_design") or {}
+    for ctx in dd.get("contexts", []):
+        refs.extend(ctx.get("member_programs", []) or [])
+    for design in dd.get("designs", []):
+        for m in design.get("cobol_mapping", []) or []:
+            if m.get("cobol_ref"):
+                refs.append(m["cobol_ref"])
+    return list(dict.fromkeys(r for r in refs if r))
+
+
+def _slice_pack(deps, brief: dict, *, max_units: int, max_chars: int) -> str:
+    """Pre-materialize the slice's COBOL source in Python (cheap Cypher reads) so the
+    agent emits directly instead of paying an LLM tool round-trip per entity. Scoped
+    to the entities the domain design names (+ their paragraphs), so the pack size
+    tracks the SLICE, not the repo — bounded for large codebases. Char-budgeted
+    (truncates) and fully defensive: any graph hiccup degrades to '' (tool fallback).
+
+    `from cobol_modernizer.agent import graph_ops` is imported lazily by the caller."""
+    from cobol_modernizer.agent import graph_ops as ops
+
+    def _resolve_target(ref: str) -> str:
+        ent = ops.get_entity(deps, ref)
+        qn = ent.get("qualified_name") if isinstance(ent, dict) else None
+        return qn or ref
+
+    try:
+        targets = [_resolve_target(t) for t in _target_refs(brief)]
+        if not targets:  # no design yet — fall back to the repo's programs (small repos)
+            targets = [e["qualified_name"] for e in
+                       ops.find_entities(deps, kind="Program", limit=max_units).get("entities", [])]
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for t in targets:
+            if t not in seen:
+                seen.add(t); ordered.append(t)
+            try:  # expand a program to its contained paragraphs so the body is inlined too
+                for nb in ops.neighbors(deps, t, edge="CONTAINS", direction="out",
+                                        limit=max_units).get("neighbors", []):
+                    qn = nb.get("qualified_name")
+                    if qn and qn not in seen:
+                        seen.add(qn); ordered.append(qn)
+            except Exception:  # noqa: BLE001 — a missing edge must not abort the pack
+                pass
+
+        parts: list[str] = []
+        total = 0
+        for qn in ordered[:max_units]:
+            sl = ops.get_source_slice(deps, qn)
+            src = sl.get("source") if isinstance(sl, dict) else None
+            if not src:
+                continue
+            block = f"### {qn}\n```cobol\n{src}\n```"
+            if total + len(block) > max_chars:
+                break  # truncate — keep what fits, let tools cover the rest
+            total += len(block); parts.append(block)
+        return "\n\n".join(parts)
+    except Exception:  # noqa: BLE001 — prefetch is an optimization; never fail the build
+        logger.warning("build: slice prefetch failed; falling back to graph exploration",
+                       exc_info=True)
+        return ""
+
+
+def _codegen_run_plan(*, pack: bool, size: int) -> tuple[int, bool]:
+    """Decide how to run codegen. Returns (max_turns, use_graph_tools).
+
+    When the slice source is prefetched we run TOOL-FREE: no MCP graph server, no
+    allowed tools, a tiny turn budget — i.e. a single structured completion. The
+    agent-SDK turn-loop (re-sending full context per tool round-trip) is the real
+    latency sink, and with BRD + design + source inlined there is nothing to look up.
+    Only when prefetch yields nothing do we fall back to size-scaled agentic graph
+    exploration (graph as the genuine last resort)."""
+    from cobol_modernizer.cost.scaling import turns_for
+    if pack:
+        return int(os.environ.get("CODEGEN_INLINE_TURNS", "2")), False
+    lo = int(os.environ.get("CODEGEN_AGENT_MIN_TURNS", "16"))
+    hi = int(os.environ.get("CODEGEN_AGENT_MAX_TURNS", "40"))
+    return turns_for(size, lo=lo, hi=hi), True
+
+
 def _generate_slice_graph(slug: str, *, neo4j, repo_path: str,
                           brd_json: str) -> GeneratedProject:
-    """Real codegen: build the read-only graph MCP server + SDK runner and run the
-    TDD codegen agent over this repo's graph. Imported lazily so the agent SDK is
-    only required when an actual generation runs (tests inject a stub instead)."""
+    """Real codegen. Fast path: prefetch the slice source and run the TDD agent
+    TOOL-FREE (single structured completion from BRD + design + source). Fallback,
+    only when prefetch is empty: stand up the read-only graph MCP server and let the
+    agent explore. Imported lazily so the agent SDK is only required when an actual
+    generation runs (tests inject a stub instead)."""
     import asyncio
 
     from cobol_modernizer.agent.deps import GraphDeps
     from cobol_modernizer.agent.graph_tools import GRAPH_TOOL_NAMES, build_graph_server
     from cobol_modernizer.agent.harness import SdkAgentRunner
     from cobol_modernizer.codegen.generator import generate_slice
-    from cobol_modernizer.cost.scaling import model_for_size, turns_for
+    from cobol_modernizer.cost.scaling import model_for_size
 
     deps = GraphDeps(client=neo4j, repo_id=slug, repo_path=Path(repo_path))
-    server = build_graph_server(deps)
     runner = SdkAgentRunner()
 
-    # Scale the run to the slice's code size (programs + paragraphs): small slices
-    # get a small turn budget on the cheap+fast Haiku tier; larger ones get more
-    # turns on Sonnet. An explicit CODEGEN_MODEL / global override always wins.
+    # MODEL stays on Sonnet by default: codegen is the highest-stakes LLM task (strict
+    # TDD + Spring Boot), and the cheap Haiku tier demonstrably thrashed for minutes and
+    # skipped tests. CODEGEN_SMALL_TIER can drop tiny slices to Haiku to save cost; an
+    # explicit CODEGEN_MODEL / global pin always wins.
     try:
         size = neo4j.run(
             "MATCH (n:CodeEntity {repo:$r}) WHERE n.kind IN ['Program','Paragraph'] "
             "RETURN count(n) AS c", r=slug)[0]["c"]
     except Exception:  # noqa: BLE001
         size = 0
-    lo = int(os.environ.get("CODEGEN_AGENT_MIN_TURNS", "16"))
-    hi = int(os.environ.get("CODEGEN_AGENT_MAX_TURNS", "40"))
-    max_turns = turns_for(size, lo=lo, hi=hi)
     pinned = os.environ.get("CODEGEN_MODEL") or os.environ.get("COBOL_MOD_LLM_MODEL")
     model = model_for_size(size, threshold=int(os.environ.get("CODEGEN_SMALL_UNITS", "25")),
-                           small_tier="haiku", large_tier="sonnet", pinned=pinned)
-    logger.info("build: codegen for repo=%s — %d code units -> %d turns, model=%s",
-                slug, size, max_turns, model)
+                           small_tier=os.environ.get("CODEGEN_SMALL_TIER", "sonnet"),
+                           large_tier="sonnet", pinned=pinned)
+
+    # Efficiency: deterministically pre-fetch the slice source (scoped to the design's
+    # entities, so it stays bounded for large repos) and inline it. With BRD + design +
+    # source in the prompt there is nothing to look up, so we run TOOL-FREE — no MCP
+    # graph server, a single structured completion — which is what kills the latency
+    # (the SDK turn-loop re-sends the whole context on every tool round-trip). Only an
+    # empty prefetch falls back to the agentic graph path (graph as the last resort).
+    try:
+        brief = json.loads(brd_json)
+    except (TypeError, ValueError):
+        brief = {}
+    pack = _slice_pack(deps, brief,
+                       max_units=int(os.environ.get("CODEGEN_PACK_MAX_UNITS", "200")),
+                       max_chars=int(os.environ.get("CODEGEN_PACK_MAX_CHARS", "60000")))
+    max_turns, use_graph = _codegen_run_plan(pack=bool(pack), size=size)
+    server = build_graph_server(deps) if use_graph else None
+    allowed_tools = GRAPH_TOOL_NAMES if use_graph else []
+    logger.info("build: codegen for repo=%s — %d code units, prefetch=%d chars -> "
+                "%d turns, tools=%s, model=%s", slug, size, len(pack), max_turns,
+                "graph" if use_graph else "none", model)
     return asyncio.run(generate_slice(
-        runner=runner, server=server, model=model,
+        runner=runner, server=server, model=model, source_pack=pack,
         brd_json=brd_json, golden_summary="(no recorded golden master yet)",
-        allowed_tools=GRAPH_TOOL_NAMES, max_turns=max_turns))
+        allowed_tools=allowed_tools, max_turns=max_turns))
+
+
+def _brd_requirements(brd_node: dict) -> list[dict]:
+    """The BRD's actual requirement sections (FRs/NFRs + body), not just metadata.
+    Empty list for legacy nodes that predate structured `sections` persistence."""
+    raw = brd_node.get("sections")
+    if not raw:
+        return []
+    try:
+        secs = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [s for s in secs if isinstance(s, dict)]
+
+
+def _domain_design_brief(neo4j, slug: str) -> dict | None:
+    """The persisted DDD/OO DomainDesign as a plain dict (bounded contexts + the
+    tactical designs: aggregates/invariants/value objects/api surface). None when no
+    design has been run yet — codegen then grounds on the BRD requirements alone."""
+    from cobol_modernizer.controlplane.domain import DomainDesignStorage
+
+    try:
+        node = DomainDesignStorage(neo4j).get_latest(slug)
+    except _NEO4J_ERRORS:
+        return None
+    if not node:
+        return None
+    return {
+        "version": node.get("version"),
+        "rating": node.get("rating"),
+        "contexts": json.loads(node.get("contexts_json") or "[]"),
+        "designs": json.loads(node.get("designs_json") or "[]"),
+    }
+
+
+def _codegen_brief(neo4j, slug: str, brd_node: dict) -> str:
+    """Assemble the codegen brief the TDD agent reasons over: the BRD's real
+    requirement text PLUS the DDD/OO domain design. Version/rating metadata alone
+    starves the agent — with nothing concrete to assert it emits production code but
+    no failing test (generator raises 'no failing test'). The DomainDesign's
+    aggregate invariants, methods, and api_surface are directly assertable in JUnit,
+    so feeding them in is what lets codegen honor TDD."""
+    brief: dict[str, Any] = {
+        "repo_id": slug,
+        "brd": {"version": brd_node.get("version"), "rating": brd_node.get("rating"),
+                "requirements": _brd_requirements(brd_node)},
+    }
+    design = _domain_design_brief(neo4j, slug)
+    if design:
+        brief["domain_design"] = design
+    return json.dumps(brief)
 
 
 def _precheck(neo4j, workspace: Workspace, source_root: Path) -> dict:
@@ -129,11 +283,9 @@ def run_build(*, session: Session, neo4j, workspace: Workspace,
     slug = workspace.repo_slug
     repo_dir = source_root / slug
     latest = _precheck(neo4j, workspace, source_root)
-    brd_json = json.dumps({"repo_id": slug, "version": latest.get("version"),
-                           "rating": latest.get("rating")})
+    brd_json = _codegen_brief(neo4j, slug, latest)
 
-    logger.info("build: generating slice for repo=%s (BRD v%s) — multi-minute LLM run",
-                slug, latest.get("version"))
+    logger.info("build: generating slice for repo=%s (BRD v%s)", slug, latest.get("version"))
     gen = generate or _generate_slice_graph
     project = gen(slug, neo4j=neo4j, repo_path=str(repo_dir.resolve()),
                   brd_json=brd_json)
