@@ -19,3 +19,14 @@ def test_render_html_includes_epics_stories_and_coverage():
     assert "AC-1" in html
     assert "balance updates" in html
     assert "83" in html  # coverage percent
+
+
+def test_render_html_escapes_special_characters():
+    backlog = Backlog(
+        repo_slug="repo<>&",
+        epics=[Epic(id="EPIC-<1>", title="T&T", outcome="o<o", story_ids=[])],
+        stories=[])
+    html = render_html(backlog, {})
+    assert "repo<>" not in html      # raw repo_slug must not appear unescaped
+    assert "EPIC-<1>" not in html    # raw epic id must not appear unescaped
+    assert "&lt;" in html            # something was escaped
