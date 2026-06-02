@@ -4,6 +4,7 @@ story ids, and known DDD context names. Parser drops anything ungrounded."""
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from cobol_modernizer.enrichment.base import run_batched
@@ -23,6 +24,8 @@ TECHNICAL_DESIGN_SYSTEM = (
     "patterns, and integration contracts. Do not invent story ids, context names, or "
     "graph refs — use only the ones provided."
 )
+
+logger = logging.getLogger(__name__)
 
 _ACCESS_PATTERNS = {"legacy-mimic", "repository", "event-sourced", "read-replica"}
 _STYLES = {"sync", "async", "batch"}
@@ -88,6 +91,24 @@ def _ground(values: Any, allowed: set[str]) -> list[str]:
     return out
 
 
+def _coerce_access_pattern(value: Any, *, service: Any) -> str:
+    if value in _ACCESS_PATTERNS:
+        return value
+    if value:  # present but out-of-enum
+        logger.warning("technical-design: coerced access_pattern %r -> 'legacy-mimic' "
+                       "for service %r", value, service)
+    return "legacy-mimic"
+
+
+def _coerce_style(value: Any, *, service: Any) -> str:
+    if value in _STYLES:
+        return value
+    if value:  # present but out-of-enum
+        logger.warning("technical-design: coerced style %r -> 'sync' for service %r",
+                       value, service)
+    return "sync"
+
+
 def parse_technical_design_payload(raw: dict, *, repo_slug: str, known_refs: set[str],
                                    known_story_ids: set[str],
                                    known_contexts: set[str]) -> TechnicalDesign:
@@ -96,10 +117,17 @@ def parse_technical_design_payload(raw: dict, *, repo_slug: str, known_refs: set
         if not isinstance(item, dict):
             continue
         ctx = str(item.get("bounded_context", ""))
+        # known_contexts is empty only before a DDD design exists; the Task 10 caller
+        # guarantees one, so this guard is effectively always active. Empty-set => no
+        # filtering (lenient bootstrap).
         if known_contexts and ctx not in known_contexts:
             continue  # drop services not tied to a known DDD context
+        svc_name = item.get("name")
         deployment = item.get("deployment")
         if deployment not in _DEPLOYMENTS:
+            if deployment:  # present but out-of-enum
+                logger.warning("technical-design: coerced deployment %r -> 'module' "
+                               "for service %r", deployment, svc_name)
             deployment = "module"
         apis = [ApiContract(name=str(a.get("name", "")), method=str(a.get("method", "")),
                             path=str(a.get("path", "")),
@@ -107,12 +135,12 @@ def parse_technical_design_payload(raw: dict, *, repo_slug: str, known_refs: set
                             response_model=str(a.get("response_model", "")))
                 for a in item.get("api_contracts", []) if isinstance(a, dict)]
         persistence = [PersistenceDesign(resource=str(p.get("resource", "")),
-                                         access_pattern=p.get("access_pattern")
-                                         if p.get("access_pattern") in _ACCESS_PATTERNS else "legacy-mimic",
+                                         access_pattern=_coerce_access_pattern(
+                                             p.get("access_pattern"), service=svc_name),
                                          owner_service=str(p.get("owner_service", "")))
                        for p in item.get("persistence", []) if isinstance(p, dict)]
         integrations = [IntegrationContract(name=str(i.get("name", "")),
-                                            style=i.get("style") if i.get("style") in _STYLES else "sync",
+                                            style=_coerce_style(i.get("style"), service=svc_name),
                                             target=str(i.get("target", "")),
                                             payload=str(i.get("payload", "")))
                         for i in item.get("integrations", []) if isinstance(i, dict)]

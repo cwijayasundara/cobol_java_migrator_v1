@@ -2,6 +2,7 @@ import asyncio
 
 from cobol_modernizer.technical_design.generator import (
     TECHNICAL_DESIGN_SCHEMA,
+    TECHNICAL_DESIGN_SYSTEM,
     build_technical_design_prompt,
     generate_technical_design_payload,
     parse_technical_design_payload,
@@ -57,3 +58,26 @@ def test_generate_returns_raw_payload():
         seam_waves_json="[]", graph_summary={}))
     assert raw == {"services": []}
     assert runner.calls[0]["schema"] is TECHNICAL_DESIGN_SCHEMA
+    assert runner.calls[0]["system"] is TECHNICAL_DESIGN_SYSTEM
+
+
+def test_parse_coerces_out_of_enum_literals():
+    raw = {"services": [{
+        "name": "posting-service", "bounded_context": "Posting",
+        "deployment": "microservice-v2",
+        "persistence": [{"resource": "X", "access_pattern": "direct"}],
+        "integrations": [{"name": "n", "style": "weird", "target": "t"}],
+    }]}
+    design = parse_technical_design_payload(
+        raw, repo_slug="r", known_refs=set(), known_story_ids=set(),
+        known_contexts={"Posting"})
+    svc = design.services[0]
+    assert svc.deployment == "module"
+    assert svc.persistence[0].access_pattern == "legacy-mimic"
+    assert svc.integrations[0].style == "sync"
+
+
+def test_parse_empty_payload_safe():
+    design = parse_technical_design_payload(
+        {}, repo_slug="r", known_refs=set(), known_story_ids=set(), known_contexts=set())
+    assert design.services == []
