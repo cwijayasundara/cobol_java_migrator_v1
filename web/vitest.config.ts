@@ -11,6 +11,10 @@ export default defineConfig({
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
   },
   resolve: {
-    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+      // Real mermaid needs browser layout APIs jsdom lacks — stub it in tests.
+      mermaid: fileURLToPath(new URL("./src/test/mermaid-stub.ts", import.meta.url)),
+    },
   },
 });

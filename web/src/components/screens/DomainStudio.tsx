@@ -4,6 +4,8 @@ import { useState } from "react";
 import { Boxes, Play, Sparkles, AlertTriangle } from "lucide-react";
 import { api, type DomainDesignResult } from "@/lib/api";
 import { useJob } from "@/lib/useJob";
+import { MermaidDiagram } from "@/components/MermaidDiagram";
+import { contextMapMermaid, contextClassDiagram } from "@/lib/domainMermaid";
 
 // Domain Design: business-capability bounded contexts + per-context module-vs-service
 // deployment recommendation + full DDD tactical design. Replaces the 1:1 writer-slice mapping.
@@ -63,6 +65,11 @@ export function DomainStudio({ workspaceId }: { workspaceId: string }) {
         </div>
       )}
 
+      {result && contexts.length > 0 && (
+        <MermaidDiagram caption="Context map — bounded contexts, topology & dependencies"
+          chart={contextMapMermaid(result)} />
+      )}
+
       {contexts.map((c) => {
         const d = designByCtx[c.name];
         return (
@@ -97,6 +104,10 @@ export function DomainStudio({ workspaceId }: { workspaceId: string }) {
                   <div className="text-xs text-zinc-400">
                     <span className="text-zinc-500">API:</span> {d.api_surface}
                   </div>
+                )}
+                {d.aggregates.length > 0 && (
+                  <MermaidDiagram caption={`${c.name} — OO class model`}
+                    chart={contextClassDiagram(d)} />
                 )}
               </div>
             )}
