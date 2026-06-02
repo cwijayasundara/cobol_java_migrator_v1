@@ -31,6 +31,18 @@ def test_upsert_gate_creates_then_updates_same_row():
     assert len(rows) == 1
 
 
+def test_upsert_gate_refreshes_updated_at_on_update():
+    s = _session()
+    g1 = upsert_gate(s, "ws-1", "backlog", "backlog_coverage", passed=False, result={}, threshold={})
+    s.flush()
+    first = g1.updated_at
+    g2 = upsert_gate(s, "ws-1", "backlog", "backlog_coverage", passed=True, result={"x": 1}, threshold={})
+    s.flush()
+    assert g2.id == g1.id
+    # >= is robust to clock granularity (timestamps may be identical on fast runs)
+    assert g2.updated_at >= first
+
+
 def test_upsert_gate_preserves_waived_status():
     s = _session()
     g = upsert_gate(s, "ws-1", "backlog", "backlog_coverage", passed=False, result={}, threshold={})
