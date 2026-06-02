@@ -83,24 +83,6 @@ export interface PlanResult {
   delivery_waves?: string[][];
 }
 
-// Service design for one writer slice (POST .../design).
-export interface ServiceDesignDoc {
-  slice_id: string; context: string; owned_resources: string[];
-  transition_pattern: string; components: string[];
-  evidence_map: Record<string, string[]>;
-}
-export interface DesignAdr {
-  number: number; title: string; status: string; context: string;
-  decision: string; consequences: string; evidence_refs: string[];
-}
-export interface ServiceDesignResult {
-  design: ServiceDesignDoc; adrs: DesignAdr[]; rating: string;
-  data_ownership_ok: boolean; groundedness_failures: string[]; rationale: string;
-}
-export interface DesignResult {
-  repo_slug: string; count: number; designs: ServiceDesignResult[];
-}
-
 // Domain Design (DDD bounded contexts + aggregates) types.
 export interface DomainTopology { deployment: "module" | "microservice"; score: number;
   inputs?: Record<string, number>; rationale?: string }
@@ -260,8 +242,6 @@ export const api = {
     json<SeamsResult>(`/api/workspaces/${workspaceId}/seams`, { method: "POST" }),
   runPlan: (workspaceId: string) =>
     json<PlanResult>(`/api/workspaces/${workspaceId}/plan`, { method: "POST" }),
-  runDesign: (workspaceId: string) =>
-    json<DesignResult>(`/api/workspaces/${workspaceId}/design`, { method: "POST" }),
 
   // ---- blueprint: grounded LLM BRD (multi-minute background job; POST then poll) ----
   startBlueprint: (workspaceId: string) =>

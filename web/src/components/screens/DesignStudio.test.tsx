@@ -20,9 +20,9 @@ describe("DesignStudio", () => {
 
   it("disables the Generate technical design button while a run is in flight", async () => {
     server.use(
-      http.post("*/api/workspaces/:id/technical-design", () =>
+      http.post("/api/workspaces/:id/technical-design", () =>
         HttpResponse.json({ status: "running", result: null, error: null }, { status: 202 })),
-      http.get("*/api/workspaces/:id/technical-design", () =>
+      http.get("/api/workspaces/:id/technical-design", () =>
         HttpResponse.json({ status: "running", result: null, error: null })),
     );
     render(<DesignStudio workspaceId="ws-1" />);
@@ -41,7 +41,7 @@ describe("DesignStudio", () => {
 
   it("shows an error banner when the job fails", async () => {
     server.use(
-      http.get("*/api/workspaces/:id/technical-design", () =>
+      http.get("/api/workspaces/:id/technical-design", () =>
         HttpResponse.json({ status: "failed", result: null, error: "LLM timeout" })),
     );
     render(<DesignStudio workspaceId="ws-1" />);
