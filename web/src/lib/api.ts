@@ -298,6 +298,13 @@ export const api = {
     params.set("limit", String(limit));
     return json<GraphData>(`/api/graph?${params}`);
   },
+  // One-hop neighbors of a node (double-click-to-expand). Same {nodes,links} shape.
+  getNeighbors: (id: string, repo?: string, limit = 50) => {
+    const params = new URLSearchParams({ id });
+    if (repo) params.set("repo", repo);
+    params.set("limit", String(limit));
+    return json<GraphData>(`/api/graph/neighbors?${params}`);
+  },
   getEntity: (qname: string) => json<EntityDetail>(`/api/entity/${qname}`),
 
   // SSE URL is consumed by useAgentStream via EventSource (not fetch).

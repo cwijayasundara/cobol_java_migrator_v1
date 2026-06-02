@@ -23,6 +23,7 @@ export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<any>(null);
   const didFitRef = useRef(false);
+  const expandedRef = useRef<Set<string>>(new Set()); // node ids already expanded
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(true);
   const [ForceGraph, setForceGraph] = useState<any>(null);
@@ -40,6 +41,7 @@ export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
   useEffect(() => {
     setLoading(true);
     didFitRef.current = false; // re-fit once when a new repo's graph settles
+    expandedRef.current = new Set(); // forget prior expansions for the new repo
     api
       .getGraph(repo, 300)
       .then(setGraphData)
@@ -61,40 +63,42 @@ export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
     return () => ro.disconnect();
   }, [fullscreen, ForceGraph, graphData]);
 
-  // Tune the d3 force simulation so clusters sit closer together and don't
-  // scatter into tiny far-flung islands: shorter links, capped repulsion range,
-  // and — crucially — an x/y pull toward the origin. forceCenter only recenters
-  // the mean each tick; it applies NO attraction, so disconnected nodes (no link
-  // pulling them in) drift to the edges. forceX/forceY gathers every node,
-  // orphans included, into one compact cluster.
+  // Tune the d3 force simulation for spaced-but-gathered clusters: strong, long
+  // reaching repulsion pushes distinct components (and the orphan DataItems) apart
+  // so they read as separate clusters rather than one dense blob, while a GENTLE
+  // x/y pull toward the origin keeps the whole graph on-canvas (forceCenter only
+  // recenters the mean each tick — it applies no attraction, so without this the
+  // disconnected nodes drift off to the corners). The balance between charge
+  // (spread) and forceX/Y (gather) is the knob: stronger charge / weaker x-y ->
+  // more spacing; the reverse -> tighter.
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg || !graphData || graphData.nodes.length === 0) return;
 
     const charge = fg.d3Force?.("charge");
     if (charge) {
-      charge.strength(-30);    // weaker repulsion -> nodes pack tighter
-      charge.distanceMax(160); // ignore long-range repulsion between separate clusters
+      charge.strength(-160);   // strong repulsion -> clusters push well apart
+      charge.distanceMax(600);  // long reach so separate clusters repel each other
     }
     const link = fg.d3Force?.("link");
     if (link) {
-      link.distance(18);  // shorter edges keep connected nodes near each other
-      link.strength(0.8); // pull connected nodes together a little harder
+      link.distance(36);  // roomier edges -> clusters have internal breathing space
+      link.strength(0.6); // still cohesive, but not collapsed onto each other
     }
     const center = fg.d3Force?.("center");
-    if (center?.strength) center.strength(1); // keep the whole graph gathered
+    if (center?.strength) center.strength(1);
 
-    // Attractive pull toward the origin — this is what reels in disconnected
-    // nodes so the graph stays compact instead of flinging orphans outward.
-    fg.d3Force?.("x", forceX(0).strength(0.18));
-    fg.d3Force?.("y", forceY(0).strength(0.18));
+    // GENTLE attractive pull toward the origin — only enough to keep disconnected
+    // nodes on-canvas; too strong and everything collapses into a single blob.
+    fg.d3Force?.("x", forceX(0).strength(0.05));
+    fg.d3Force?.("y", forceY(0).strength(0.05));
 
-    // Collision force: no two nodes may overlap. Dense clusters spread apart
-    // just enough that every node stays individually visible.
+    // Collision force: no two nodes may overlap, with generous padding so even a
+    // dense cluster stays legible.
     fg.d3Force?.(
       "collide",
-      forceCollide((node: any) => nodeRadius(node) + 3)
-        .strength(0.9)
+      forceCollide((node: any) => nodeRadius(node) + 8)
+        .strength(1)
         .iterations(2)
     );
 
@@ -126,10 +130,57 @@ export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
   const focusedNeighbors = focusId ? neighborMap.get(focusId) ?? new Set<string>() : null;
   const focusedLinks = focusId ? linkMap.get(focusId) ?? new Set<string>() : null;
 
-  const handleNodeClick = useCallback(
+  // Double-click-to-expand: fetch a node's one-hop neighbors and merge them into
+  // the live graph, preserving existing node positions so the layout doesn't jump.
+  // New nodes are seeded at the expanded node's position so they fan outward as
+  // the simulation reheats. Already-expanded nodes are remembered to avoid refetch.
+  const handleNodeExpand = useCallback(
+    async (node: any) => {
+      if (!node?.id || expandedRef.current.has(node.id)) return;
+      expandedRef.current.add(node.id);
+      let nb: GraphData;
+      try {
+        nb = await api.getNeighbors(node.id, repo);
+      } catch {
+        expandedRef.current.delete(node.id); // let the user retry on failure
+        return;
+      }
+      const idOf = (e: any) => (typeof e === "string" ? e : e.id);
+      setGraphData((cur) => {
+        if (!cur) return cur;
+        // Map value is `any`: react-force-graph augments nodes with runtime x/y
+        // that aren't on the GraphNode type, and we seed those on new nodes.
+        const byId = new Map<string, any>(cur.nodes.map((n) => [n.id, n]));
+        let added = 0;
+        for (const n of nb.nodes) {
+          if (!byId.has(n.id)) {
+            byId.set(n.id, { ...n, x: node.x, y: node.y });
+            added += 1;
+          }
+        }
+        const seen = new Set(cur.links.map((l) => `${idOf(l.source)}|${idOf(l.target)}|${l.type}`));
+        const links = [...cur.links];
+        for (const l of nb.links) {
+          const key = `${l.source}|${l.target}|${l.type}`;
+          if (!seen.has(key)) {
+            links.push(l);
+            seen.add(key);
+          }
+        }
+        if (added === 0) return cur; // no new neighbors -> avoid a needless reheat
+        return { nodes: Array.from(byId.values()), links };
+      });
+    },
+    [repo]
+  );
+
+  // react-force-graph 1.29 has no onNodeDoubleClick, so we synthesize one: defer
+  // the single-click action briefly; a second click on the SAME node within the
+  // window cancels it and expands instead.
+  const pendingClickRef = useRef<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const doSingleClick = useCallback(
     (node: any) => {
       setSelectedId(node.id);
-      // Center the camera on the clicked node.
       if (graphRef.current && typeof node.x === "number" && typeof node.y === "number") {
         graphRef.current.centerAt(node.x, node.y, 600);
         graphRef.current.zoom(2.4, 600);
@@ -138,6 +189,28 @@ export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
     },
     [onNodeClick]
   );
+  const handleNodeClick = useCallback(
+    (node: any) => {
+      const pending = pendingClickRef.current;
+      if (pending && pending.id === node.id) {
+        clearTimeout(pending.timer);
+        pendingClickRef.current = null;
+        void handleNodeExpand(node);
+        return;
+      }
+      if (pending) clearTimeout(pending.timer);
+      const timer = setTimeout(() => {
+        pendingClickRef.current = null;
+        doSingleClick(node);
+      }, 250);
+      pendingClickRef.current = { id: node.id, timer };
+    },
+    [handleNodeExpand, doSingleClick]
+  );
+  // Clear any pending single-click timer on unmount.
+  useEffect(() => () => {
+    if (pendingClickRef.current) clearTimeout(pendingClickRef.current.timer);
+  }, []);
 
   const handleZoom = (delta: number) => {
     if (!graphRef.current) return;
@@ -369,7 +442,7 @@ export function GraphView({ repo, onNodeClick, seamOverlay }: Props) {
 
       {/* Hint */}
       <div className="absolute bottom-3 left-3 z-10 text-[10px] text-zinc-500 bg-zinc-900/70 backdrop-blur px-2 py-1 rounded border border-zinc-800/60">
-        scroll to zoom · drag node to pin · hover to highlight neighbors
+        scroll to zoom · drag node to pin · double-click to expand · hover to highlight neighbors
       </div>
     </div>
   );

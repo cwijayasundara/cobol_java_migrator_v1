@@ -33,7 +33,7 @@ export default function Page({ params }: { params: Promise<{ id: string; stage: 
     <>
       <JourneyRail workspaceId={id} stages={stages} active={stage} />
       <div className="flex-1 flex flex-col min-w-0">
-        <StageHeader stageKey={stage} gates={stageGates} budget={budget} />
+        <StageHeader workspaceId={id} stageKey={stage} gates={stageGates} budget={budget} />
         <div className="flex-1 overflow-auto">
           {ws && <StageScreen workspaceId={id} stageKey={stage} repoSlug={ws.repo_slug} />}
         </div>

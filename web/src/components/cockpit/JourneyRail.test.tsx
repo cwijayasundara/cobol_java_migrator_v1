@@ -12,4 +12,11 @@ describe("JourneyRail", () => {
     const active = screen.getByText("Blueprint").closest("a");
     expect(active?.getAttribute("aria-current")).toBe("step");
   });
+
+  it("groups stages under the three workflow phases", () => {
+    render(<JourneyRail workspaceId="ws-1" stages={STAGES} active="blueprint" />);
+    ["UNDERSTAND", "DESIGN", "MIGRATE"].forEach((heading) =>
+      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument(),
+    );
+  });
 });
