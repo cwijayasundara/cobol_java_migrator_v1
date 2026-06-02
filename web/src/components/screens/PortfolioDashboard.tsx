@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Boxes, FolderGit2, Plus } from "lucide-react";
+import { Boxes, FolderGit2, Plus, RefreshCw } from "lucide-react";
 import { api, type RepoInfo } from "@/lib/api";
 import type { Workspace, Budget } from "@/lib/types";
 
@@ -13,9 +13,14 @@ export function PortfolioDashboard() {
   const [repos, setRepos] = useState<RepoInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    (async () => {
+  // Guard the whole load: a transient backend hiccup (restart, 404/5xx, network)
+  // must degrade to a friendly retry, not crash the dashboard with a runtime error.
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
       const workspaces = await api.listWorkspaces();
       const withBudget = await Promise.all(
         workspaces.map(async (ws) => ({
@@ -25,9 +30,16 @@ export function PortfolioDashboard() {
       );
       setRows(withBudget);
       setRepos(await api.listRepos().catch(() => []));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
       setLoading(false);
-    })();
+    }
   }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const wsBySlug = new Map(rows.map((r) => [r.ws.repo_slug, r.ws]));
 
@@ -61,6 +73,21 @@ export function PortfolioDashboard() {
           </h2>
           {loading ? (
             <div className="text-zinc-500 text-sm">Loading...</div>
+          ) : error ? (
+            <div className="rounded-lg border border-red-900/60 bg-red-950/30 p-4 text-sm">
+              <div className="text-red-300 font-medium">Couldn&apos;t reach the control-plane API.</div>
+              <div className="text-zinc-400 mt-1">
+                Is the backend running on <span className="font-mono">localhost:8000</span>? Start it with{" "}
+                <span className="font-mono">./scripts/start-backend.sh</span>.
+              </div>
+              <div className="text-zinc-600 font-mono text-xs mt-2 break-all">{error}</div>
+              <button
+                onClick={() => void load()}
+                className="mt-3 inline-flex items-center gap-1.5 rounded bg-zinc-800 px-3 py-1.5 text-zinc-200 hover:bg-zinc-700"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Retry
+              </button>
+            </div>
           ) : rows.length === 0 ? (
             <div className="text-zinc-500 text-sm">
               No workspaces yet — pick a repository below to start one.

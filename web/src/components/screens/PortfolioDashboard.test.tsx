@@ -1,9 +1,22 @@
 import { describe, it, expect } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { server } from "@/test/msw/server";
 import { PortfolioDashboard } from "@/components/screens/PortfolioDashboard";
 
 describe("PortfolioDashboard", () => {
+  it("shows a friendly error with Retry when the workspaces API fails", async () => {
+    server.use(
+      http.get("*/api/workspaces", () => new HttpResponse("Not Found", { status: 404 })),
+    );
+    render(<PortfolioDashboard />);
+    expect(await screen.findByText(/reach the control-plane API/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+    // the raw status is surfaced for debugging
+    expect(screen.getByText(/404/)).toBeInTheDocument();
+  });
+
   it("lists workspaces with repo slug and a cost-vs-cap pill", async () => {
     render(<PortfolioDashboard />);
     expect(await screen.findByText("CardDemo")).toBeInTheDocument();
