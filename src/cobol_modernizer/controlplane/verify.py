@@ -12,6 +12,7 @@ are supplied in the request (honest provenance — no fabricated oracle). The
 with defects marks it failed (this is a real gate, not a checkbox)."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,12 +21,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from cobol_modernizer.backlog.storage import BacklogStorage
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
+from cobol_modernizer.controlplane.gates_util import upsert_gate
 from cobol_modernizer.equivalence.golden import InMemoryGoldenStore
 from cobol_modernizer.equivalence.lab import EquivalenceLab
 from cobol_modernizer.equivalence.seam_link import resolve_source_seam
 from cobol_modernizer.equivalence.tolerance import load_ruleset
-from cobol_modernizer.persistence.tables import JourneyStage, Workspace
+from cobol_modernizer.persistence.tables import Artifact, JourneyStage, Workspace
+from cobol_modernizer.slice.gates import story_behavior_gate
 
 router = APIRouter(prefix="/api", tags=["controlplane-verify"])
 _NEO4J_ERRORS = (Neo4jError, DriverError)
@@ -66,6 +70,27 @@ class VerifyRequest(BaseModel):
     tolerance_yaml: str | None = None
     dialect: str = "unspecified"
     online_uses_recorded_fixtures: bool = False
+
+
+def evaluate_story_behavior(session: Session, workspace_id: str, *, stories: list[dict],
+                            generated_test_refs: list[str], equivalence_verdict: str) -> "Gate":
+    """Aggregate per-story behavior gates into one verify-stage story_behavior gate.
+    A normalized equivalence verdict of 'pass' maps to story_behavior_gate's 'passed'."""
+    # story_behavior_gate expects 'passed' (not 'pass'); normalize here.
+    verdict = "passed" if equivalence_verdict == "pass" else equivalence_verdict
+    failures: list[dict] = []
+    for story in stories:
+        ac_ids = [c.get("id") for c in story.get("acceptance_criteria", []) if c.get("id")]
+        res = story_behavior_gate(story_id=story.get("id", "?"),
+                                  acceptance_criteria_ids=ac_ids,
+                                  generated_test_refs=generated_test_refs,
+                                  equivalence_verdict=verdict)
+        if not res["passed"]:
+            failures.append(res)
+    passed = not failures
+    return upsert_gate(session, workspace_id, "verify", "story_behavior",
+                       passed=passed, result={"failures": failures},
+                       threshold={"all_stories_verified": True})
 
 
 def _workspace(session: Session, wid: str) -> Workspace:
@@ -119,6 +144,24 @@ def run_verify(*, session: Session, neo4j, workspace: Workspace,
 
     _set_status(session, workspace.id, "verify",
                 "passed" if result.report.verdict == "pass" else "failed")
+
+    # Story-behavior gate (additive — never raises; never breaks equivalence verdict).
+    try:
+        backlog_node = BacklogStorage(neo4j).get_latest(workspace.repo_slug)
+        stories = json.loads(backlog_node.get("stories_json") or "[]") if backlog_node else []
+    except _NEO4J_ERRORS:
+        stories = []
+    if stories:
+        refs_art = session.execute(
+            select(Artifact).where(Artifact.workspace_id == workspace.id,
+                                   Artifact.kind == "generated_test_refs")
+            .order_by(Artifact.version.desc())
+        ).scalars().first()
+        test_refs = (refs_art.evidence_map or {}).get("acceptance_criteria", []) if refs_art else []
+        evaluate_story_behavior(session, workspace.id, stories=stories,
+                                generated_test_refs=test_refs,
+                                equivalence_verdict=result.report.verdict)
+
     session.flush()
     return {
         "repo_slug": workspace.repo_slug,
