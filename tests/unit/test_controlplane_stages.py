@@ -6,7 +6,7 @@ def test_canonical_stages_in_order():
         "outcome", "intake", "parse", "graph", "explore",
         "blueprint", "backlog", "seams", "plan", "domain", "design", "build", "verify",
     ]
-    assert [s.ordinal for s in JOURNEY_STAGES] == list(range(13))
+    assert [s.ordinal for s in JOURNEY_STAGES] == list(range(len(JOURNEY_STAGES)))
 
 
 def test_gate_key_mapping():
@@ -14,3 +14,4 @@ def test_gate_key_mapping():
     assert gate_key_for("build") == "code"
     assert gate_key_for("intake") is None
     assert gate_key_for("domain") is None   # Domain Design has no hard gate
+    assert gate_key_for("backlog") == "backlog_coverage"
