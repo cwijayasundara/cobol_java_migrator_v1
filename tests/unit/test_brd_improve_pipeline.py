@@ -72,3 +72,19 @@ def test_improve_pipeline_raises_when_no_brd(monkeypatch):
     with pytest.raises(ValueError):
         pipe.improve_brd_graph_sync("demo", "x", client=_Client(), repo_path="/tmp",
                                     storage=_NoStorage())
+
+
+def test_improve_pipeline_does_not_save_when_agent_raises(monkeypatch):
+    storage = _Storage()
+    monkeypatch.setattr(pipe, "render_html", lambda brd: "<html>new</html>")
+
+    async def _boom(deps, *, current_brd, instruction, runner, model, max_turns, timeout_s, **kw):
+        raise ValueError("improve agent produced no usable BRD draft")
+    monkeypatch.setattr("cobol_modernizer.agent.brd_improve.agenerate_brd_improvement", _boom)
+
+    class _Client:
+        def run(self, *a, **k):
+            return []
+    with pytest.raises(ValueError):
+        pipe.improve_brd_graph_sync("demo", "x", client=_Client(), repo_path="/tmp", storage=storage)
+    assert storage.saved is None    # never overwrote the prior version

@@ -106,7 +106,6 @@ def improve_brd_graph_sync(repo_id: str, instruction: str, *, client=None,
                            storage: "BRDStorage | None" = None) -> BRDResult:
     """Refine the latest BRD per `instruction` (graph-grounded), re-judge, save a NEW
     version. Raises ValueError if no BRD exists yet (endpoint maps this to 409)."""
-    import time
     from cobol_modernizer.agent.brd_improve import agenerate_brd_improvement
     from cobol_modernizer.agent.brd_judge import ajudge
     from cobol_modernizer.agent.deps import GraphDeps
