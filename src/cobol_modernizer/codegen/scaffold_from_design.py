@@ -70,11 +70,17 @@ def java_identifier(raw: str) -> str:
     return ident
 
 
+def _story_ids(service: TechnicalService) -> str:
+    """The service's story ids as a comma-joined string (`none` when it has none).
+    Deterministic (input order); used in TODO markers + UnsupportedOperationException
+    messages so every shell links back to the stories that will fill it in."""
+    return ",".join(service.story_ids) or "none"
+
+
 def _marker(service: TechnicalService) -> str:
     """A `// TODO(story:<ids> service:<name>)` marker linking a shell back to the
     service/story ids it was derived from. Story ids are deterministic (input order)."""
-    story = ",".join(service.story_ids) or "none"
-    return f"// TODO(story:{story} service:{service.name})"
+    return f"// TODO(story:{_story_ids(service)} service:{service.name})"
 
 
 def _http_mapping(method: str) -> str:
@@ -115,8 +121,10 @@ def _controller_shell(pkg: str, service: TechnicalService,
     class_name = java_identifier(contract.name) + "Controller"
     mapping = _http_mapping(contract.method)
     path = contract.path or "/"
-    response = (java_identifier(contract.response_model)
-                if contract.response_model else "Object")
+    # Return `Object` — NOT the contract's request/response_model. Those DTO names are
+    # design intent, not generated types; referencing them would be `cannot find symbol`
+    # at compile time and break the "shells compile" guarantee. Real DTOs are a later
+    # story's job. The contract name/method/path mapping is still encoded.
     # Import only the mapping annotation actually used, so the checkstyle UnusedImports
     # gate stays green. RequestMapping is the @{mapping} for unrecognized methods, so
     # avoid importing it twice.
@@ -134,10 +142,10 @@ import org.springframework.web.bind.annotation.RestController;
 public class {class_name} {{
 
     @{mapping}
-    public {response} handle() {{
+    public Object handle() {{
         // TODO: implement API contract '{contract.name}' ({contract.method} {path})
         throw new UnsupportedOperationException(
-            "TODO: story {",".join(service.story_ids) or "none"} — {contract.name}");
+            "TODO: story {_story_ids(service)} — {contract.name}");
     }}
 }}
 """
@@ -157,7 +165,7 @@ public class {class_name} {{
     public Object process() {{
         // TODO: implement bounded context '{service.bounded_context}'
         throw new UnsupportedOperationException(
-            "TODO: story {",".join(service.story_ids) or "none"} — {service.name}");
+            "TODO: story {_story_ids(service)} — {service.name}");
     }}
 }}
 """
@@ -214,8 +222,14 @@ def design_to_shells(design: TechnicalDesign) -> list[ShellFile]:
     path + content). No disk I/O. Emits a `@SpringBootApplication` entrypoint plus, per
     service, a controller per ApiContract, one service class, and an entity+repository
     per PersistenceDesign.resource. Order follows the design (services -> contracts ->
-    persistence) so output is stable. Shells with colliding class names (e.g. two
-    resources sanitizing to the same identifier) are de-duplicated by path, first wins."""
+    persistence) so output is stable.
+
+    Raises ValueError on a class-name collision — two inputs that sanitize to the same
+    Java identifier (e.g. contracts "Post Transaction" and "post-transaction", or a
+    "Process" contract in two services) would overwrite each other and silently drop a
+    contract/service and its story link. That's an ambiguous design the upstream stage
+    must disambiguate, so we fail loudly with the colliding class names rather than
+    dropping work."""
     pkg = base_package_for(design.repo_slug)
     app_class = java_identifier(module_name_for(design.repo_slug)) + "Application"
 
@@ -228,13 +242,20 @@ def design_to_shells(design: TechnicalDesign) -> list[ShellFile]:
             shells.append(_entity_shell(pkg, service, persistence))
             shells.append(_repository_shell(pkg, service, persistence))
 
-    deduped: list[ShellFile] = []
-    seen: set[str] = set()
+    by_path: dict[str, ShellFile] = {}
+    collisions: list[str] = []
     for shell in shells:
-        if shell.path not in seen:
-            seen.add(shell.path)
-            deduped.append(shell)
-    return deduped
+        if shell.path in by_path:
+            collisions.append(Path(shell.path).stem)
+        else:
+            by_path[shell.path] = shell
+    if collisions:
+        raise ValueError(
+            "TechnicalDesign produces colliding Java class names "
+            f"(distinct contracts/services/resources that sanitize to the same "
+            f"identifier): {', '.join(sorted(set(collisions)))}. Disambiguate the "
+            "names in the design.")
+    return list(by_path.values())
 
 
 def scaffold_from_design(parent: Path, design: TechnicalDesign) -> Path:

@@ -132,6 +132,42 @@ def test_design_to_shells_controller_per_api_contract():
     assert "/transactions" in joined
 
 
+def test_design_to_shells_raises_on_colliding_contract_names():
+    # Two contracts that sanitize to the same Java identifier in one service would
+    # overwrite each other -> a contract + its story link silently dropped. Fail loudly.
+    design = TechnicalDesign(
+        repo_slug="acme/card-demo",
+        services=[TechnicalService(
+            name="Posting", bounded_context="posting", deployment="module",
+            story_ids=["S-1"],
+            api_contracts=[
+                ApiContract(name="Post Transaction", method="POST", path="/a"),
+                ApiContract(name="post-transaction", method="GET", path="/b"),
+            ])],
+    )
+    with pytest.raises(ValueError, match="PostTransactionController"):
+        design_to_shells(design)
+
+
+def test_design_to_shells_raises_on_collision_across_services():
+    # Same controller name in two different services -> second service's story vanishes.
+    design = TechnicalDesign(
+        repo_slug="acme/card-demo",
+        services=[
+            TechnicalService(name="One", bounded_context="a", deployment="module",
+                             story_ids=["S-1"],
+                             api_contracts=[ApiContract(name="Process", method="POST",
+                                                        path="/one")]),
+            TechnicalService(name="Two", bounded_context="b", deployment="module",
+                             story_ids=["S-2"],
+                             api_contracts=[ApiContract(name="Process", method="POST",
+                                                        path="/two")]),
+        ],
+    )
+    with pytest.raises(ValueError, match="ProcessController"):
+        design_to_shells(design)
+
+
 def test_design_to_shells_service_per_technical_service():
     shells = design_to_shells(_design())
     services = [s for s in shells if s.path.endswith("Service.java")]
@@ -171,7 +207,7 @@ def test_design_to_shells_packages_derived_from_slug():
         assert "package com.cobolmodernizer.carddemo" in s.content
 
 
-def test_shells_are_compilable_todo_bodies():
+def test_shells_have_balanced_todo_bodies():
     shells = design_to_shells(_design())
     joined = "\n".join(s.content for s in shells)
     assert "UnsupportedOperationException" in joined
@@ -179,6 +215,19 @@ def test_shells_are_compilable_todo_bodies():
     for s in shells:
         assert s.content.count("{") == s.content.count("}")
         assert s.content.rstrip().endswith("}")
+
+
+def test_controllers_reference_no_undefined_dto_types():
+    # The design names request/response models (PostTransactionRequest/Response) that
+    # are NOT generated. They must NOT leak into the source as a return/param type or the
+    # shell fails to compile with 'cannot find symbol'. Controller methods return Object.
+    shells = design_to_shells(_design())
+    joined = "\n".join(s.content for s in shells)
+    assert "PostTransactionRequest" not in joined
+    assert "PostTransactionResponse" not in joined
+    controllers = [s for s in shells if s.path.endswith("Controller.java")]
+    for s in controllers:
+        assert "public Object handle()" in s.content
 
 
 # ---- disk writer -------------------------------------------------------------
