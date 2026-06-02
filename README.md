@@ -122,6 +122,11 @@ The cockpit talks to these (all under `/api`), backed by Postgres + read-only Ne
 - `POST /workspaces/{id}/verify` — the **Verify** stage: deterministic field-aware
   equivalence diff of supplied candidate vs golden records (COMP-3 / scale / date
   tolerance), with mismatches seam-linked to the graph. No LLM; pass/fail gate.
+- `POST /workspaces/{id}/domain-design` → **202** (background job), `GET .../domain-design`
+  polls status. The **Domain Design** stage: business-capability bounded-context
+  decomposition (LLM-proposed, gate-validated) + per-context module-vs-microservice
+  recommendation + full DDD tactical design. Persisted + versioned as `:DomainDesign`
+  nodes. `GET .../domain-design/html` renders the design once done. LLM (needs `ANTHROPIC_API_KEY`).
 - `POST /workspaces/{id}/runs` · `POST /gates/{id}/approval` (attributed RBAC gate)
 - `GET /graph?repo=&limit=` · `GET /entity/{qname}` (read-only Neo4j)
 - `GET /workspaces/{id}/runs/{runId}/events` (SSE: replay persisted events + live stream)
