@@ -68,13 +68,29 @@ def run_technical_design(*, session: Session, neo4j, workspace: Workspace,
     dd = DomainDesignStorage(neo4j).get_latest(slug)
     if not dd:
         raise HTTPException(status_code=409, detail=f"no domain design for '{slug}' — run Domain Design first")
-    contexts = json.loads(dd.get("contexts_json") or "[]")
+    raw_ctx = dd.get("contexts_json")
+    try:
+        contexts = json.loads(raw_ctx or "[]")
+    except json.JSONDecodeError:
+        logger.warning("technical_design: malformed contexts_json for %s — treating as empty", slug)
+        contexts = []
     known_contexts = {c.get("name") for c in contexts if isinstance(c, dict) and c.get("name")}
     backlog = BacklogStorage(neo4j).get_latest(slug)
-    stories = json.loads(backlog.get("stories_json") or "[]") if backlog else []
+    if backlog:
+        try:
+            stories = json.loads(backlog.get("stories_json") or "[]")
+        except json.JSONDecodeError:
+            logger.warning("technical_design: malformed stories_json for %s — treating as empty", slug)
+            stories = []
+    else:
+        stories = []
     known_story_ids = {s.get("id") for s in stories if isinstance(s, dict) and s.get("id")}
     known_refs = {r["q"] for r in neo4j.run(_GRAPH_REFS_Q, repo=slug) if r.get("q")}
-    seam_waves = [[c.get("program")] for c in rank_candidates(neo4j, repo=slug)]
+    try:
+        seam_waves = [[c.get("program")] for c in rank_candidates(neo4j, repo=slug)]
+    except _NEO4J_ERRORS:
+        logger.warning("technical_design: seam ranking failed for %s — using empty waves", slug)
+        seam_waves = []
 
     # Ensure a :Repository node exists for TechnicalDesignStorage (uses MATCH, like blueprint/backlog).
     neo4j.run("MERGE (r:Repository {slug: $slug}) SET r.name = coalesce(r.name, $slug)", slug=slug)

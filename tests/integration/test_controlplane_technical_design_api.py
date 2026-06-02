@@ -80,3 +80,54 @@ def test_technical_design_post_persists_and_gates(monkeypatch):
     finally:
         app.dependency_overrides.clear()
         jobs.runner.inline = False
+
+
+def test_technical_design_status_idle_before_generation(monkeypatch):
+    client, _eng = _client(monkeypatch)
+    jobs.runner._jobs.pop(("technical_design", "ws-1"), None)
+    try:
+        r = client.get("/api/workspaces/ws-1/technical-design")
+        assert r.status_code == 200
+        assert r.json()["status"] == "idle"
+    finally:
+        app.dependency_overrides.clear()
+        jobs.runner.inline = False
+
+
+class FakeNeo4jNoDomain(FakeNeo4j):
+    def run(self, query, **params):
+        if "(d:DomainDesign)" in query or "HAS_DOMAIN_DESIGN" in query:
+            return []
+        return super().run(query, **params)
+
+
+def test_technical_design_409_without_domain_design(monkeypatch):
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(eng)
+    with Session(eng) as s:
+        s.add(Workspace(id="ws-1", name="m", repo_slug="carddemo-mini", created_by="t"))
+        s.add(JourneyStage(workspace_id="ws-1", stage_key="design", ordinal=10, status="running"))
+        s.commit()
+
+    def session_override():
+        ss = Session(eng)
+        try:
+            yield ss
+        finally:
+            ss.close()
+
+    jobs.runner.inline = True
+    monkeypatch.setattr(jobs, "make_session", lambda: Session(eng))
+    monkeypatch.setattr(jobs, "make_neo4j", lambda: FakeNeo4jNoDomain())
+    monkeypatch.setattr(td, "generate_technical_design_payload", _payload)
+    app.dependency_overrides[get_session] = session_override
+    app.dependency_overrides[get_neo4j] = lambda: FakeNeo4jNoDomain()
+    try:
+        client = TestClient(app)
+        client.post("/api/workspaces/ws-1/technical-design")
+        done = client.get("/api/workspaces/ws-1/technical-design").json()
+        assert done["status"] == "failed"
+        assert "domain design" in (done["error"] or "")
+    finally:
+        app.dependency_overrides.clear()
+        jobs.runner.inline = False
