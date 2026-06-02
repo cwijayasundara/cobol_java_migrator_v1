@@ -130,6 +130,13 @@ export interface PlanEnrichResult { repo_slug: string; stories: Record<string, S
 export interface DesignEnrichResult { repo_slug: string; narratives: Record<string, DesignNarrative>; token_usage?: Record<string, number> }
 export interface EnrichJob<T> { status: JobStatus; result: T | null; error: string | null }
 
+// Result of POST/GET .../blueprint/improve (LLM-grounded BRD improvement job).
+export interface BlueprintImproveResult {
+  repo_slug: string; brd_id: string; version: number;
+  rating: string; weighted_score: number; model: string;
+  token_usage?: Record<string, number>;
+}
+
 // Result of POST .../build (TDD codegen + Maven scaffold for a writer slice).
 export interface GeneratedFileInfo { path: string; kind: "test" | "main"; evidence: string[] }
 export interface BuildResult {
@@ -221,6 +228,16 @@ export const api = {
     json<BlueprintJob>(`/api/workspaces/${workspaceId}/blueprint`),
   blueprintHtmlUrl: (workspaceId: string) =>
     `/api/workspaces/${workspaceId}/blueprint/html`,
+
+  // ---- blueprint improve: LLM-grounded BRD refinement (POST → 202; GET → poll) ----
+  startBlueprintImprove: (workspaceId: string, instruction: string) =>
+    json<EnrichJob<BlueprintImproveResult>>(
+      `/api/workspaces/${workspaceId}/blueprint/improve`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction }) }),
+  getBlueprintImproveStatus: (workspaceId: string) =>
+    json<EnrichJob<BlueprintImproveResult>>(
+      `/api/workspaces/${workspaceId}/blueprint/improve`),
 
   // ---- build: TDD codegen + Maven scaffold (multi-minute background job; POST then poll) ----
   startBuild: (workspaceId: string) =>

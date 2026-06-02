@@ -12,6 +12,13 @@ describe("enrichment api", () => {
   });
 });
 
+describe("blueprint improve api", () => {
+  it("exposes improve helpers", () => {
+    expect(typeof api.startBlueprintImprove).toBe("function");
+    expect(typeof api.getBlueprintImproveStatus).toBe("function");
+  });
+});
+
 describe("control-plane api client", () => {
   it("lists workspaces from the control plane", async () => {
     const ws = await api.listWorkspaces();
