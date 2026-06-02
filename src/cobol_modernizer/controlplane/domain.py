@@ -50,8 +50,7 @@ class DomainDesignStorage:
             contexts_json=json.dumps([c.model_dump(mode="json") for c in dd.contexts]),
             designs_json=json.dumps([d.model_dump(mode="json") for d in dd.designs]),
             evidence_map=json.dumps(evidence_map or {}), html=html, model=model,
-            token_usage=json.dumps(token_usage or {}), created_at=created,
-            version=1)
+            token_usage=json.dumps(token_usage or {}), created_at=created)
         if not rows:
             raise ValueError(f"Repository not found: {dd.repo_slug}")
         dd.version = rows[0]["version"]
