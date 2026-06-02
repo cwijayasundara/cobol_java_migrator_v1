@@ -77,7 +77,7 @@ export function PortfolioDashboard() {
             <div className="rounded-lg border border-red-900/60 bg-red-950/30 p-4 text-sm">
               <div className="text-red-300 font-medium">Couldn&apos;t reach the control-plane API.</div>
               <div className="text-zinc-400 mt-1">
-                Is the backend running on <span className="font-mono">localhost:8000</span>? Start it with{" "}
+                Is the backend running on <span className="font-mono">localhost:8005</span>? Start it with{" "}
                 <span className="font-mono">./scripts/start-backend.sh</span>.
               </div>
               <div className="text-zinc-600 font-mono text-xs mt-2 break-all">{error}</div>

@@ -27,10 +27,10 @@ Two one-shot scripts bring the whole thing up — no piecemeal commands.
 ```bash
 # 1. Backend: loads .env (creates it from .env.example on first run), starts
 #    Postgres + Neo4j, applies migrations, seeds a demo workspace, runs the API.
-./scripts/start-backend.sh        # → http://localhost:8000
+./scripts/start-backend.sh        # → http://localhost:8005
 
 # 2. Cockpit UI (in a second terminal): installs web deps on first run, runs the
-#    Next.js dev server. It proxies /api/* → http://localhost:8000.
+#    Next.js dev server. It proxies /api/* → http://localhost:8005.
 ./scripts/start-ui.sh             # → http://localhost:3000
 ```
 
@@ -52,7 +52,7 @@ to stop them, `down -v` to also drop the data volumes).
 
 ### Port conflicts
 
-Default host ports are Postgres `5432`, Neo4j `7687`/`7474`, API `8000`, UI `3000`.
+Default host ports are Postgres `5432`, Neo4j `7687`/`7474`, API `8005`, UI `3000`.
 **`start-backend.sh` handles Postgres/Neo4j port conflicts automatically** — it reuses
 the ports an already-running stack publishes, otherwise picks the next free port and
 derives `POSTGRES_URL`/`NEO4J_URI` from it, so you never edit `.env` for this. It
@@ -60,8 +60,8 @@ prints the chosen ports, e.g. `→ host ports: postgres=5432 neo4j bolt=7687 htt
 
 To *pin* specific ports instead, set them in `.env` (`POSTGRES_PORT`,
 `NEO4J_BOLT_PORT`, `NEO4J_HTTP_PORT`) — those become the starting point and are still
-auto-bumped only if busy. The **API port** (`BACKEND_PORT`, default 8000) is *not*
-auto-changed because the cockpit proxies `/api` → `:8000`; free 8000 or change both
+auto-bumped only if busy. The **API port** (`BACKEND_PORT`, default 8005) is *not*
+auto-changed because the cockpit proxies `/api` → `:8005`; free 8005 or change both
 sides. See also `docs/running-the-cockpit.md`.
 
 ---
@@ -213,7 +213,7 @@ docker compose up -d postgres neo4j
 cp .env.example .env
 PYTHONPATH=src uv run alembic -c alembic.ini upgrade head     # 13 tables
 PYTHONPATH=src uv run python -m cobol_modernizer.controlplane.seed
-PYTHONPATH=src uv run uvicorn cobol_modernizer.api:app --port 8000
+PYTHONPATH=src uv run uvicorn cobol_modernizer.api:app --port 8005
 ```
 
 `alembic` needs `PYTHONPATH=src` (the package is src-layout, not pip-installed).
@@ -249,7 +249,7 @@ tests/unit/, tests/integration/
 
 - **Port already in use** → `start-backend.sh` auto-picks a free port; if a clash still
   surfaces, re-run it (or pin ports via the `*_PORT` vars in `.env`). `BACKEND_PORT`
-  (8000) is not auto-changed — free 8000 or change the cockpit proxy too.
+  (8005) is not auto-changed — free 8005 or change the cockpit proxy too.
 - **`/api/graph` → 503 / Neo4j `Unauthorized` / `AuthenticationRateLimit`** → the app's
   `NEO4J_PASSWORD` doesn't match the running Neo4j. Neo4j only applies `NEO4J_AUTH` when
   its **data volume is empty**, so changing the password later doesn't re-apply. Fix:

@@ -4,7 +4,7 @@
 #
 # Loads .env (creating it from .env.example on first run), brings up Postgres +
 # Neo4j via docker compose, applies the Alembic migrations, seeds a demo
-# workspace, and runs the FastAPI app on $BACKEND_PORT (default 8000).
+# workspace, and runs the FastAPI app on $BACKEND_PORT (default 8005).
 #
 # Host ports are chosen automatically: it reuses the ports an already-running
 # stack publishes, otherwise it picks the next FREE port (so it just works even
@@ -25,10 +25,34 @@ if [ ! -f .env ]; then
   echo "→ created .env from .env.example"
 fi
 set -a; . ./.env; set +a
-BACKEND_PORT="${BACKEND_PORT:-8000}"
+BACKEND_PORT="${BACKEND_PORT:-8005}"
 
 command -v docker >/dev/null || { echo "✗ docker not found — install Docker and retry"; exit 1; }
 command -v uv >/dev/null     || { echo "✗ uv not found — see https://docs.astral.sh/uv/"; exit 1; }
+
+_busy() {                                                                  # 0 = something is listening
+  if command -v lsof >/dev/null; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+  elif command -v nc >/dev/null; then
+    nc -z 127.0.0.1 "$1" >/dev/null 2>&1 || nc -z localhost "$1" >/dev/null 2>&1
+  else
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+  fi
+}
+
+# Do not start a shadowed backend. macOS can allow one process on 127.0.0.1:$BACKEND_PORT
+# and another on *:$BACKEND_PORT; browsers/Next's localhost proxy hit the loopback
+# process, causing confusing 404s from the wrong API. Check before any Docker calls so
+# a port conflict is reported even when Docker is unavailable to this shell.
+if _busy "$BACKEND_PORT"; then
+  echo "✗ another process is already listening on localhost:${BACKEND_PORT};"
+  echo "  the cockpit proxy would hit that process instead of this control plane."
+  echo "  Stop it, or set BACKEND_PORT and update web/next.config.ts to match."
+  if command -v lsof >/dev/null; then
+    lsof -nP -iTCP:"$BACKEND_PORT" -sTCP:LISTEN || true
+  fi
+  exit 1
+fi
 
 # The 'parse' stage runs the ProLeap COBOL extractor (Java). Make it work out of
 # the box: resolve a real JDK (the macOS /usr/bin/java stub is not enough) and the
@@ -58,7 +82,6 @@ fi
 PG_USER="${POSTGRES_USER:-cobol}"; PG_PASS="${POSTGRES_PASSWORD:-devpassword}"; PG_DB="${POSTGRES_DB:-cobol_modernizer}"
 NEO_USER="${NEO4J_USER:-neo4j}";   NEO_PASS="${NEO4J_PASSWORD:-devpassword}"
 
-_busy()      { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }            # 0 = something is listening
 _free_from() { local p="$1"; while _busy "$p"; do p=$((p + 1)); done; printf '%s' "$p"; }
 _published() { docker compose port "$1" "$2" 2>/dev/null | sed -n 's/.*:\([0-9]\{1,\}\)$/\1/p' | head -1; }
 _choose()    { local cur; cur="$(_published "$1" "$2")"; [ -n "$cur" ] && printf '%s' "$cur" || _free_from "$3"; }

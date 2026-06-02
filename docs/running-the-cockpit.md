@@ -41,19 +41,19 @@ gate + a $50 budget + one running BRD agent run (with events) + a BRD artifact.
 ## 4. Run the API + cockpit
 
 ```bash
-PYTHONPATH=src uv run uvicorn cobol_modernizer.api:app --port 8000   # control plane
+PYTHONPATH=src uv run uvicorn cobol_modernizer.api:app --port 8005   # control plane
 cd web && npm run dev                                                # cockpit on :3000
 ```
 
-`web/next.config.ts` proxies `/api/*` → `http://localhost:8000`, so the cockpit at
+`web/next.config.ts` proxies `/api/*` → `http://localhost:8005`, so the cockpit at
 http://localhost:3000/workspaces reads live data.
 
 ## 5. Smoke check
 
 ```bash
-curl -s localhost:8000/api/workspaces            # the seeded CardDemo workspace
-curl -s "localhost:8000/api/workspaces/<id>/stages"   # 11 stages
-curl -s "localhost:8000/api/graph?repo=aws-mf-carddemo&limit=50"   # read-only Neo4j
+curl -s localhost:8005/api/workspaces            # the seeded CardDemo workspace
+curl -s "localhost:8005/api/workspaces/<id>/stages"   # 11 stages
+curl -s "localhost:8005/api/graph?repo=aws-mf-carddemo&limit=50"   # read-only Neo4j
 ```
 
 ## Notes / not-yet-wired
