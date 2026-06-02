@@ -18,6 +18,7 @@ deterministic-only on failure/timeout:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -32,6 +33,7 @@ from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.controlplane.domain import DomainDesignStorage, run_domain_design
+from cobol_modernizer.controlplane.enrichment_store import EnrichmentStorage
 from cobol_modernizer.domain.render import render_html
 from cobol_modernizer.design.adr import default_adrs_for_writer_slice
 from cobol_modernizer.design.context_map import assign_context
@@ -99,6 +101,65 @@ def _require_llm() -> None:
                             detail="ANTHROPIC_API_KEY not set — enrichment needs an LLM.")
 
 
+logger = logging.getLogger(__name__)
+
+
+def _persist_enrichment(neo, slug: str, kind: str, payload: dict) -> None:
+    """Best-effort save of an enrichment result so it survives restarts + is reused.
+    Never fails the job — a persistence hiccup must not lose the freshly-computed result."""
+    try:
+        neo.run("MERGE (r:Repository {slug:$slug})", slug=slug)
+        EnrichmentStorage(neo).save(slug, kind, payload)
+    except Exception:  # noqa: BLE001
+        logger.warning("could not persist %s enrichment for %s", kind, slug, exc_info=True)
+
+
+def _saved_enrichment(neo, slug: str, kind: str):
+    """Latest persisted enrichment payload for (slug, kind), or None. Uses the caller's
+    (request-scoped, test-injectable) neo client."""
+    try:
+        return EnrichmentStorage(neo).get_latest(slug, kind)
+    except _NEO4J_ERRORS:
+        return None
+
+
+def _start_or_reuse_enrich(wid: str, slug: str, kind: str, compute, refresh: bool,
+                           neo4j) -> dict:
+    """Reuse the persisted enrichment (no LLM) unless `refresh`; otherwise run the job,
+    which persists its result on completion. `compute(neo) -> payload dict`. The reuse
+    check uses the request-scoped `neo4j`; the job opens its own connection (it runs on a
+    background thread, after the request neo4j is gone)."""
+    if not refresh:
+        saved = _saved_enrichment(neo4j, slug, kind)
+        if saved is not None:
+            return {"status": "done", "error": None, "result": saved}
+
+    def _job() -> dict:
+        neo = jobs.make_neo4j()
+        try:
+            payload = compute(neo)
+            _persist_enrichment(neo, slug, kind, payload)
+            return payload
+        finally:
+            try:
+                neo.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _job_view(jobs.runner.start(f"{kind}-enrich", wid, _job))
+
+
+def _enrichment_view(wid: str, slug: str, kind: str, neo4j) -> dict:
+    """In-flight job view if one exists, else the persisted result (restart-safe), else idle."""
+    job = jobs.runner.get(f"{kind}-enrich", wid)
+    if job is not None:
+        return _job_view(job)
+    saved = _saved_enrichment(neo4j, slug, kind)
+    if saved is not None:
+        return {"status": "done", "error": None, "result": saved}
+    return {"status": "idle", "result": None, "error": None}
+
+
 @router.post("/workspaces/{wid}/seams")
 def run_seams(wid: str, session: Session = Depends(get_session),
               neo4j=Depends(get_neo4j)) -> dict:
@@ -113,77 +174,65 @@ def run_seams(wid: str, session: Session = Depends(get_session),
 
 
 @router.post("/workspaces/{wid}/seams/enrich", status_code=202)
-def seams_enrich(wid: str, session: Session = Depends(get_session),
+def seams_enrich(wid: str, refresh: bool = False,
+                 session: Session = Depends(get_session),
                  neo4j=Depends(get_neo4j)) -> dict:
-    """Kick off the (multi-minute) batched seam-rationale enrichment as a background
-    job. Deterministic seams are unaffected; this only ADDS narrative."""
+    """Batched seam-rationale enrichment. Reuses the persisted result if one exists
+    (no LLM); pass ?refresh=true to force a fresh multi-minute run. Deterministic seams
+    are unaffected; this only ADDS narrative, which is persisted + reused."""
     ws = _workspace(session, wid)
     _require_llm()
     slug = ws.repo_slug
 
-    def _job() -> dict:
-        neo = jobs.make_neo4j()
-        try:
-            cands = _ranked(neo, slug)  # limit=25, matching the deterministic stage
-            known = _known_refs(neo, slug)
-            runner = SdkAgentRunner()
-            narratives = asyncio.run(enrich_seams(
-                cands, known, runner=runner, model=enrich_model("seams"),
-                timeout_s=enrich_timeout_s("seams")))
-            return {"repo_slug": slug, "narratives": narratives,
-                    "token_usage": dict(runner.token_usage)}
-        finally:
-            try:
-                neo.close()
-            except Exception:  # noqa: BLE001
-                pass
+    def compute(neo) -> dict:
+        cands = _ranked(neo, slug)  # limit=25, matching the deterministic stage
+        known = _known_refs(neo, slug)
+        runner = SdkAgentRunner()
+        narratives = asyncio.run(enrich_seams(
+            cands, known, runner=runner, model=enrich_model("seams"),
+            timeout_s=enrich_timeout_s("seams")))
+        return {"repo_slug": slug, "narratives": narratives,
+                "token_usage": dict(runner.token_usage)}
 
-    return _job_view(jobs.runner.start("seams-enrich", wid, _job))
+    return _start_or_reuse_enrich(wid, slug, "seams", compute, refresh, neo4j)
 
 
 @router.get("/workspaces/{wid}/seams/enrichment")
 def seams_enrichment(wid: str, session: Session = Depends(get_session),
                      neo4j=Depends(get_neo4j)) -> dict:
-    _workspace(session, wid)
-    return _job_view(jobs.runner.get("seams-enrich", wid))
+    ws = _workspace(session, wid)
+    return _enrichment_view(wid, ws.repo_slug, "seams", neo4j)
 
 
 @router.post("/workspaces/{wid}/plan/enrich", status_code=202)
-def plan_enrich(wid: str, session: Session = Depends(get_session),
+def plan_enrich(wid: str, refresh: bool = False,
+                session: Session = Depends(get_session),
                 neo4j=Depends(get_neo4j)) -> dict:
     ws = _workspace(session, wid)
     _require_llm()
     slug = ws.repo_slug
 
-    def _job() -> dict:
-        neo = jobs.make_neo4j()
-        try:
-            cands = _ranked(neo, slug)  # limit=25, matching the deterministic stage
-            stories = stories_from_seam_set(cands, repo_id=slug)
-            dag = derive_dependencies(stories, cands, repo_id=slug)
-            waves = delivery_waves(dag) if is_acyclic(dag) else []
-            known = _known_refs(neo, slug)
-            runner = SdkAgentRunner()
-            result = asyncio.run(enrich_plan(
-                [s.model_dump(mode="json") for s in dag.stories], waves, known,
-                runner=runner, model=enrich_model("plan"),
-                timeout_s=enrich_timeout_s("plan")))
-            return {"repo_slug": slug, **result,
-                    "token_usage": dict(runner.token_usage)}
-        finally:
-            try:
-                neo.close()
-            except Exception:  # noqa: BLE001
-                pass
+    def compute(neo) -> dict:
+        cands = _ranked(neo, slug)  # limit=25, matching the deterministic stage
+        stories = stories_from_seam_set(cands, repo_id=slug)
+        dag = derive_dependencies(stories, cands, repo_id=slug)
+        waves = delivery_waves(dag) if is_acyclic(dag) else []
+        known = _known_refs(neo, slug)
+        runner = SdkAgentRunner()
+        result = asyncio.run(enrich_plan(
+            [s.model_dump(mode="json") for s in dag.stories], waves, known,
+            runner=runner, model=enrich_model("plan"),
+            timeout_s=enrich_timeout_s("plan")))
+        return {"repo_slug": slug, **result, "token_usage": dict(runner.token_usage)}
 
-    return _job_view(jobs.runner.start("plan-enrich", wid, _job))
+    return _start_or_reuse_enrich(wid, slug, "plan", compute, refresh, neo4j)
 
 
 @router.get("/workspaces/{wid}/plan/enrichment")
 def plan_enrichment(wid: str, session: Session = Depends(get_session),
                     neo4j=Depends(get_neo4j)) -> dict:
-    _workspace(session, wid)
-    return _job_view(jobs.runner.get("plan-enrich", wid))
+    ws = _workspace(session, wid)
+    return _enrichment_view(wid, ws.repo_slug, "plan", neo4j)
 
 
 @router.post("/workspaces/{wid}/plan")
@@ -288,37 +337,34 @@ def run_design(wid: str, session: Session = Depends(get_session),
 
 
 @router.post("/workspaces/{wid}/design/enrich", status_code=202)
-def design_enrich(wid: str, session: Session = Depends(get_session),
+def design_enrich(wid: str, refresh: bool = False,
+                  session: Session = Depends(get_session),
                   neo4j=Depends(get_neo4j)) -> dict:
+    """Legacy per-slice design narrative (the cockpit's Design→Improve now derives from
+    Domain Design instead). Kept + now persisted/reused for API back-compat; ?refresh=true
+    forces a fresh run."""
     ws = _workspace(session, wid)
     _require_llm()
     slug = ws.repo_slug
 
-    def _job() -> dict:
-        neo = jobs.make_neo4j()
-        try:
-            designs = _compute_designs(neo, slug)
-            known = _known_refs(neo, slug)
-            runner = SdkAgentRunner()
-            narratives = asyncio.run(enrich_design(
-                designs, known, runner=runner, model=enrich_model("design"),
-                timeout_s=enrich_timeout_s("design")))
-            return {"repo_slug": slug, "narratives": narratives,
-                    "token_usage": dict(runner.token_usage)}
-        finally:
-            try:
-                neo.close()
-            except Exception:  # noqa: BLE001
-                pass
+    def compute(neo) -> dict:
+        designs = _compute_designs(neo, slug)
+        known = _known_refs(neo, slug)
+        runner = SdkAgentRunner()
+        narratives = asyncio.run(enrich_design(
+            designs, known, runner=runner, model=enrich_model("design"),
+            timeout_s=enrich_timeout_s("design")))
+        return {"repo_slug": slug, "narratives": narratives,
+                "token_usage": dict(runner.token_usage)}
 
-    return _job_view(jobs.runner.start("design-enrich", wid, _job))
+    return _start_or_reuse_enrich(wid, slug, "design", compute, refresh, neo4j)
 
 
 @router.get("/workspaces/{wid}/design/enrichment")
 def design_enrichment(wid: str, session: Session = Depends(get_session),
                       neo4j=Depends(get_neo4j)) -> dict:
-    _workspace(session, wid)
-    return _job_view(jobs.runner.get("design-enrich", wid))
+    ws = _workspace(session, wid)
+    return _enrichment_view(wid, ws.repo_slug, "design", neo4j)
 
 
 class _DomainRefineBody(BaseModel):

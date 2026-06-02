@@ -21,6 +21,7 @@ CONSTRAINTS = [
     "CREATE CONSTRAINT author_email IF NOT EXISTS FOR (a:Author) REQUIRE a.email IS UNIQUE",
     "CREATE CONSTRAINT brd_id IF NOT EXISTS FOR (b:BRD) REQUIRE b.id IS UNIQUE",
     "CREATE CONSTRAINT domain_design_id IF NOT EXISTS FOR (d:DomainDesign) REQUIRE d.id IS UNIQUE",
+    "CREATE CONSTRAINT enrichment_id IF NOT EXISTS FOR (e:Enrichment) REQUIRE e.id IS UNIQUE",
     "CREATE CONSTRAINT repo_slug IF NOT EXISTS FOR (r:Repository) REQUIRE r.slug IS UNIQUE",
 ]
 
