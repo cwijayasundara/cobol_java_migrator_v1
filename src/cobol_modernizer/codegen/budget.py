@@ -59,8 +59,10 @@ class StoryBudget:
 
     A non-positive ``max_tokens`` / ``max_wall_s`` DISABLES that dimension's gate
     (treated as "no cap") so an operator can opt a dimension out via env without
-    special-casing it at every call site. ``max_concurrent_jobs`` is informational
-    (the real lock lives in ``jobs.runner``)."""
+    special-casing it at every call site. ``max_repair_attempts`` has NO such disable
+    case — it is always a strict bound (0 means "no repair passes allowed"), since an
+    unbounded repair loop is exactly the runaway this budget exists to prevent.
+    ``max_concurrent_jobs`` is informational (the real lock lives in ``jobs.runner``)."""
 
     max_tokens: int
     max_wall_s: float

@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from cobol_modernizer.codegen.budget import StoryBudget
 from cobol_modernizer.codegen.schema import GeneratedFile
 from cobol_modernizer.codegen.story_context import build_story_context
 from cobol_modernizer.codegen.patch_agent import StoryPatch
@@ -223,6 +224,62 @@ async def test_still_red_after_budget_failed(session, tmp_path):
                           repair_max_attempts=1, now=_clock())
     assert out.status == StoryCodegenStatus.failed
     assert out.attempts == 2  # first impl + 1 repair
+
+
+# --------------------------------------------------------------------------- #
+# Cost gate — the repair loop stops early when the token/wall budget is over    #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_token_budget_stops_repair_loop_early_and_fails(session, tmp_path):
+    item = _item()
+    runner = FakeRunner()
+    impl_calls = []
+
+    async def gen_impl(**kwargs):
+        impl_calls.append(kwargs)
+        # Each impl pass burns 1000 tokens — after the first pass cumulative usage
+        # (1000) is already over the tiny 500-token budget, so the repair loop must
+        # break BEFORE issuing a second gen_impl.
+        runner.token_usage["output"] += 1000
+        return _impl_patch()
+
+    # Never green — left to itself the loop would run repair_max_attempts(=3) repairs.
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.tests_failed,
+                    StoryTestStatus.tests_failed, StoryTestStatus.tests_failed)
+    budget = StoryBudget(max_tokens=500, max_wall_s=0.0, max_repair_attempts=3)
+    out = await run_story(item, session=session, workspace_id="ws1",
+                          module_dir=tmp_path, context_pack=_pack(item),
+                          runner=runner, gen_tests=_make_gen_tests(),
+                          gen_impl=gen_impl, run_tests=run, repair_max_attempts=3,
+                          budget=budget, now=_clock())
+    # Only the FIRST impl pass ran — the loop broke on budget before any repair.
+    assert len(impl_calls) == 1
+    assert out.attempts == 1  # fewer than repair_max_attempts + 1 (= 4)
+    assert out.status == StoryCodegenStatus.failed
+    assert "over budget" in out.rationale
+    # The durable record reflects the over-budget stop, not a phantom "tests still red".
+    rec = get_story_record(session, "ws1", "US-1")
+    assert rec["status"] == "failed"
+    assert "over budget" in rec["rationale"]
+
+
+@pytest.mark.asyncio
+async def test_wall_budget_stops_repair_loop_early(session, tmp_path):
+    item = _item()
+    # The _clock() advances 1.0s per call; wall budget of 2.0s is exceeded after a few
+    # telemetry/clock ticks, so the repair loop stops before burning all attempts.
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.tests_failed,
+                    StoryTestStatus.tests_failed, StoryTestStatus.tests_failed,
+                    StoryTestStatus.tests_failed)
+    budget = StoryBudget(max_tokens=0, max_wall_s=2.0, max_repair_attempts=5)
+    out = await run_story(item, session=session, workspace_id="ws1",
+                          module_dir=tmp_path, context_pack=_pack(item),
+                          runner=FakeRunner(), gen_tests=_make_gen_tests(),
+                          gen_impl=_make_gen_impl(), run_tests=run,
+                          repair_max_attempts=5, budget=budget, now=_clock())
+    assert out.status == StoryCodegenStatus.failed
+    assert out.attempts < 6  # broke before exhausting repair_max_attempts + 1
+    assert "over budget" in out.rationale
 
 
 @pytest.mark.asyncio

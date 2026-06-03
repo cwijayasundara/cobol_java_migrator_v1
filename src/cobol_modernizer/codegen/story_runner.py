@@ -35,7 +35,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from cobol_modernizer.agent.harness import AgentRunner
-from cobol_modernizer.codegen.budget import should_skip as budget_should_skip
+from cobol_modernizer.codegen.budget import (
+    StoryBudget, should_skip as budget_should_skip, story_budget_from_env,
+)
 from cobol_modernizer.codegen.patch_agent import (
     StoryPatch, generate_story_implementation, generate_story_tests,
     story_repair_max_attempts,
@@ -242,6 +244,7 @@ async def run_story(
     run_tests: RunTests = run_targeted_tests,
     now: Clock = time.monotonic,
     repair_max_attempts: int | None = None,
+    budget: StoryBudget | None = None,
     persist: bool = True,
 ) -> StoryRunResult:
     """Run ONE story context->tests(red)->impl->tests(green)->repair->gate->persist.
@@ -255,10 +258,12 @@ async def run_story(
     """
     if repair_max_attempts is None:
         repair_max_attempts = story_repair_max_attempts()
+    if budget is None:
+        budget = story_budget_from_env()
     project_index = project_index or []
     context_hash = context_pack.context_hash
 
-    # 1. BASIC resume — skip an already-accepted story whose context is unchanged.
+    # 1. Resume — skip an already-accepted story whose context is unchanged.
     if _should_skip(session, workspace_id=workspace_id, item=item,
                     context_hash=context_hash):
         logger.info("story %s: skipped (accepted + unchanged context_hash)",
@@ -305,9 +310,21 @@ async def run_story(
         #    run_repair_loop's feedback shape), re-write, re-run. Some statuses are
         #    NON-REPAIRABLE: a regenerated impl cannot fix a missing toolchain or an
         #    infra error (timeout/OSError) — re-running would just burn the whole LLM
-        #    budget — so we break out.
+        #    budget — so we break out. The attempt cap bounds the COUNT of gen calls
+        #    and the per-call timeout bounds each one, but only the cost budget bounds
+        #    cumulative token SIZE — consult it before each (expensive) repair gen and
+        #    stop early if this story has already run away.
+        over_budget = False
         while (result.status not in _NON_REPAIRABLE
                and attempts < repair_max_attempts + 1):
+            wall, tok, _ = _telemetry()
+            if budget.exceeded(tokens_used=sum(tok.values()), wall_s=wall):
+                over_budget = True
+                logger.info(
+                    "story %s: over budget (tokens=%d wall=%.2fs) — stopping before "
+                    "repair attempt %d", item.story_id, sum(tok.values()), wall,
+                    attempts)
+                break
             logger.info("story %s: repair attempt %d (gate=%s)",
                         item.story_id, attempts, result.status.value)
             impl_patch = await gen_impl(
@@ -347,7 +364,14 @@ async def run_story(
     wall, token_usage, cost = _telemetry()
     rationale = "; ".join(r for r in (tests_patch.rationale, impl_patch.rationale)
                           if r)
-    if result.status == StoryTestStatus.error:
+    if over_budget:
+        # The repair loop stopped because the cost budget was exhausted, NOT because
+        # the tests were exhaustively repaired — say so plainly so the durable record
+        # doesn't read as a misleading "tests still red after the full budget".
+        note = (f"stopped over budget (tokens={sum(token_usage.values())}, "
+                f"wall={wall:.1f}s) before exhausting repair attempts")
+        rationale = f"{note}; {rationale}" if rationale else note
+    elif result.status == StoryTestStatus.error:
         # An infra error (mvn timeout/OSError), not a code defect — make that explicit
         # in the durable record so a reviewer doesn't chase a phantom code bug.
         note = f"infra error during test run: {result.log_excerpt[:200]}"
