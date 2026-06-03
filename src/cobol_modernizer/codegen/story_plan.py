@@ -41,6 +41,23 @@ class StoryCodegenStatus(str, Enum):
     blocked = "blocked"
 
 
+#: The SINGLE accepted-terminal status set, shared by the build gate
+#: (`build_stories._gate_stage`) and the resume policy (`budget.should_skip`).
+#: A story in one of these states is "done enough" to not fail the build and to be
+#: skippable on a re-run when its `context_hash` is unchanged:
+#:   - ``passed``                : tests were GREEN when recorded.
+#:   - ``generated-unverified``  : accepted-but-unverified (Maven/JDK absent — the
+#:                                 degrade contract must not fail the build).
+#:   - ``skipped``               : already accepted on an earlier run.
+#: Anything else (notably ``failed``/``blocked``) is NOT accepted: it fails the gate
+#: and re-runs on resume. Keep this the one place the strings live.
+ACCEPTED_STORY_STATUSES = frozenset({
+    StoryCodegenStatus.passed.value,
+    StoryCodegenStatus.generated_unverified.value,
+    StoryCodegenStatus.skipped.value,
+})
+
+
 class StoryCodegenItem(BaseModel):
     story_id: str
     bounded_context: str = ""

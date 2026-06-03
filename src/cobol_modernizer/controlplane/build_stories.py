@@ -40,8 +40,8 @@ from sqlalchemy.orm import Session
 from cobol_modernizer.backlog.schema import Backlog
 from cobol_modernizer.backlog.storage import BacklogStorage
 from cobol_modernizer.brd.storage import BRDStorage
-from cobol_modernizer.codegen.story_plan import StoryCodegenItem, StoryCodegenPlan, \
-    StoryCodegenStatus, build_story_codegen_plan
+from cobol_modernizer.codegen.story_plan import ACCEPTED_STORY_STATUSES, \
+    StoryCodegenItem, StoryCodegenPlan, build_story_codegen_plan
 from cobol_modernizer.codegen.story_storage import get_status_map
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.build import (
@@ -271,17 +271,14 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
     }
 
 
-#: Statuses that do NOT fail the build (the `.value` strings of `StoryCodegenStatus`).
-#: `passed`/`skipped` are obvious; a toolchain-absent `generated-unverified` is
-#: ACCEPTED-but-unverified by design (the degrade contract — mvn missing must not
-#: fail the build), exactly as the story runner's GATE treats it. Anything else
-#: (notably `failed`/`blocked`) fails the run so the job surfaces as `failed`,
-#: mirroring the sibling fail-loud `/build`.
-_ACCEPTABLE_STATUSES = frozenset({
-    StoryCodegenStatus.passed.value,
-    StoryCodegenStatus.generated_unverified.value,
-    StoryCodegenStatus.skipped.value,
-})
+#: Statuses that do NOT fail the build. The SINGLE accepted-status set lives in
+#: `story_plan.ACCEPTED_STORY_STATUSES` (shared with the resume policy in
+#: `budget.should_skip`, so the gate and resume never drift). `passed`/`skipped`
+#: are obvious; a toolchain-absent `generated-unverified` is ACCEPTED-but-unverified
+#: by design (the degrade contract — mvn missing must not fail the build), exactly as
+#: the story runner's GATE treats it. Anything else (notably `failed`/`blocked`) fails
+#: the run so the job surfaces as `failed`, mirroring the sibling fail-loud `/build`.
+_ACCEPTABLE_STATUSES = ACCEPTED_STORY_STATUSES
 
 
 def _gate_stage(result: dict) -> None:

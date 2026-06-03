@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from cobol_modernizer.agent.harness import AgentRunner
+from cobol_modernizer.codegen.budget import should_skip as budget_should_skip
 from cobol_modernizer.codegen.patch_agent import (
     StoryPatch, generate_story_implementation, generate_story_tests,
     story_repair_max_attempts,
@@ -161,22 +162,18 @@ def _cites_lineage(files: list[GeneratedFile], *, story_id: str,
 
 
 # --------------------------------------------------------------------------- #
-# Resume (BASIC — full policy is Task 10)                                     #
+# Resume — DELEGATES to the single source of truth (`budget.should_skip`)       #
 # --------------------------------------------------------------------------- #
-_ACCEPTED = {StoryCodegenStatus.passed.value,
-             StoryCodegenStatus.generated_unverified.value}
-
-
 def _should_skip(session, *, workspace_id: str, item: StoryCodegenItem,
                  context_hash: str) -> bool:
-    """BASIC resume: skip when a prior record for this story exists with an accepted
-    status (passed / generated_unverified) AND the SAME context_hash. Anything else
-    (failed, different hash, missing) re-runs. Full budget/resume policy is Task 10."""
+    """Skip an already-accepted story whose context is unchanged. This function does
+    ONLY the I/O (load the prior `story_codegen_status` record); the actual policy —
+    accepted-status set + unchanged-hash check — lives in `budget.should_skip`, the
+    single source of truth shared with the build gate (Task 10). The accepted set is
+    now `passed / generated-unverified / skipped` (was `passed / generated-unverified`),
+    matching `build_stories._gate_stage`."""
     prior = get_story_record(session, workspace_id, item.story_id)
-    if not prior:
-        return False
-    return (prior.get("status") in _ACCEPTED
-            and prior.get("context_hash") == context_hash)
+    return budget_should_skip(prior, context_hash)
 
 
 # --------------------------------------------------------------------------- #
