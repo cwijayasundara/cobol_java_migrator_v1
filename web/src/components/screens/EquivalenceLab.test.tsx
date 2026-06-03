@@ -18,9 +18,14 @@ describe("EquivalenceLab", () => {
 
   // ---- lazy-load + per-story verdicts + repair (Fan-Out-and-Synthesize) ---- //
 
-  // A multi-story persisted verify_report: S2 fails with a localized failing
-  // sub-slice (CBACT01C), S3 is a partial/timeout, S1 passes.
-  const REPORT = {
+  // The REAL GET /verify/status `result` shape (verify.py verify_status): the
+  // persisted verify_report's rollup PLUS per_story_verdicts + failing_subslices +
+  // stage_status. Each per-story sub mirrors `_fan_out_per_story` (slice_name/ok/
+  // verdict/defect_count/partial/...); a FAILING decomposed story also carries
+  // `subslices` leaves (the UI derives the failing ones from these). The flat
+  // report-level `failing_subslices` is the deduped roll-up across stories.
+  // Here: S2 fails and localizes to CBACT01C, S3 is a partial/timeout, S1 passes.
+  const STATUS_RESULT = {
     version: 3,
     repo_slug: "carddemo-mini",
     verdict: "fail",
@@ -28,34 +33,38 @@ describe("EquivalenceLab", () => {
     defect_count: 2,
     open_questions: ["golden master stale for S2?"],
     defects: [],
-    stage_status: "failed",
     per_story_verdicts: [
       {
         story_id: "S1", slice_name: "S1", ok: true, verdict: "pass",
-        defect_count: 0, partial: false, failing_subslices: [],
+        records_compared: 2, defect_count: 0, open_questions: [], defects: [],
+        partial: false, reason: "equivalence passed",
       },
       {
         story_id: "S2", slice_name: "S2", ok: false, verdict: "fail",
-        defect_count: 2, partial: false,
-        failing_subslices: ["CBACT01C"],
+        records_compared: 4, defect_count: 2, open_questions: [], defects: [],
+        partial: false, reason: "equivalence failed",
         subslices: [
-          { subslice: "CBPOST1M", ok: true, verdict: "pass", defect_count: 0 },
-          { subslice: "CBACT01C", ok: false, verdict: "fail", defect_count: 2 },
+          { subslice: "CBPOST1M", ok: true, verdict: "pass", defect_count: 0,
+            partial: false, reason: "equivalence passed" },
+          { subslice: "CBACT01C", ok: false, verdict: "fail", defect_count: 2,
+            partial: false, reason: "equivalence failed" },
         ],
       },
       {
         story_id: "S3", slice_name: "S3", ok: false, verdict: "fail",
-        defect_count: 0, partial: true, failing_subslices: [],
+        records_compared: 0, defect_count: 0, open_questions: [], defects: [],
+        partial: true, reason: "timeout",
       },
     ],
     failing_subslices: ["CBACT01C"],
+    stage_status: "failed",
   };
 
   function registerVerifyHandlers(opts?: { onRepair?: (storyId: string) => void }) {
     server.use(
       http.get("/api/workspaces/:id/verify/status", () =>
         HttpResponse.json({
-          status: "done", result: REPORT, error: null,
+          status: "done", result: STATUS_RESULT, error: null,
           started_at: null, finished_at: null,
         })),
       http.post("/api/workspaces/:id/verify/repair/:storyId", ({ params }) => {
