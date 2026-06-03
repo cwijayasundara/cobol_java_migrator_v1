@@ -392,6 +392,12 @@ async def _generate_stories_round(*, runner, model: str, brd_sections: list[dict
     — partial failure is tolerated."""
     async def _one(epic: dict, req_ids: set[str]) -> list[dict]:
         sections_for_epic = _sections_for_requirements(brd_sections, req_ids)
+        if not sections_for_epic:
+            # The epic cites no (resolvable) requirement ids — rather than hand the
+            # model an empty "sections this epic cites" block while still listing all
+            # known requirement ids (telling it to cite reqs it sees no text for),
+            # fall back to the FULL BRD sections so it has real context to ground on.
+            sections_for_epic = brd_sections
         refs = relevant_refs(sections_for_epic, known_refs)
         async with semaphore:
             res = await generate_stories_for_epic(

@@ -374,11 +374,45 @@ def test_completeness_loop_topup_epic_for_orphan_requirement(monkeypatch):
     assert any(e["id"] == "EPIC-COVERAGE-TOPUP" for e in out["epics"])
 
 
+def test_epic_with_empty_requirement_ids_gets_full_section_context(monkeypatch):
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    # EPIC-1 cites NO requirement ids -> _sections_for_requirements would yield [].
+    # The round-1 fan-out must fall back to the full BRD sections so the per-epic
+    # prompt has real "BRD requirement sections this epic cites" context (not an
+    # empty block paired with all known requirement ids).
+    epics = [_epic("EPIC-1", []), _epic("EPIC-2", ["FR-1"]), _epic("EPIC-3", ["FR-2"])]
+
+    def script(*, schema, prompt, idx):
+        if schema is EPICS_SCHEMA:
+            return {"epics": epics}
+        if "EPIC-1" in prompt:
+            return {"stories": [_story("US-1", "EPIC-1", ["FR-1"])]}
+        if "EPIC-2" in prompt:
+            return {"stories": [_story("US-2", "EPIC-2", ["FR-1"])]}
+        return {"stories": [_story("US-3", "EPIC-3", ["FR-2"])]}
+
+    runner = ScriptedRunner(script)
+    _run_gen(runner, brd_sections=_sections(["FR-1", "FR-2"], refs=["CBPOST1M"]),
+             known_refs=["CBPOST1M"], known_requirement_ids=["FR-1", "FR-2"])
+
+    epic1_call = next(c for c in runner.stories_calls if "EPIC-1" in c["prompt"])
+    block = epic1_call["prompt"].split(
+        "BRD requirement sections this epic cites")[1]
+    sections_json = block.split("```json\n")[1].split("\n```")[0]
+    inlined = json.loads(sections_json)
+    # Non-empty: the full BRD sections were inlined as the fallback context.
+    assert inlined
+    inlined_req_ids = {r["id"] for sec in inlined for r in sec.get("requirements", [])}
+    assert inlined_req_ids == {"FR-1", "FR-2"}
+
+
 def test_completeness_loop_terminates_without_progress(monkeypatch):
     monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
-    monkeypatch.setenv("BACKLOG_MAX_ROUNDS", "3")
-    # FR-2 can NEVER be covered (stories only ever cover FR-1). The loop must stop
-    # (no-progress / max-rounds) without spinning forever.
+    # MAX_ROUNDS deliberately HIGH (5) so the round cap does NOT explain termination:
+    # the loop must stop on the NO-PROGRESS break alone. FR-2 can never be covered
+    # (EPIC-1 only ever emits a story for FR-1), so round 1 makes progress and the
+    # first top-up round (round 2) makes none -> break. Total EPIC-1 stories calls = 2.
+    monkeypatch.setenv("BACKLOG_MAX_ROUNDS", "5")
     epics = [_epic("EPIC-1", ["FR-1", "FR-2"]), _epic("EPIC-2", ["FR-3"])]
 
     def script(*, schema, prompt, idx):
@@ -400,10 +434,11 @@ def test_completeness_loop_terminates_without_progress(monkeypatch):
     for s in out["stories"]:
         covered.update(s["brd_requirement_ids"])
     assert "FR-2" not in covered  # genuinely uncoverable, dropped only after the loop gave up
-    # Bounded EPIC-1 stories calls: round1 + at most (MAX_ROUNDS-1) top-up rounds,
-    # and it stops early on the first no-progress round.
+    # EXACTLY 2 EPIC-1 stories calls: round 1 (covers FR-1) + ONE no-progress top-up
+    # round for FR-2 that then triggers the no-progress break. With MAX_ROUNDS=5 the
+    # cap can't end the loop here, so removing the no-progress break makes this fail.
     epic1_story_calls = [c for c in runner.stories_calls if "EPIC-1" in c["prompt"]]
-    assert 1 <= len(epic1_story_calls) <= 3
+    assert len(epic1_story_calls) == 2
 
 
 def test_parse_backlog_payload_drops_ungrounded_refs():
