@@ -107,6 +107,83 @@ def test_backlog_post_generates_persists_and_creates_gate(monkeypatch):
         jobs.runner.inline = False
 
 
+class _LargeGraphNeo4j(FakeNeo4j):
+    """FakeNeo4j whose graph holds 1000 refs but whose BRD cites only a subset."""
+
+    CITED = ["CBPOST1M", "CBPOST1M.2100-POST"]
+
+    def run(self, query, **params):
+        if "HAS_BRD" in query or "(b:BRD)" in query:
+            return [{"b": {"version": 1,
+                           "sections": json.dumps([{"title": "Functional",
+                               "requirements": [{"id": "FR-1", "text": "Post tx",
+                                                 "evidence_refs": self.CITED}]}]),
+                           "evidence_map": "{}"}}]
+        if "RETURN n.qualified_name AS q" in query or "RETURN n.qualified_name AS ref" in query:
+            key = "q" if " AS q" in query else "ref"
+            rows = [{key: "CBPOST1M", "kind": "Program"},
+                    {key: "CBPOST1M.2100-POST", "kind": "Paragraph"}]
+            rows += [{key: f"NOISE{i}", "kind": "Program"} for i in range(998)]
+            return rows
+        return super().run(query, **params)
+
+
+def test_backlog_inlines_only_relevant_refs_but_grounds_full_set(monkeypatch):
+    from cobol_modernizer.controlplane import backlog as bl
+
+    captured: dict = {}
+
+    async def _capture(**kw):
+        captured["known_refs"] = list(kw["known_refs"])
+        return _fake_payload()
+
+    grounded: dict = {}
+    real_parse = bl.parse_backlog_payload
+
+    def _parse_spy(raw, *, repo_slug, known_refs, known_requirement_ids):
+        grounded["known_refs"] = set(known_refs)
+        return real_parse(raw, repo_slug=repo_slug, known_refs=known_refs,
+                          known_requirement_ids=known_requirement_ids)
+
+    monkeypatch.setattr(bl, "generate_backlog_payload", _capture)
+    monkeypatch.setattr(bl, "parse_backlog_payload", _parse_spy)
+
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(eng)
+    with Session(eng) as s:
+        s.add(Workspace(id="ws-1", name="m", repo_slug="carddemo-mini", created_by="t"))
+        s.add(JourneyStage(workspace_id="ws-1", stage_key="backlog", ordinal=6, status="running"))
+        s.add(JourneyStage(workspace_id="ws-1", stage_key="blueprint", ordinal=5, status="passed"))
+        s.commit()
+
+    def session_override():
+        ss = Session(eng)
+        try:
+            yield ss
+        finally:
+            ss.close()
+
+    jobs.runner.inline = True
+    monkeypatch.setattr(jobs, "make_session", lambda: Session(eng))
+    monkeypatch.setattr(jobs, "make_neo4j", lambda: _LargeGraphNeo4j())
+    app.dependency_overrides[get_session] = session_override
+    app.dependency_overrides[get_neo4j] = lambda: _LargeGraphNeo4j()
+    client = TestClient(app)
+    try:
+        r = client.post("/api/workspaces/ws-1/backlog")
+        assert r.status_code in (200, 202)
+        # Prompt got ONLY the BRD-relevant subset — not the whole 1000, not a numeric slice.
+        assert set(captured["known_refs"]) == set(_LargeGraphNeo4j.CITED)
+        assert "NOISE0" not in captured["known_refs"]
+        # Grounding ran against the FULL graph ref set (1000 refs).
+        assert len(grounded["known_refs"]) == 1000
+        assert "NOISE0" in grounded["known_refs"]
+        assert set(_LargeGraphNeo4j.CITED).issubset(grounded["known_refs"])
+    finally:
+        app.dependency_overrides.clear()
+        jobs.runner.inline = False
+
+
 def test_backlog_post_surfaces_generation_failure(monkeypatch):
     from cobol_modernizer.controlplane import backlog as bl
 

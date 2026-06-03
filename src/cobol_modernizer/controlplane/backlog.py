@@ -24,6 +24,7 @@ from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.controlplane.gates_util import upsert_gate
+from cobol_modernizer.enrichment.refs import relevant_refs
 from cobol_modernizer.persistence.tables import Workspace
 from cobol_modernizer.seam.service import rank_candidates
 from cobol_modernizer.traceability.coverage import brd_logic_coverage
@@ -89,6 +90,13 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
     known_refs = [r["q"] for r in neo4j.run(_GRAPH_REFS_Q, repo=slug) if r.get("q")]
     known_req_ids = _requirement_ids(sections)
 
+    # Inline only the BRD-relevant refs into the prompt (lossless relevance, NO cap):
+    # the full graph (thousands of refs) blows the prompt budget. The FULL `known_refs`
+    # is still used for grounding below.
+    relevant = relevant_refs(sections, known_refs)
+    logger.info("backlog: %d known graph refs, inlining %d BRD-relevant refs into prompt for %s",
+                len(known_refs), len(relevant), slug)
+
     # Ensure a :Repository node exists for BacklogStorage (mirrors blueprint.py MERGE).
     neo4j.run("MERGE (r:Repository {slug: $slug}) SET r.name = coalesce(r.name, $slug)",
               slug=slug)
@@ -97,7 +105,7 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
     raw = asyncio.run(gen(runner=SdkAgentRunner(), model=os.environ.get("BACKLOG_MODEL", _DEFAULT_MODEL),
                           timeout_s=float(os.environ.get("BACKLOG_TIMEOUT_S", "300")),
                           max_turns=int(os.environ.get("BACKLOG_MAX_TURNS", "6")),
-                          brd_sections=sections, known_refs=known_refs,
+                          brd_sections=sections, known_refs=relevant,
                           known_requirement_ids=sorted(known_req_ids)))
     if not raw:
         # run_batched swallows an LLM error/timeout/turn-cap to {}. Fail the job loudly
