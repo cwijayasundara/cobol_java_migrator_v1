@@ -26,12 +26,34 @@ import logging
 import os
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from cobol_modernizer.agent.harness import AgentRunner
 from cobol_modernizer.codegen.schema import GeneratedFile
 from cobol_modernizer.codegen.story_context import StoryContextPack
 from cobol_modernizer.codegen.story_plan import StoryCodegenItem
 
 logger = logging.getLogger(__name__)
+
+
+class StoryPatch(BaseModel):
+    """Result of one per-story generation pass.
+
+    Returns the filtered `GeneratedFile`s PLUS `rationale` — the one genuinely-new
+    field in the model's structured output. The other two story fields in
+    `PATCH_SCHEMA` (`story_id`, `acceptance_criteria_ids`) are NOT surfaced here on
+    purpose: they steer the model but the Task 6 caller already holds them from the
+    `StoryCodegenItem` it passed in. AC traceability itself lives in the written test
+    `content` and is recovered downstream by `build.py::scan_generated_test_refs`
+    (it greps the test bodies for AC ids), so nothing is lost by not returning it.
+    `rationale` IS surfaced so Task 6's runner can persist it in the
+    story_codegen_status artifact for telemetry without re-deriving it.
+    """
+
+    model_config = {"frozen": True}
+
+    files: list[GeneratedFile] = Field(default_factory=list)
+    rationale: str = ""
 
 # Story-scoped budgets. Deliberately DISTINCT env names from the whole-slice
 # CODEGEN_* vars so per-story tuning never shadows the legacy generator's knobs.
@@ -45,14 +67,20 @@ DEFAULT_STORY_REPAIR_MAX_ATTEMPTS = 2
 
 
 def story_timeout_s() -> float:
+    """Per-story runner timeout (seconds), env-overridable; default 90s."""
     return _env_float(STORY_CODEGEN_TIMEOUT_S_ENV, DEFAULT_STORY_TIMEOUT_S)
 
 
 def story_max_turns() -> int:
+    """Per-story agent turn budget, env-overridable; default 2 (fast path)."""
     return _env_int(STORY_CODEGEN_MAX_TURNS_ENV, DEFAULT_STORY_MAX_TURNS)
 
 
 def story_repair_max_attempts() -> int:
+    """Per-story RED->GREEN repair budget, env-overridable; default 2. Unused in
+    THIS module on purpose: it's the knob for Task 6's story runner (which owns the
+    write-test -> mvn -> impl -> mvn -> repair loop), exposed here so the env contract
+    lives next to its sibling story budgets rather than being defined ad hoc."""
     return _env_int(STORY_REPAIR_MAX_ATTEMPTS_ENV, DEFAULT_STORY_REPAIR_MAX_ATTEMPTS)
 
 
@@ -128,10 +156,12 @@ STORY_IMPL_SYSTEM = (
 
 def _files_from(raw: dict, *, only: str | None = None) -> list[GeneratedFile]:
     """Coerce the runner's structured payload into GeneratedFile, optionally filtered
-    to one kind. Extra schema keys (story_id/acceptance_criteria_ids/rationale) are
-    carried in the structured output for the caller's provenance store but are not
-    GeneratedFile fields, so they're dropped here (pydantic ignores unknowns is NOT
-    assumed — we project explicitly)."""
+    to one kind. The per-file schema also carries story_id/acceptance_criteria_ids/
+    rationale; those are dropped at the file level (the file's rationale is folded into
+    the StoryPatch by the caller). Projection is explicit because default-config
+    pydantic v2 SILENTLY IGNORES extra keys (no extra='forbid'), so `GeneratedFile(**f)`
+    would drop them without a trace — projecting the four real fields by name makes
+    that drop intentional and visible at the call site."""
     files = [_to_generated_file(f) for f in raw.get("files", [])]
     return [f for f in files if only is None or f.kind == only]
 
@@ -143,6 +173,21 @@ def _to_generated_file(f: dict) -> GeneratedFile:
         content=f["content"],
         evidence=list(f.get("evidence", [])),
     )
+
+
+def _rationale_from(raw: dict, *, only: str | None = None) -> str:
+    """Join the per-file `rationale` strings the model emitted into one summary,
+    scoped to the kept kind so a tests-pass summary doesn't echo the dropped main
+    file's rationale (and vice versa). The schema attaches rationale per file (not
+    top-level), so we concatenate the distinct, order-preserving non-empty ones."""
+    seen: list[str] = []
+    for f in raw.get("files", []):
+        if only is not None and f.get("kind") != only:
+            continue
+        r = (f.get("rationale") or "").strip()
+        if r and r not in seen:
+            seen.append(r)
+    return "; ".join(seen)
 
 
 def _require_files(raw: dict, *, label: str, max_turns: int) -> None:
@@ -229,10 +274,11 @@ async def generate_story_tests(
     *, runner: AgentRunner, item: StoryCodegenItem,
     context_pack: StoryContextPack, project_index: list[str], model: str,
     max_turns: int | None = None, timeout_s: float | None = None,
-) -> list[GeneratedFile]:
-    """Generate the FAILING JUnit5 tests for one story. Returns ONLY kind='test'
-    files. Raises ValueError on an empty runner payload (turn cap / error) or on a
-    timeout. Mirrors the contract of `generator.py::_emit_tests_only`."""
+) -> StoryPatch:
+    """Generate the FAILING JUnit5 tests for one story. Returns a `StoryPatch` whose
+    `files` are ONLY kind='test', plus the model's `rationale`. Raises ValueError on
+    an empty runner payload (turn cap / error) or on a timeout. Mirrors the contract
+    of `generator.py::_emit_tests_only`."""
     max_turns = story_max_turns() if max_turns is None else max_turns
     timeout_s = story_timeout_s() if timeout_s is None else timeout_s
     prompt = build_tests_prompt(
@@ -241,7 +287,9 @@ async def generate_story_tests(
         runner=runner, system=STORY_TESTS_SYSTEM, prompt=prompt, model=model,
         max_turns=max_turns, label=f"story-tests:{item.story_id}", timeout_s=timeout_s)
     _require_files(raw, label=f"story-tests:{item.story_id}", max_turns=max_turns)
-    return _files_from(raw, only="test")
+    return StoryPatch(
+        files=_files_from(raw, only="test"),
+        rationale=_rationale_from(raw, only="test"))
 
 
 async def generate_story_implementation(
@@ -249,10 +297,11 @@ async def generate_story_implementation(
     context_pack: StoryContextPack, failing_tests: list[GeneratedFile],
     existing_java: list[GeneratedFile], model: str,
     max_turns: int | None = None, timeout_s: float | None = None,
-) -> list[GeneratedFile]:
+) -> StoryPatch:
     """Generate the MINIMAL production code that satisfies one story's failing tests.
-    Returns ONLY kind='main' files. Raises ValueError on an empty runner payload or a
-    timeout. The bounded, per-story analogue of `generate_slice`'s production pass."""
+    Returns a `StoryPatch` whose `files` are ONLY kind='main', plus the model's
+    `rationale`. Raises ValueError on an empty runner payload or a timeout. The
+    bounded, per-story analogue of `generate_slice`'s production pass."""
     max_turns = story_max_turns() if max_turns is None else max_turns
     timeout_s = story_timeout_s() if timeout_s is None else timeout_s
     prompt = build_impl_prompt(
@@ -262,4 +311,6 @@ async def generate_story_implementation(
         runner=runner, system=STORY_IMPL_SYSTEM, prompt=prompt, model=model,
         max_turns=max_turns, label=f"story-impl:{item.story_id}", timeout_s=timeout_s)
     _require_files(raw, label=f"story-impl:{item.story_id}", max_turns=max_turns)
-    return _files_from(raw, only="main")
+    return StoryPatch(
+        files=_files_from(raw, only="main"),
+        rationale=_rationale_from(raw, only="main"))

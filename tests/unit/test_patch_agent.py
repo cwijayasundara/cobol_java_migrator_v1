@@ -15,6 +15,7 @@ from cobol_modernizer.codegen.patch_agent import (
     PATCH_SCHEMA,
     STORY_IMPL_SYSTEM,
     STORY_TESTS_SYSTEM,
+    StoryPatch,
     generate_story_implementation,
     generate_story_tests,
 )
@@ -111,12 +112,24 @@ def test_patch_schema_is_files_only_no_shell():
 
 async def test_generate_story_tests_filters_to_test_kind():
     runner = FakeRunner(_MIXED)
-    out = await generate_story_tests(
+    patch = await generate_story_tests(
         runner=runner, item=_item(), context_pack=_pack(),
         project_index=["pom.xml"], model="m", max_turns=2, timeout_s=5.0)
-    assert out and all(isinstance(f, GeneratedFile) for f in out)
-    assert all(f.kind == "test" for f in out)
-    assert len(out) == 1
+    assert isinstance(patch, StoryPatch)
+    assert patch.files and all(isinstance(f, GeneratedFile) for f in patch.files)
+    assert all(f.kind == "test" for f in patch.files)
+    assert len(patch.files) == 1
+
+
+async def test_generate_story_tests_surfaces_rationale():
+    runner = FakeRunner(_MIXED)
+    patch = await generate_story_tests(
+        runner=runner, item=_item(), context_pack=_pack(),
+        project_index=[], model="m", max_turns=2, timeout_s=5.0)
+    # rationale comes from the kept (test) file's model output, scoped to that
+    # kind so the dropped main file's rationale does not leak in
+    assert "pin balance update" in patch.rationale
+    assert "minimal impl" not in patch.rationale
 
 
 async def test_generate_story_tests_surfaces_ac_citation_instruction():
@@ -173,12 +186,14 @@ async def test_generate_story_implementation_filters_to_main_kind():
     failing = [GeneratedFile(
         path="src/test/java/com/x/PostingServiceTest.java", kind="test",
         content="// AC-1", evidence=["CBTRN02C.2000-POST"])]
-    out = await generate_story_implementation(
+    patch = await generate_story_implementation(
         runner=runner, item=_item(), context_pack=_pack(),
         failing_tests=failing, existing_java=[], model="m", max_turns=2,
         timeout_s=5.0)
-    assert out and all(f.kind == "main" for f in out)
-    assert len(out) == 1
+    assert isinstance(patch, StoryPatch)
+    assert patch.files and all(f.kind == "main" for f in patch.files)
+    assert len(patch.files) == 1
+    assert "minimal impl" in patch.rationale  # surfaced from the kept main file
 
 
 async def test_generate_story_implementation_inlines_failing_tests():
@@ -240,7 +255,10 @@ def test_tests_system_demands_junit5_and_ac_citation():
     assert "cite" in s and "acceptance" in s
 
 
-def test_impl_system_emits_main_only():
+def test_impl_system_emits_main_only_and_satisfies_failing_tests():
     s = STORY_IMPL_SYSTEM.lower()
     assert "kind='main'" in s
-    assert "test" in s  # references the failing tests it must satisfy
+    # emits production code ONLY (must not also write/modify tests) ...
+    assert "do not emit or modify tests" in s
+    # ... whose explicit job is to make the failing tests pass
+    assert "failing tests pass" in s
