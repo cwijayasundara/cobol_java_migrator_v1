@@ -12,8 +12,10 @@ are supplied in the request (honest provenance — no fabricated oracle). The
 with defects marks it failed (this is a real gate, not a checkbox)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,7 +28,7 @@ from cobol_modernizer.backlog.storage import BacklogStorage
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.controlplane.gates_util import upsert_gate
 from cobol_modernizer.controlplane.verify_storage import (
-    latest_verify_report, record_verify_report,
+    latest_verify_report, record_equivalence_check, record_verify_report,
 )
 from cobol_modernizer.equivalence.golden import InMemoryGoldenStore
 from cobol_modernizer.equivalence.lab import EquivalenceLab
@@ -38,6 +40,26 @@ from cobol_modernizer.slice.gates import story_behavior_gate
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["controlplane-verify"])
 _NEO4J_ERRORS = (Neo4jError, DriverError)
+
+# Fan-out tuning (loop-until-done): a SOFT per-story wall + a concurrency bound.
+# The timeout is soft — overrun yields a PARTIAL sub-verdict, never a hard kill.
+_DEFAULT_MAX_CONCURRENCY = 4
+_DEFAULT_EQUIVALENCE_TIMEOUT_S = 60.0
+
+
+def _max_concurrency() -> int:
+    try:
+        return max(1, int(os.getenv("VERIFY_MAX_CONCURRENCY", _DEFAULT_MAX_CONCURRENCY)))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_CONCURRENCY
+
+
+def _equivalence_timeout_s() -> float:
+    try:
+        return max(0.0, float(os.getenv("VERIFY_EQUIVALENCE_TIMEOUT_S",
+                                        _DEFAULT_EQUIVALENCE_TIMEOUT_S)))
+    except (TypeError, ValueError):
+        return _DEFAULT_EQUIVALENCE_TIMEOUT_S
 
 # Writers/movers of a field, for honest seam-linking of a defect. Falls back to
 # the program node (unresolved) when the graph has no writer — never invents lineage.
@@ -122,6 +144,104 @@ def _serialize_defect(d) -> dict:
     }
 
 
+def _load_stories(neo4j, repo_slug: str) -> list[dict]:
+    """The latest backlog's stories for this repo, or [] when there is no backlog."""
+    try:
+        node = BacklogStorage(neo4j).get_latest(repo_slug)
+    except _NEO4J_ERRORS:
+        raise
+    except Exception:  # noqa: BLE001 — a missing/garbled backlog is just "no fan-out"
+        logger.warning("verify: backlog load failed; falling back to single-slice", exc_info=True)
+        return []
+    if not node:
+        return []
+    try:
+        return json.loads(node.get("stories_json") or "[]") or []
+    except (TypeError, ValueError):
+        return []
+
+
+async def _run_one_story(lab: EquivalenceLab, *, workspace_id: str, slice_name: str,
+                         program: str, candidate_records: list[dict], record_key: str,
+                         online_uses_recorded_fixtures: bool,
+                         sem: asyncio.Semaphore, timeout_s: float) -> dict[str, Any]:
+    """Run ONE story's equivalence under a SOFT per-story wall. On overrun (or any
+    error) return a PARTIAL sub-verdict (ok=False) — never a hard kill / raise — so
+    the workspace verdict still synthesizes (loop-until-done). On success the verdict
+    + defects are the real deterministic equivalence result."""
+    async with sem:
+        try:
+            coro = lab.run_equivalence_async(
+                workspace_id=workspace_id, slice_name=slice_name, program=program,
+                candidate_records=candidate_records, record_key=record_key,
+                online_uses_recorded_fixtures=online_uses_recorded_fixtures)
+            result = await asyncio.wait_for(coro, timeout=timeout_s) if timeout_s > 0 else await coro
+        except asyncio.TimeoutError:
+            return {"slice_name": slice_name, "ok": False, "reason": "timeout",
+                    "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+        except Exception as exc:  # noqa: BLE001 — partial sub-verdict, never crash the fan-out
+            logger.warning("verify: per-story equivalence failed for %s; partial sub-verdict",
+                           slice_name, exc_info=True)
+            return {"slice_name": slice_name, "ok": False, "reason": f"error: {exc}",
+                    "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+    ok = result.report.verdict == "pass"
+    return {
+        "slice_name": slice_name, "ok": ok,
+        "reason": "equivalence passed" if ok else "equivalence failed",
+        "verdict": result.report.verdict,
+        "records_compared": result.report.records_compared,
+        "defect_count": result.report.defect_count,
+        "open_questions": result.report.open_questions,
+        "defects": [_serialize_defect(d) for d in result.defects],
+        "partial": False,
+    }
+
+
+def _fan_out_per_story(lab: EquivalenceLab, *, workspace_id: str, req: VerifyRequest,
+                       stories: list[dict]) -> list[dict[str, Any]]:
+    """Register each story's golden then run all stories concurrently (bounded by
+    VERIFY_MAX_CONCURRENCY) under a soft per-story timeout. Returns one sub-verdict
+    per story, in story order. Golden registration is done up-front (synchronously)
+    so the worker threads only read immutable lab state."""
+    timeout_s = _equivalence_timeout_s()
+    sem = asyncio.Semaphore(_max_concurrency())
+    slice_names: list[str] = []
+    for story in stories:
+        sid = str(story.get("id") or f"story-{len(slice_names)}")
+        slice_names.append(sid)
+        lab.register_golden(workspace_id=workspace_id, slice_name=sid,
+                            record=req.record, records=req.golden_records)
+
+    async def _go() -> list[dict[str, Any]]:
+        tasks = [
+            _run_one_story(
+                lab, workspace_id=workspace_id, slice_name=sid, program=req.program,
+                candidate_records=req.candidate_records, record_key=req.record_key,
+                online_uses_recorded_fixtures=req.online_uses_recorded_fixtures,
+                sem=sem, timeout_s=timeout_s)
+            for sid in slice_names
+        ]
+        return list(await asyncio.gather(*tasks))
+
+    subs = asyncio.run(_go())
+    for story, sub in zip(stories, subs):
+        sub["story_id"] = str(story.get("id") or sub["slice_name"])
+    return subs
+
+
+def _make_lab(neo4j, *, repo_slug: str, req: VerifyRequest) -> EquivalenceLab:
+    ruleset = load_ruleset(
+        req.tolerance_yaml
+        or f"record: {req.record}\ndefault:\n  matcher: exact\n")
+    ops = _GraphOps(neo4j, repo_slug)
+
+    def resolve_seam(program: str, field: str):
+        return resolve_source_seam(ops, program=program, field=field)
+
+    return EquivalenceLab(golden_store=InMemoryGoldenStore(), ruleset=ruleset,
+                          resolve_seam=resolve_seam, dialect=req.dialect)
+
+
 def run_verify(*, session: Session, neo4j, workspace: Workspace,
                req: VerifyRequest) -> dict[str, Any]:
     if not req.golden_records:
@@ -129,17 +249,20 @@ def run_verify(*, session: Session, neo4j, workspace: Workspace,
             status_code=409,
             detail="no golden master supplied — capture the COBOL oracle output "
                    "for this slice first, then re-run Verify with it.")
-    ruleset = load_ruleset(
-        req.tolerance_yaml
-        or f"record: {req.record}\ndefault:\n  matcher: exact\n")
 
-    ops = _GraphOps(neo4j, workspace.repo_slug)
+    lab = _make_lab(neo4j, repo_slug=workspace.repo_slug, req=req)
+    stories = _load_stories(neo4j, workspace.repo_slug)
 
-    def resolve_seam(program: str, field: str):
-        return resolve_source_seam(ops, program=program, field=field)
+    if stories:
+        return _run_verify_fanout(session=session, neo4j=neo4j, workspace=workspace,
+                                  req=req, lab=lab, stories=stories)
+    return _run_verify_single(session=session, neo4j=neo4j, workspace=workspace,
+                              req=req, lab=lab)
 
-    lab = EquivalenceLab(golden_store=InMemoryGoldenStore(), ruleset=ruleset,
-                         resolve_seam=resolve_seam, dialect=req.dialect)
+
+def _run_verify_single(*, session: Session, neo4j, workspace: Workspace,
+                       req: VerifyRequest, lab: EquivalenceLab) -> dict[str, Any]:
+    """Today's behavior: no backlog -> one slice, one verify_report."""
     lab.register_golden(workspace_id=workspace.id, slice_name=req.slice_name,
                         record=req.record, records=req.golden_records)
     result = lab.run_equivalence(
@@ -149,24 +272,6 @@ def run_verify(*, session: Session, neo4j, workspace: Workspace,
 
     _set_status(session, workspace.id, "verify",
                 "passed" if result.report.verdict == "pass" else "failed")
-
-    # Story-behavior gate (additive — never raises; never breaks equivalence verdict).
-    try:
-        backlog_node = BacklogStorage(neo4j).get_latest(workspace.repo_slug)
-        stories = json.loads(backlog_node.get("stories_json") or "[]") if backlog_node else []
-        if stories:
-            refs_art = session.execute(
-                select(Artifact).where(Artifact.workspace_id == workspace.id,
-                                       Artifact.kind == "generated_test_refs")
-                .order_by(Artifact.version.desc())
-            ).scalars().first()
-            test_refs = (refs_art.evidence_map or {}).get("acceptance_criteria", []) if refs_art else []
-            evaluate_story_behavior(session, workspace.id, stories=stories,
-                                    generated_test_refs=test_refs,
-                                    equivalence_verdict=result.report.verdict)
-    except Exception:  # noqa: BLE001 — story gate is additive; never break equivalence verify
-        logger.warning("verify: story-behavior gate evaluation failed; equivalence verdict stands",
-                       exc_info=True)
 
     payload = {
         "repo_slug": workspace.repo_slug,
@@ -183,6 +288,75 @@ def run_verify(*, session: Session, neo4j, workspace: Workspace,
     art = record_verify_report(session, workspace_id=workspace.id,
                                evidence_map=dict(payload))
 
+    session.flush()
+    return {**payload, "version": art.version}
+
+
+def _run_verify_fanout(*, session: Session, neo4j, workspace: Workspace,
+                       req: VerifyRequest, lab: EquivalenceLab,
+                       stories: list[dict]) -> dict[str, Any]:
+    """Fan-Out-and-Synthesize: one equivalence check PER story (each story's ACs cite
+    different COBOL seams), bounded concurrency + soft per-story timeout. The workspace
+    passes iff EVERY story passes equivalence AND story_behavior."""
+    subs = _fan_out_per_story(lab, workspace_id=workspace.id, req=req, stories=stories)
+
+    # Persist one equivalence_check Artifact per story (incl. partial/timeout subs).
+    for sub in subs:
+        record_equivalence_check(
+            session, workspace_id=workspace.id, story_id=sub["story_id"],
+            evidence_map={
+                "story_id": sub["story_id"],
+                "slice_name": sub["slice_name"],
+                "verdict": sub["verdict"],
+                "ok": sub["ok"],
+                "reason": sub.get("reason", ""),
+                "defect_count": sub.get("defect_count", 0),
+                "defects_json": json.dumps(sub.get("defects", [])),
+                "partial": sub.get("partial", False),
+            })
+
+    equivalence_passed = bool(subs) and all(s["ok"] for s in subs)
+    total_defects = sum(s.get("defect_count", 0) for s in subs)
+    total_compared = sum(s.get("records_compared", 0) for s in subs)
+    open_questions = [q for s in subs for q in s.get("open_questions", [])]
+
+    _set_status(session, workspace.id, "verify",
+                "passed" if equivalence_passed else "failed")
+
+    # Synthesize the equivalence gate (human-resolved gates stay immutable — see
+    # upsert_gate semantics). The synthesized verdict drives the story_behavior gate too.
+    synth_verdict = "pass" if equivalence_passed else "fail"
+    upsert_gate(session, workspace.id, "verify", "equivalence",
+                passed=equivalence_passed,
+                result={"per_story_verdicts": subs, "defect_count": total_defects},
+                threshold={"all_stories_pass_equivalence": True})
+
+    # Story-behavior gate (additive — never raises; never breaks equivalence verdict).
+    try:
+        refs_art = session.execute(
+            select(Artifact).where(Artifact.workspace_id == workspace.id,
+                                   Artifact.kind == "generated_test_refs")
+            .order_by(Artifact.version.desc())
+        ).scalars().first()
+        test_refs = (refs_art.evidence_map or {}).get("acceptance_criteria", []) if refs_art else []
+        evaluate_story_behavior(session, workspace.id, stories=stories,
+                                generated_test_refs=test_refs,
+                                equivalence_verdict=synth_verdict)
+    except Exception:  # noqa: BLE001 — story gate is additive; never break equivalence verify
+        logger.warning("verify: story-behavior gate evaluation failed; equivalence verdict stands",
+                       exc_info=True)
+
+    payload = {
+        "repo_slug": workspace.repo_slug,
+        "verdict": synth_verdict,
+        "records_compared": total_compared,
+        "defect_count": total_defects,
+        "open_questions": open_questions,
+        "defects": [d for s in subs for d in s.get("defects", [])],
+        "per_story_verdicts": subs,
+    }
+    art = record_verify_report(session, workspace_id=workspace.id,
+                               evidence_map=dict(payload))
     session.flush()
     return {**payload, "version": art.version}
 
