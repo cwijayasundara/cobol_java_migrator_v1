@@ -221,10 +221,29 @@ export interface StoryStatusRecord {
   ac_missing?: string[];
   rationale?: string;
 }
+// Progress counts surfaced by the build gate (Task 7, pass-with-deferred). The
+// repeat-until-done build runs stories in dependency WAVES; a story that cannot be
+// made green after its attempt budget becomes `deferred` (tolerated, never wedges
+// the build). These counts let the cockpit show "built N, deferred M, pending P".
+export interface StoryBuildCounts {
+  story_count?: number;
+  pass_count?: number;
+  skipped_count?: number;
+  deferred_count?: number;
+  pending?: number;
+}
+// The job `result` shape returned by run_story_build: the outer envelope carries the
+// gate's progress counts under a nested `result`. All optional/best-effort.
+export interface StoryBuildJobResult extends StoryBuildCounts {
+  repo_slug?: string;
+  story_id?: string | null;
+  story_count?: number;
+  result?: StoryBuildCounts;
+}
 // Job-view shared by the story-build POSTs (same shape useJob consumes).
 export interface StoryBuildJob {
   status: JobStatus;
-  result: unknown;
+  result: StoryBuildJobResult | null;
   error: string | null;
   started_at?: number | null;
   finished_at?: number | null;
