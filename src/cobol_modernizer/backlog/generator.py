@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import os
 from typing import Any
 
 from cobol_modernizer.backlog.schema import (
@@ -13,6 +16,9 @@ from cobol_modernizer.enrichment.base import (
     EnrichmentResult,
     run_batched_result,
 )
+from cobol_modernizer.enrichment.refs import relevant_refs
+
+logger = logging.getLogger(__name__)
 
 
 BACKLOG_SYSTEM = (
@@ -188,33 +194,20 @@ def build_backlog_prompt(*, brd_sections: list[dict], known_refs: list[str],
     )
 
 
-async def generate_backlog_result(*, runner, model: str, timeout_s: float,
-                                  brd_sections: list[dict], known_refs: list[str],
-                                  known_requirement_ids: list[str],
-                                  max_turns: int = 6) -> EnrichmentResult:
-    """Typed-result variant of `generate_backlog_payload`: returns the
-    `EnrichmentResult` so a GATING caller can surface the concrete failure cause
-    (timeout / turn cap / api error) instead of a generic 'no output'."""
+async def _generate_backlog_oneshot(*, runner, model: str, timeout_s: float,
+                                    brd_sections: list[dict], known_refs: list[str],
+                                    known_requirement_ids: list[str],
+                                    max_turns: int = 6) -> EnrichmentResult:
+    """The preserved LEGACY single-call path: epics + stories in ONE structured call
+    over BACKLOG_SCHEMA. The size router (`generate_backlog_result`) reaches this for
+    small inputs (or when BACKLOG_GEN_MODE=oneshot). Returns the typed result so a
+    gating caller can surface the concrete failure cause (timeout / turn cap / api
+    error) instead of a generic 'no output'."""
     prompt = build_backlog_prompt(brd_sections=brd_sections, known_refs=known_refs,
                                   known_requirement_ids=known_requirement_ids)
     return await run_batched_result(runner=runner, system=BACKLOG_SYSTEM, prompt=prompt,
                                     schema=BACKLOG_SCHEMA, model=model, timeout_s=timeout_s,
                                     label="backlog-generate", max_turns=max_turns)
-
-
-async def generate_backlog_payload(*, runner, model: str, timeout_s: float,
-                                   brd_sections: list[dict], known_refs: list[str],
-                                   known_requirement_ids: list[str],
-                                   max_turns: int = 6) -> dict:
-    # max_turns default 6 (not run_batched's 2): emitting the structured-output result
-    # consumes a turn under claude-agent-sdk 0.2.87, and a real backlog needs a few
-    # reasoning turns before it; 2 risks hitting the turn cap and returning {}.
-    # Override via BACKLOG_MAX_TURNS.
-    result = await generate_backlog_result(
-        runner=runner, model=model, timeout_s=timeout_s, brd_sections=brd_sections,
-        known_refs=known_refs, known_requirement_ids=known_requirement_ids,
-        max_turns=max_turns)
-    return result.payload
 
 
 # --- Fan-Out-and-Synthesize MAP units -------------------------------------
@@ -301,3 +294,244 @@ async def generate_stories_for_epic(*, runner, model: str, timeout_s: float,
     return await run_batched_result(
         runner=runner, system=STORIES_SYSTEM, prompt=prompt, schema=STORIES_SCHEMA,
         model=model, timeout_s=timeout_s, label="backlog-stories", max_turns=max_turns)
+
+
+# --- Orchestrator: size router -> fan-out -> merge -> completeness loop -----
+# Reads top-to-bottom: route by input size; for the decomposed path generate the
+# epic layer, fan out per-epic story calls (bounded by a semaphore, NOT capped),
+# merge into a parse-compatible {epics, stories}, then a Loop-Until-Done guard
+# tops up any BRD requirement no produced story covers. HARD CONSTRAINT: no caps /
+# truncation anywhere; a requirement is dropped ONLY after the loop genuinely
+# cannot cover it (no progress / max rounds).
+
+COVERAGE_TOPUP_EPIC_ID = "EPIC-COVERAGE-TOPUP"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _requirement_ids_of_sections(brd_sections: list[dict]) -> list[str]:
+    """All BRD requirement ids in `brd_sections`, first-seen order, deduped."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for sec in brd_sections:
+        if not isinstance(sec, dict):
+            continue
+        for req in sec.get("requirements", []) or []:
+            rid = req.get("id") if isinstance(req, dict) else None
+            if rid and str(rid) not in seen:
+                seen.add(str(rid))
+                out.append(str(rid))
+    return out
+
+
+def _sections_for_requirements(brd_sections: list[dict], req_ids: set[str]) -> list[dict]:
+    """The BRD subset relevant to `req_ids`: every section that declares at least one
+    in-scope requirement, with its `requirements` list filtered to the in-scope ones
+    (so an epic's per-epic call only ever sees the requirements it owns — no leakage,
+    no truncation of what IS in scope)."""
+    subset: list[dict] = []
+    for sec in brd_sections:
+        if not isinstance(sec, dict):
+            continue
+        kept = [req for req in sec.get("requirements", []) or []
+                if isinstance(req, dict) and str(req.get("id", "")) in req_ids]
+        if kept:
+            sec_copy = dict(sec)
+            sec_copy["requirements"] = kept
+            subset.append(sec_copy)
+    return subset
+
+
+def _covered_requirements(stories: list[dict]) -> set[str]:
+    """The set of BRD requirement ids that at least one produced story cites."""
+    covered: set[str] = set()
+    for story in stories:
+        for rid in story.get("brd_requirement_ids", []) or []:
+            if rid:
+                covered.add(str(rid))
+    return covered
+
+
+def _decompose(brd_sections: list[dict], known_requirement_ids: list[str]) -> bool:
+    """Classify-and-Act size router. Proxy = number of BRD requirements
+    (`len(known_requirement_ids)`): it is the count of work items the backlog must
+    cover, the thing decomposition parallelizes. BACKLOG_GEN_MODE forces the path;
+    in `auto`, decompose at/above BACKLOG_DECOMPOSE_MIN_EPICS (default 3)."""
+    mode = os.environ.get("BACKLOG_GEN_MODE", "auto").strip().lower()
+    if mode == "decomposed":
+        return True
+    if mode == "oneshot":
+        return False
+    min_epics = _env_int("BACKLOG_DECOMPOSE_MIN_EPICS", 3)
+    proxy = len(known_requirement_ids) or len(brd_sections)
+    return proxy >= min_epics
+
+
+async def _generate_stories_round(*, runner, model: str, brd_sections: list[dict],
+                                  known_refs: list[str],
+                                  known_requirement_ids: list[str],
+                                  units: list[tuple[dict, set[str]]],
+                                  story_timeout_s: float, story_max_turns: int,
+                                  semaphore: asyncio.Semaphore) -> list[dict]:
+    """Fan out one round of per-epic stories calls under `semaphore` (bounds parallel
+    IN-FLIGHT calls, NOT story count). Each unit is (epic, req_ids_to_cover): the epic
+    plus the subset of its requirements this round should produce stories for. A unit
+    whose call returns not-ok contributes no stories (logged) but never fails the round
+    — partial failure is tolerated."""
+    async def _one(epic: dict, req_ids: set[str]) -> list[dict]:
+        sections_for_epic = _sections_for_requirements(brd_sections, req_ids)
+        refs = relevant_refs(sections_for_epic, known_refs)
+        async with semaphore:
+            res = await generate_stories_for_epic(
+                runner=runner, model=model, timeout_s=story_timeout_s,
+                max_turns=story_max_turns, epic=epic,
+                brd_sections_for_epic=sections_for_epic, relevant_refs=refs,
+                known_requirement_ids=known_requirement_ids)
+        if not res.ok:
+            logger.warning("backlog: stories call for epic %s failed (%s) — no stories "
+                           "from this epic this round", epic.get("id"), res.cause)
+            return []
+        return [s for s in res.payload.get("stories", []) if isinstance(s, dict)]
+
+    results = await asyncio.gather(*[_one(epic, req_ids) for epic, req_ids in units])
+    merged: list[dict] = []
+    for stories in results:
+        merged.extend(stories)
+    return merged
+
+
+async def generate_backlog_result(*, runner, model: str, timeout_s: float,
+                                  brd_sections: list[dict], known_refs: list[str],
+                                  known_requirement_ids: list[str],
+                                  max_turns: int = 6) -> EnrichmentResult:
+    """Size-routed backlog generation returning the typed result.
+
+    auto/oneshot small input -> preserved one-shot path. Decomposed path:
+      1. generate the EPIC layer (fail loud if it fails / yields no epics),
+      2. fan out per-epic stories (bounded concurrency, partial failure tolerated),
+      3. merge into a parse-compatible {epics, stories},
+      4. Loop-Until-Done: top up any uncovered BRD requirement until covered, no
+         round makes progress, or BACKLOG_MAX_ROUNDS is hit.
+    Never caps/truncates; never drops a requirement to finish (only the loop's
+    no-progress/max-rounds terminus drops a genuinely uncoverable one)."""
+    if not _decompose(brd_sections, known_requirement_ids):
+        return await _generate_backlog_oneshot(
+            runner=runner, model=model, timeout_s=timeout_s, brd_sections=brd_sections,
+            known_refs=known_refs, known_requirement_ids=known_requirement_ids,
+            max_turns=max_turns)
+
+    epic_timeout_s = _env_float("BACKLOG_EPIC_TIMEOUT_S", 120.0)
+    story_timeout_s = _env_float("BACKLOG_STORY_TIMEOUT_S", 120.0)
+    story_max_turns = _env_int("BACKLOG_STORY_MAX_TURNS", 6)
+    max_concurrency = max(1, _env_int("BACKLOG_MAX_CONCURRENCY", 4))
+    max_rounds = max(1, _env_int("BACKLOG_MAX_ROUNDS", 3))
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    # 1. EPIC layer (whole-BRD relevant refs) — fail loud on failure / empty.
+    epics_refs = relevant_refs(brd_sections, known_refs)
+    epics_res = await generate_epics(
+        runner=runner, model=model, timeout_s=epic_timeout_s, max_turns=max_turns,
+        brd_sections=brd_sections, relevant_refs=epics_refs,
+        known_requirement_ids=known_requirement_ids)
+    epics = [e for e in epics_res.payload.get("epics", []) if isinstance(e, dict)]
+    if not epics_res.ok or not epics:
+        cause = epics_res.cause or "no epics"
+        return EnrichmentResult(payload={}, ok=False,
+                                cause=f"epics generation failed: {cause}")
+
+    # 2. Fan out per-epic stories (each epic covers ALL its requirements).
+    first_units = [(epic, set(epic.get("brd_requirement_ids", []) or []))
+                   for epic in epics]
+    all_stories = await _generate_stories_round(
+        runner=runner, model=model, brd_sections=brd_sections, known_refs=known_refs,
+        known_requirement_ids=known_requirement_ids, units=first_units,
+        story_timeout_s=story_timeout_s, story_max_turns=story_max_turns,
+        semaphore=semaphore)
+
+    # Fail loud if NO epic produced a story.
+    if not all_stories:
+        return EnrichmentResult(payload={}, ok=False,
+                                cause="stories generation failed: no stories produced "
+                                      "for any epic")
+
+    # 3+4. Loop-Until-Done completeness guard.
+    all_req_ids = set(known_requirement_ids) or set(
+        _requirement_ids_of_sections(brd_sections))
+    epics_by_id = {str(e.get("id", "")): e for e in epics}
+    round_no = 1
+    while round_no < max_rounds:
+        covered = _covered_requirements(all_stories)
+        uncovered = all_req_ids - covered
+        if not uncovered:
+            break
+        # Map each uncovered req to the epic that OWNS it; orphans go to a
+        # synthetic catch-all epic (created once, deterministic id).
+        units: dict[str, tuple[dict, set[str]]] = {}
+        orphans: set[str] = set()
+        for rid in uncovered:
+            owner = next((e for e in epics
+                          if rid in (e.get("brd_requirement_ids") or [])), None)
+            if owner is None:
+                orphans.add(rid)
+                continue
+            eid = str(owner.get("id", ""))
+            units.setdefault(eid, (owner, set()))[1].add(rid)
+        if orphans:
+            topup = epics_by_id.get(COVERAGE_TOPUP_EPIC_ID)
+            if topup is None:
+                topup = {"id": COVERAGE_TOPUP_EPIC_ID,
+                         "title": "Coverage top-up",
+                         "outcome": "Cover BRD requirements not owned by any epic.",
+                         "brd_requirement_ids": sorted(orphans),
+                         "evidence_refs": []}
+                epics.append(topup)
+                epics_by_id[COVERAGE_TOPUP_EPIC_ID] = topup
+            else:
+                topup["brd_requirement_ids"] = sorted(
+                    set(topup.get("brd_requirement_ids", [])) | orphans)
+            units[COVERAGE_TOPUP_EPIC_ID] = (topup, set(orphans))
+
+        new_stories = await _generate_stories_round(
+            runner=runner, model=model, brd_sections=brd_sections, known_refs=known_refs,
+            known_requirement_ids=known_requirement_ids,
+            units=list(units.values()), story_timeout_s=story_timeout_s,
+            story_max_turns=story_max_turns, semaphore=semaphore)
+        newly_covered = _covered_requirements(new_stories) & uncovered
+        logger.info("backlog: completeness round %d — %d uncovered before, "
+                    "%d newly covered", round_no + 1, len(uncovered), len(newly_covered))
+        all_stories.extend(new_stories)
+        if not newly_covered:
+            # No progress this round — stop (the rest is genuinely uncoverable).
+            break
+        round_no += 1
+
+    merged = {"epics": epics, "stories": all_stories}
+    return EnrichmentResult(payload=merged, ok=True, cause=None)
+
+
+async def generate_backlog_payload(*, runner, model: str, timeout_s: float,
+                                   brd_sections: list[dict], known_refs: list[str],
+                                   known_requirement_ids: list[str],
+                                   max_turns: int = 6) -> dict:
+    # max_turns default 6 (not run_batched's 2): emitting the structured-output result
+    # consumes a turn under claude-agent-sdk 0.2.87, and a real backlog needs a few
+    # reasoning turns before it; 2 risks hitting the turn cap and returning {}.
+    # Override via BACKLOG_MAX_TURNS. Returns the merged raw dict, or {} on failure
+    # (Task 6 will switch run_backlog to consume the typed result directly).
+    result = await generate_backlog_result(
+        runner=runner, model=model, timeout_s=timeout_s, brd_sections=brd_sections,
+        known_refs=known_refs, known_requirement_ids=known_requirement_ids,
+        max_turns=max_turns)
+    return result.payload
