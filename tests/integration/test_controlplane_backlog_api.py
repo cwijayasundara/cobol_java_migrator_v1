@@ -23,7 +23,8 @@ class FakeNeo4j:
             return [{"b": {"version": 1,
                            "sections": json.dumps([{"title": "Functional",
                                "requirements": [{"id": "FR-1", "text": "Post tx"}]}]),
-                           "evidence_map": "{}"}}]
+                           "evidence_map": json.dumps(
+                               {"FR-1": ["CBPOST1M", "CBPOST1M.2100-POST"]})}}]
         if "RETURN n.qualified_name AS q" in query or "RETURN n.qualified_name AS ref" in query:
             key = "q" if " AS q" in query else "ref"
             return [{key: "CBPOST1M", "kind": "Program"},
@@ -199,11 +200,12 @@ class _LargeGraphNeo4j(FakeNeo4j):
 
     def run(self, query, **params):
         if "HAS_BRD" in query or "(b:BRD)" in query:
+            # The graph grounding lives in the SEPARATE evidence_map (FR-1 -> CITED),
+            # NOT in the sections (which carry no refs in production).
             return [{"b": {"version": 1,
                            "sections": json.dumps([{"title": "Functional",
-                               "requirements": [{"id": "FR-1", "text": "Post tx",
-                                                 "evidence_refs": self.CITED}]}]),
-                           "evidence_map": "{}"}}]
+                               "requirements": [{"id": "FR-1", "text": "Post tx"}]}]),
+                           "evidence_map": json.dumps({"FR-1": self.CITED})}}]
         if "RETURN n.qualified_name AS q" in query or "RETURN n.qualified_name AS ref" in query:
             key = "q" if " AS q" in query else "ref"
             rows = [{key: "CBPOST1M", "kind": "Program"},
@@ -219,7 +221,15 @@ def test_backlog_inlines_only_relevant_refs_but_grounds_full_set(monkeypatch):
     captured: dict = {}
 
     async def _capture(**kw):
+        # run_backlog hands the generator the FULL known_refs + a separate evidence_map;
+        # the relevance scoping (evidence_map -> in-prompt refs) is the generator's job.
         captured["known_refs"] = list(kw["known_refs"])
+        captured["brd_evidence_map"] = kw.get("brd_evidence_map")
+        # The in-prompt relevant set is what relevant_refs derives from the evidence_map.
+        from cobol_modernizer.enrichment.refs import relevant_refs
+        captured["relevant"] = (relevant_refs(captured["brd_evidence_map"],
+                                              captured["known_refs"])
+                                or list(captured["known_refs"]))
         return _fake_payload()  # typed EnrichmentResult
 
     grounded: dict = {}
@@ -257,13 +267,55 @@ def test_backlog_inlines_only_relevant_refs_but_grounds_full_set(monkeypatch):
     try:
         r = client.post("/api/workspaces/ws-1/backlog")
         assert r.status_code in (200, 202)
-        # Prompt got ONLY the BRD-relevant subset — not the whole 1000, not a numeric slice.
-        assert set(captured["known_refs"]) == set(_LargeGraphNeo4j.CITED)
-        assert "NOISE0" not in captured["known_refs"]
+        # The evidence-map-derived relevant set is ONLY the BRD-grounded subset —
+        # not the whole 1000, not a numeric slice (and NON-empty: the bug repro).
+        assert set(captured["relevant"]) == set(_LargeGraphNeo4j.CITED)
+        assert "NOISE0" not in captured["relevant"]
+        assert captured["relevant"]
         # Grounding ran against the FULL graph ref set (1000 refs).
         assert len(grounded["known_refs"]) == 1000
         assert "NOISE0" in grounded["known_refs"]
         assert set(_LargeGraphNeo4j.CITED).issubset(grounded["known_refs"])
+    finally:
+        app.dependency_overrides.clear()
+        jobs.runner.inline = False
+
+
+def test_backlog_loads_brd_evidence_map_and_inlines_nonzero_refs(monkeypatch):
+    """Regression for the 'inlining 0 BRD-relevant refs' bug: run_backlog must LOAD
+    the BRD's evidence_map and hand the generator a NON-empty relevant ref set scoped
+    by it (the old code scoped by section text -> 0 refs). Grounding stays on the full
+    set. FakeNeo4j's BRD grounds FR-1 -> [CBPOST1M, CBPOST1M.2100-POST]."""
+    from cobol_modernizer.controlplane import backlog as bl
+
+    captured: dict = {}
+
+    async def _capture(**kw):
+        captured["known_refs"] = list(kw["known_refs"])
+        captured["brd_evidence_map"] = kw.get("brd_evidence_map")
+        return _fake_payload()
+
+    grounded: dict = {}
+    real_parse = bl.parse_backlog_payload
+
+    def _parse_spy(raw, *, repo_slug, known_refs, known_requirement_ids):
+        grounded["known_refs"] = set(known_refs)
+        return real_parse(raw, repo_slug=repo_slug, known_refs=known_refs,
+                          known_requirement_ids=known_requirement_ids)
+
+    monkeypatch.setattr(bl, "generate_backlog_result", _capture)
+    monkeypatch.setattr(bl, "parse_backlog_payload", _parse_spy)
+    client, _ = _client(monkeypatch)
+    try:
+        r = client.post("/api/workspaces/ws-1/backlog")
+        assert r.status_code in (200, 202)
+        # The BRD's evidence_map was loaded + parsed and passed to the generator.
+        assert captured["brd_evidence_map"] == {"FR-1": ["CBPOST1M", "CBPOST1M.2100-POST"]}
+        # NON-zero refs reach the generator (the bug's direct repro: old code => 0).
+        assert captured["known_refs"]
+        assert set(captured["known_refs"]) == {"CBPOST1M", "CBPOST1M.2100-POST"}
+        # Grounding still ran against the FULL graph ref set.
+        assert grounded["known_refs"] == {"CBPOST1M", "CBPOST1M.2100-POST"}
     finally:
         app.dependency_overrides.clear()
         jobs.runner.inline = False
