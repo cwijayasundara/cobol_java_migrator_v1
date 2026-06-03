@@ -103,12 +103,20 @@ def _sections(req_ids, refs=("CBPOST1M",)):
 _GEN_KWARGS = dict(runner=None, model="m", timeout_s=30.0, max_turns=6)
 
 
-def _run_gen(runner, *, brd_sections, known_refs, known_requirement_ids):
+def _run_gen(runner, *, brd_sections, known_refs, known_requirement_ids,
+             brd_evidence_map=None):
     kwargs = dict(_GEN_KWARGS)
     kwargs["runner"] = runner
     return asyncio.run(generate_backlog_payload(
         brd_sections=brd_sections, known_refs=known_refs,
-        known_requirement_ids=known_requirement_ids, **kwargs))
+        known_requirement_ids=known_requirement_ids,
+        brd_evidence_map=brd_evidence_map, **kwargs))
+
+
+def _inlined_refs(prompt):
+    """Parse the 'Known graph evidence refs' block out of a generated prompt."""
+    block = prompt.split("Known graph evidence refs (cite only these)")[1]
+    return json.loads(block.split("```json\n")[1].split("\n```")[0])
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +706,191 @@ def test_generate_stories_for_epic_passes_through_failure_cause():
     assert result.ok is False
     assert result.payload == {}
     assert result.cause is not None
+
+
+# ---------------------------------------------------------------------------
+# evidence_map ref-scoping (the BUG fix): refs are scoped by the BRD evidence_map
+# (requirement_id -> [qualified_names]), NOT by section text. Fallback to ALL
+# known_refs when the evidence_map is empty/legacy so it NEVER inlines 0 / regresses.
+# ---------------------------------------------------------------------------
+
+def test_evidence_map_scopes_epics_and_per_epic_refs(monkeypatch):
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    # The BRD sections carry NO refs (the real shape). The grounding lives in the
+    # SEPARATE evidence_map: FR-1 -> R1, FR-2 -> R2.
+    sections = [{"title": "Functional",
+                 "requirements": [{"id": "FR-1", "text": "post"},
+                                  {"id": "FR-2", "text": "report"}]}]
+    known_refs = ["R1", "R2", "R3-noise"]
+    evidence_map = {"FR-1": ["R1"], "FR-2": ["R2"]}
+    epics = [_epic("EPIC-1", ["FR-1"]), _epic("EPIC-2", ["FR-2"])]
+
+    def script(*, schema, prompt, idx):
+        if schema is EPICS_SCHEMA:
+            return {"epics": epics}
+        for e in epics:
+            if e["id"] in prompt:
+                rid = e["brd_requirement_ids"][0]
+                return {"stories": [_story(f"US-{e['id']}", e["id"], [rid], refs=["R1"])]}
+        return {"stories": []}
+
+    runner = ScriptedRunner(script)
+    _run_gen(runner, brd_sections=sections, known_refs=known_refs,
+             known_requirement_ids=["FR-1", "FR-2"], brd_evidence_map=evidence_map)
+
+    # Epics call inlines the WHOLE-BRD evidence-map-derived refs (NON-zero, grounded).
+    epics_refs = _inlined_refs(runner.epics_calls[0]["prompt"])
+    assert set(epics_refs) == {"R1", "R2"}  # union of evidence_map values in known_refs
+    assert epics_refs  # never 0
+
+    # Each per-epic stories call inlines ITS epic's requirements' evidence-map refs.
+    epic1_call = next(c for c in runner.stories_calls if "EPIC-1" in c["prompt"])
+    epic2_call = next(c for c in runner.stories_calls if "EPIC-2" in c["prompt"])
+    assert set(_inlined_refs(epic1_call["prompt"])) == {"R1"}
+    assert set(_inlined_refs(epic2_call["prompt"])) == {"R2"}
+
+
+def test_per_epic_falls_back_to_brd_relevant_when_reqs_have_no_evidence(monkeypatch):
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    sections = [{"title": "Functional",
+                 "requirements": [{"id": "FR-1", "text": "post"},
+                                  {"id": "FR-2", "text": "report"},
+                                  {"id": "FR-3", "text": "nogrounding"}]}]
+    known_refs = ["R1", "R2"]
+    # FR-3 has NO evidence_map entry -> its epic must fall back to brd_relevant.
+    evidence_map = {"FR-1": ["R1"], "FR-2": ["R2"]}
+    epics = [_epic("EPIC-1", ["FR-1"]), _epic("EPIC-2", ["FR-2"]),
+             _epic("EPIC-3", ["FR-3"])]
+
+    def script(*, schema, prompt, idx):
+        if schema is EPICS_SCHEMA:
+            return {"epics": epics}
+        for e in epics:
+            if e["id"] in prompt:
+                rid = e["brd_requirement_ids"][0]
+                return {"stories": [_story(f"US-{e['id']}", e["id"], [rid], refs=["R1"])]}
+        return {"stories": []}
+
+    runner = ScriptedRunner(script)
+    _run_gen(runner, brd_sections=sections, known_refs=known_refs,
+             known_requirement_ids=["FR-1", "FR-2", "FR-3"],
+             brd_evidence_map=evidence_map)
+
+    brd_relevant = {"R1", "R2"}  # the whole-BRD evidence-map-derived set
+    epic3_call = next(c for c in runner.stories_calls if "EPIC-3" in c["prompt"])
+    # FR-3 has no evidence -> falls back to the whole-BRD relevant set, NEVER 0.
+    assert set(_inlined_refs(epic3_call["prompt"])) == brd_relevant
+    assert _inlined_refs(epic3_call["prompt"])  # non-empty
+
+
+def test_empty_evidence_map_falls_back_to_all_known_refs(monkeypatch):
+    """No-regression guarantee: a legacy/empty evidence_map inlines ALL known_refs
+    (the old 'inline everything' behavior), NOT 0."""
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    sections = [{"title": "Functional",
+                 "requirements": [{"id": "FR-1", "text": "post"},
+                                  {"id": "FR-2", "text": "report"}]}]
+    known_refs = ["R1", "R2", "R3"]
+    epics = [_epic("EPIC-1", ["FR-1"]), _epic("EPIC-2", ["FR-2"])]
+
+    def script(*, schema, prompt, idx):
+        if schema is EPICS_SCHEMA:
+            return {"epics": epics}
+        for e in epics:
+            if e["id"] in prompt:
+                rid = e["brd_requirement_ids"][0]
+                return {"stories": [_story(f"US-{e['id']}", e["id"], [rid], refs=["R1"])]}
+        return {"stories": []}
+
+    runner = ScriptedRunner(script)
+    _run_gen(runner, brd_sections=sections, known_refs=known_refs,
+             known_requirement_ids=["FR-1", "FR-2"], brd_evidence_map={})
+
+    # Empty evidence_map -> epics AND every per-epic call inline ALL known_refs.
+    assert set(_inlined_refs(runner.epics_calls[0]["prompt"])) == set(known_refs)
+    for c in runner.stories_calls:
+        inlined = _inlined_refs(c["prompt"])
+        assert set(inlined) == set(known_refs)  # all 3, never 0
+        assert inlined
+
+
+def test_evidence_map_none_falls_back_to_all_known_refs(monkeypatch):
+    """brd_evidence_map defaulting to None is None-safe and behaves like empty."""
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    sections = _sections(["FR-1", "FR-2", "FR-3"], refs=[])
+    known_refs = ["R1", "R2"]
+    epics = [_epic("EPIC-1", ["FR-1"]), _epic("EPIC-2", ["FR-2"]),
+             _epic("EPIC-3", ["FR-3"])]
+
+    def script(*, schema, prompt, idx):
+        if schema is EPICS_SCHEMA:
+            return {"epics": epics}
+        for e in epics:
+            if e["id"] in prompt:
+                rid = e["brd_requirement_ids"][0]
+                return {"stories": [_story(f"US-{e['id']}", e["id"], [rid], refs=["R1"])]}
+        return {"stories": []}
+
+    runner = ScriptedRunner(script)
+    _run_gen(runner, brd_sections=sections, known_refs=known_refs,
+             known_requirement_ids=["FR-1", "FR-2", "FR-3"], brd_evidence_map=None)
+
+    assert set(_inlined_refs(runner.epics_calls[0]["prompt"])) == set(known_refs)
+    for c in runner.stories_calls:
+        assert set(_inlined_refs(c["prompt"])) == set(known_refs)
+
+
+def test_evidence_map_oneshot_inlines_brd_relevant_not_zero(monkeypatch):
+    """The one-shot path inlines the evidence-map-derived brd_relevant, NOT 0."""
+    monkeypatch.delenv("BACKLOG_GEN_MODE", raising=False)
+    monkeypatch.delenv("BACKLOG_DECOMPOSE_MIN_EPICS", raising=False)
+    sections = [{"title": "Functional",
+                 "requirements": [{"id": "FR-1", "text": "post"},
+                                  {"id": "FR-2", "text": "report"}]}]
+    known_refs = ["R1", "R2", "R3-noise"]
+    evidence_map = {"FR-1": ["R1"], "FR-2": ["R2"]}
+    runner = ScriptedRunner(lambda **k: {"epics": [_epic("EPIC-1", ["FR-1"])],
+                                         "stories": [_story("US-1", "EPIC-1", ["FR-1"], refs=["R1"])]})
+    # 2 requirements < MIN(3) -> one-shot path.
+    _run_gen(runner, brd_sections=sections, known_refs=known_refs,
+             known_requirement_ids=["FR-1", "FR-2"], brd_evidence_map=evidence_map)
+    assert len(runner.oneshot_calls) == 1
+    inlined = _inlined_refs(runner.oneshot_calls[0]["prompt"])
+    assert set(inlined) == {"R1", "R2"}  # evidence-map-derived, NOT 0, NOT noise
+    assert "R3-noise" not in inlined
+
+
+def test_evidence_map_no_truncation_inlines_all_grounded(monkeypatch):
+    """No cap: a requirement grounded to 500 refs inlines all 500."""
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    big = [f"R{i}" for i in range(500)]
+    sections = [{"title": "Functional",
+                 "requirements": [{"id": "FR-1", "text": "x"},
+                                  {"id": "FR-2", "text": "y"},
+                                  {"id": "FR-3", "text": "z"}]}]
+    known_refs = big + ["Rother"]
+    evidence_map = {"FR-1": big, "FR-2": ["Rother"], "FR-3": ["Rother"]}
+    epics = [_epic("EPIC-1", ["FR-1"]), _epic("EPIC-2", ["FR-2"]),
+             _epic("EPIC-3", ["FR-3"])]
+
+    def script(*, schema, prompt, idx):
+        if schema is EPICS_SCHEMA:
+            return {"epics": epics}
+        for e in epics:
+            if e["id"] in prompt:
+                rid = e["brd_requirement_ids"][0]
+                return {"stories": [_story(f"US-{e['id']}", e["id"], [rid], refs=["R0"])]}
+        return {"stories": []}
+
+    runner = ScriptedRunner(script)
+    _run_gen(runner, brd_sections=sections, known_refs=known_refs,
+             known_requirement_ids=["FR-1", "FR-2", "FR-3"],
+             brd_evidence_map=evidence_map)
+
+    epic1_call = next(c for c in runner.stories_calls if "EPIC-1" in c["prompt"])
+    inlined = _inlined_refs(epic1_call["prompt"])
+    assert len(inlined) == 500  # all 500, no [:N] cap
+    assert set(inlined) == set(big)
 
 
 def test_split_schemas_produce_parse_backlog_compatible_objects():

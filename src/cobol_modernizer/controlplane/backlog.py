@@ -92,15 +92,33 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
             sections = []
     else:
         sections = raw_sections or []
+    # The graph grounding lives in the BRD's SEPARATE evidence_map (requirement_id ->
+    # [qualified_names]), persisted as a JSON string like `sections` — the sections
+    # themselves carry no refs. Parse it defensively; legacy/missing -> {} (the
+    # generator then falls back to inlining ALL known_refs, never 0).
+    raw_em = brd.get("evidence_map")
+    if isinstance(raw_em, str):
+        try:
+            brd_evidence_map = json.loads(raw_em or "{}")
+        except json.JSONDecodeError:
+            logger.warning("backlog: malformed BRD evidence_map JSON for %s — treating as empty", slug)
+            brd_evidence_map = {}
+    else:
+        brd_evidence_map = raw_em or {}
+    if not isinstance(brd_evidence_map, dict):
+        brd_evidence_map = {}
     known_refs = [r["q"] for r in neo4j.run(_GRAPH_REFS_Q, repo=slug) if r.get("q")]
     known_req_ids = _requirement_ids(sections)
 
-    # Inline only the BRD-relevant refs into the prompt (lossless relevance, NO cap):
-    # the full graph (thousands of refs) blows the prompt budget. The FULL `known_refs`
-    # is still used for grounding below.
-    relevant = relevant_refs(sections, known_refs)
-    logger.info("backlog: %d known graph refs, inlining %d BRD-relevant refs into prompt for %s",
-                len(known_refs), len(relevant), slug)
+    # The relevance scoper inlines only the BRD-evidence-map-relevant refs into the
+    # prompt (lossless relevance, NO cap): the full graph (thousands of refs) blows
+    # the prompt budget. Scoping is now driven by the evidence_map (NOT the section
+    # text, which has no refs — the old bug that inlined 0 refs). The generator does
+    # the per-epic scoping + the all-known_refs fallback. The FULL `known_refs` is
+    # still passed for prompt scoping AND used for grounding below.
+    relevant = relevant_refs(brd_evidence_map, known_refs) or known_refs
+    logger.info("backlog: %d known graph refs, %d BRD-evidence-map-relevant refs to "
+                "inline into prompt for %s", len(known_refs), len(relevant), slug)
 
     # Ensure a :Repository node exists for BacklogStorage (mirrors blueprint.py MERGE).
     neo4j.run("MERGE (r:Repository {slug: $slug}) SET r.name = coalesce(r.name, $slug)",
@@ -112,7 +130,8 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
         gen(runner=runner, model=os.environ.get("BACKLOG_MODEL", _DEFAULT_MODEL),
             timeout_s=float(os.environ.get("BACKLOG_TIMEOUT_S", "300")),
             max_turns=int(os.environ.get("BACKLOG_MAX_TURNS", "6")),
-            brd_sections=sections, known_refs=relevant,
+            brd_sections=sections, known_refs=known_refs,
+            brd_evidence_map=brd_evidence_map,
             known_requirement_ids=sorted(known_req_ids)))
     if not result.ok or not result.payload:
         # The orchestrator swallows an LLM error/timeout/turn-cap/empty-output into a
