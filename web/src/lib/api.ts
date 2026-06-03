@@ -161,6 +161,79 @@ export interface VerifyResult {
   repo_slug: string; verdict: "pass" | "fail";
   records_compared: number; defect_count: number;
   open_questions: string[]; defects: EquivalenceDefect[];
+  // Present once the run fans out per story (Fan-Out-and-Synthesize); optional so a
+  // single-slice (no-backlog) run still type-checks.
+  per_story_verdicts?: PerStoryVerdict[];
+  failing_subslices?: string[];
+  version?: number;
+}
+
+// A localized sub-slice verdict from the decompose-further loop (which program /
+// COBOL-context within a failing story actually failed). Defensive/optional fields.
+export interface SubsliceVerdict {
+  subslice: string;
+  ok: boolean;
+  verdict: "pass" | "fail";
+  defect_count?: number;
+  reason?: string;
+  partial?: boolean;
+}
+
+// One story's sub-verdict in a fanned-out verify report. `partial` flags a soft
+// timeout / error (never a hard kill). `failing_subslices` lists the localized
+// program/COBOL-context sub-slices that actually failed (decompose-further).
+export interface PerStoryVerdict {
+  story_id: string;
+  slice_name?: string;
+  ok: boolean;
+  verdict: "pass" | "fail";
+  defect_count?: number;
+  records_compared?: number;
+  reason?: string;
+  partial?: boolean;
+  open_questions?: string[];
+  defects?: EquivalenceDefect[];
+  failing_subslices?: string[];
+  subslices?: SubsliceVerdict[];
+}
+
+// The latest persisted verify_report replayed by GET /verify/status. Mirrors the
+// versioned Artifact's evidence_map; every roll-up field is optional/best-effort.
+export interface VerifyReport {
+  version?: number;
+  repo_slug?: string;
+  verdict?: "pass" | "fail";
+  records_compared?: number;
+  defect_count?: number;
+  open_questions?: string[];
+  defects?: EquivalenceDefect[];
+  per_story_verdicts?: PerStoryVerdict[];
+  failing_subslices?: string[];
+  stage_status?: string | null;
+}
+
+// Job-view returned by GET /verify/status: `idle` until a run is persisted, then
+// `done` + the latest persisted VerifyReport (same envelope shape as the *_status GETs).
+export interface VerifyStatusJob {
+  status: JobStatus;
+  result: VerifyReport | null;
+  error: string | null;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+// Result of POST /verify/repair/{story_id}: the LLM-repair outcome for ONE story.
+export interface VerifyRepairResult {
+  repo_slug: string;
+  story_id: string;
+  verdict: "pass" | "fail";
+  resolved: boolean;
+  attempts: number;
+  records_compared: number;
+  defect_count: number;
+  open_questions: string[];
+  defects: EquivalenceDefect[];
+  version?: number;
 }
 
 // Background-job status for the Backlog stage (POST/GET .../backlog).
@@ -357,12 +430,33 @@ export const api = {
     json<EnrichJob<DomainDesignResult>>(`/api/workspaces/${id}/domain-design`),
 
   // ---- verify: deterministic equivalence diff on supplied golden + candidate ----
+  // POST runs verify (Fan-Out-and-Synthesize over the backlog stories when present).
   runVerify: (workspaceId: string, body: VerifyRequest) =>
     json<VerifyResult>(`/api/workspaces/${workspaceId}/verify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  // Alias: start a verify run (same POST) — symmetric with the other *_status pairs.
+  startVerify: (workspaceId: string, body: VerifyRequest) =>
+    json<VerifyResult>(`/api/workspaces/${workspaceId}/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  // GET the latest persisted verify_report (idle when none) so the verdict survives
+  // a refresh (lazy-load on mount).
+  getVerifyStatus: (workspaceId: string) =>
+    json<VerifyStatusJob>(`/api/workspaces/${workspaceId}/verify/status`),
+  // POST LLM-repair of ONE failing story's Java (red->green); needs the golden +
+  // candidate so the repair can re-confirm equivalence.
+  repairVerifyStory: (workspaceId: string, storyId: string, body: VerifyRequest) =>
+    json<VerifyRepairResult>(
+      `/api/workspaces/${workspaceId}/verify/repair/${storyId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
 
   // ---- explore: "ask the codebase" (grounded in the Neo4j graph) ----
   askWorkspace: (workspaceId: string, question: string) =>
