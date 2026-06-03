@@ -13,11 +13,12 @@ This wires Tasks 1-6 behind FastAPI. Three things happen here:
   GET  .../build/stories       — the persisted per-story status map
         (`story_storage.get_status_map`) plus the background job view.
 
-The heavy story-run step (scaffold + per-story slice-pack + LLM/Maven loop) is
-factored into `_run_story_build_step` and made INJECTABLE exactly like
-`build.py::run_build` takes `generate=`: the integration test substitutes a stub
-so the endpoints/prechecks/job-guard/response-shaping run without a live
-LLM/Maven/Neo4j. The real default is `_real_story_build_step`.
+The heavy story-run step (scaffold + per-story slice-pack + LLM/Maven loop) is the
+module-level INJECTABLE seam `_run_story_build_step`, whose default value is the
+real `_real_story_build_step` — exactly the relationship `build.py` has between its
+`_generate_slice_graph` seam and the real generator that `run_build` takes via
+`generate=`. The integration test monkeypatches the seam with a stub so the
+endpoints/prechecks/job-guard/response-shaping run without a live LLM/Maven/Neo4j.
 
 Typed-spec reconstruction: the build.py `*_brief` loaders return DICTS, but the
 planner/context-pack want the typed Pydantic models. The persisted Neo4j nodes
@@ -40,7 +41,7 @@ from cobol_modernizer.backlog.schema import Backlog
 from cobol_modernizer.backlog.storage import BacklogStorage
 from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.codegen.story_plan import StoryCodegenItem, StoryCodegenPlan, \
-    build_story_codegen_plan
+    StoryCodegenStatus, build_story_codegen_plan
 from cobol_modernizer.codegen.story_storage import get_status_map
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.build import (
@@ -150,9 +151,11 @@ def _plan_for(neo4j, slug: str) -> StoryCodegenPlan:
 
 def _precheck(neo4j, workspace: Workspace, source_root: Path) -> _Specs:
     """Fast, synchronous validation before queueing the multi-minute job: repo dir
-    present + a BRD exists + the backlog/domain/technical specs all exist. Returns
-    the loaded typed specs so the job doesn't re-load them. 404/409 name the missing
-    prerequisite."""
+    present + a BRD exists + the backlog/domain/technical specs all exist. 404/409
+    name the missing prerequisite. Returns the loaded typed specs for convenience,
+    though the callers here discard it — the specs are cheaply re-loaded inside the
+    plan + the real step (Neo4j reads are inexpensive); thread the return through if
+    that ever changes."""
     slug = workspace.repo_slug
     if not (source_root / slug).is_dir():
         raise HTTPException(
@@ -239,7 +242,11 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
         story = story_by_id[item.story_id]
         service = _service_for_item(technical, item)
         aggregate = _aggregate_for_context(domain, item.bounded_context)
-        # Slice pack scoped to THIS story's cobol_refs (so it stays bounded).
+        # Slice pack scoped to THIS story's cobol_refs (so it stays bounded). The
+        # synthetic brief shape couples to `build.py::_target_refs`'s contract: it
+        # reads `domain_design.designs[].cobol_mapping[].cobol_ref`. If that key path
+        # changes, `_slice_pack` finds no targets and degrades to an empty pack
+        # (swallowed by its defensive except) — keep this in sync with `_target_refs`.
         pack = _slice_pack(
             deps, {"domain_design": {"designs": [{"cobol_mapping": [
                 {"cobol_ref": r} for r in item.cobol_refs]}]}},
@@ -264,32 +271,73 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
     }
 
 
+#: Statuses that do NOT fail the build (the `.value` strings of `StoryCodegenStatus`).
+#: `passed`/`skipped` are obvious; a toolchain-absent `generated-unverified` is
+#: ACCEPTED-but-unverified by design (the degrade contract — mvn missing must not
+#: fail the build), exactly as the story runner's GATE treats it. Anything else
+#: (notably `failed`/`blocked`) fails the run so the job surfaces as `failed`,
+#: mirroring the sibling fail-loud `/build`.
+_ACCEPTABLE_STATUSES = frozenset({
+    StoryCodegenStatus.passed.value,
+    StoryCodegenStatus.generated_unverified.value,
+    StoryCodegenStatus.skipped.value,
+})
+
+
+def _gate_stage(result: dict) -> None:
+    """Decide whether the `build` stage may be marked passed from the step's per-story
+    results. Raises RuntimeError (so the job ends `failed`, surfacing via the GET job
+    view's `error`) when there are NO results or ANY story ended in a non-acceptable
+    status. The per-story status map is persisted by the runner regardless, so the
+    operator still sees the full detail under GET .../build/stories."""
+    results = result.get("results") or []
+    if not results:
+        raise RuntimeError("story build produced no results — nothing was built")
+    offenders = sorted({r.get("status") for r in results
+                        if r.get("status") not in _ACCEPTABLE_STATUSES})
+    if offenders:
+        raise RuntimeError(
+            "story build did not pass — story statuses not acceptable: "
+            f"{', '.join(s for s in offenders if s)}")
+
+
 def run_story_build(*, session: Session, neo4j, workspace: Workspace,
                     source_root: Path, output_root: Path, story_id: str | None = None,
                     build: Callable[..., dict] = None) -> dict[str, Any]:  # type: ignore[assignment]
     """Run the story build for a workspace: precheck -> plan -> heavy story-run step
-    -> mark the `build` stage passed. `build` defaults to the real
-    `_run_story_build_step` (resolved here so tests inject a stub) — mirrors
-    `run_build`'s `generate=` seam."""
+    -> gate -> mark the `build` stage passed. `build` is the injectable seam: it
+    defaults to the module-level `_run_story_build_step` (whose value is the real
+    `_real_story_build_step`), resolved at call time so tests can monkeypatch it —
+    mirroring how `run_build` resolves `generate=` against `_generate_slice_graph`.
+
+    The stage is marked passed ONLY when every story ended acceptable (passed /
+    generated_unverified / skipped) — `run_story_plan` NEVER raises on a per-story
+    failure, so an unconditional mark would silently pass a broken build. A
+    non-acceptable status raises (RuntimeError), surfacing the job as `failed`."""
     slug = workspace.repo_slug
     _precheck(neo4j, workspace, source_root)
     plan = _plan_for(neo4j, slug)
 
     logger.info("build-stories: running for repo=%s story_id=%s (%d items)",
                 slug, story_id, len(plan.items))
+    # `_run_story_build_step` is assigned below this function (module-level seam);
+    # it resolves at call time, so tests monkeypatch the module attribute. Do not
+    # "fix" the forward reference.
     step = build or _run_story_build_step
     result = step(session=session, neo4j=neo4j, workspace=workspace,
                   source_root=source_root, output_root=output_root,
                   plan=plan, story_id=story_id)
 
+    _gate_stage(result)
     _mark_passed(session, workspace.id, "build")
     session.flush()
     return {"repo_slug": slug, "story_id": story_id,
             "story_count": len(plan.items), "result": result}
 
 
-#: Module-level seam: the heavy step. Tests monkeypatch this with a stub; the real
-#: default is `_real_story_build_step`. (mirrors `build._generate_slice_graph`.)
+#: Module-level seam for the heavy story-run step (scaffold + per-story slice-pack +
+#: run_story_plan). Its value is the real default `_real_story_build_step`; tests
+#: monkeypatch THIS attribute with a stub. Mirrors `build._generate_slice_graph`.
 _run_story_build_step = _real_story_build_step
 
 

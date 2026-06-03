@@ -83,27 +83,35 @@ class _FakeNeo4j:
 
 class _StubRun:
     """Injectable stand-in for the real scaffold+pack+run_story_plan step. Records
-    its calls and marks the stage by NOT doing it — the endpoint marks the stage."""
+    its calls and returns a `results` list (the shape `run_story_build` gates the
+    stage on). `status_for` maps a story id -> its returned status; unmapped stories
+    default to `passed`, so by default the gate passes and the stage is marked."""
 
-    def __init__(self):
+    def __init__(self, status_for: dict[str, str] | None = None):
         self.calls = []
+        self.status_for = status_for or {}
 
     def __call__(self, *, session, neo4j, workspace, source_root, output_root,
                  plan, story_id):
         self.calls.append({"story_id": story_id,
                            "story_ids": [i.story_id for i in plan.items]})
-        return {"stories_run": story_id or [i.story_id for i in plan.items]}
+        items = ([i for i in plan.items if i.story_id == story_id]
+                 if story_id is not None else list(plan.items))
+        return {"results": [{"story_id": i.story_id,
+                             "status": self.status_for.get(i.story_id, "passed"),
+                             "attempts": 1} for i in items]}
 
 
 def _setup(monkeypatch, tmp_path, *, has_brd=True, has_backlog=True,
-           has_domain=True, has_technical=True, make_repo_dir=True):
+           has_domain=True, has_technical=True, make_repo_dir=True,
+           status_for=None):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     if make_repo_dir:
         (tmp_path / "carddemo-mini").mkdir()
     monkeypatch.setenv("COBOL_SOURCE_ROOT", str(tmp_path))
     monkeypatch.setenv("CODEGEN_OUTPUT_DIR", str(tmp_path / "out"))
 
-    stub = _StubRun()
+    stub = _StubRun(status_for=status_for)
     monkeypatch.setattr(bs, "_run_story_build_step", stub)
 
     eng = create_engine("sqlite://", connect_args={"check_same_thread": False},
@@ -290,6 +298,48 @@ def test_post_single_story_404_unknown_story(monkeypatch, tmp_path):
         r = c.post("/api/workspaces/ws-1/build/stories/NOPE")
         assert r.status_code == 404
         assert stub.calls == []
+    finally:
+        app.dependency_overrides.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Stage gating — the stage passes ONLY when every story is acceptable          #
+# --------------------------------------------------------------------------- #
+def test_failed_story_fails_job_and_does_not_mark_stage(monkeypatch, tmp_path):
+    # US-2 fails; run_story_plan never raises, so without gating the job would end
+    # `done` and the stage `passed` — a silently broken build. Gating must fail it.
+    c, eng, tp, stub = _setup(monkeypatch, tmp_path, status_for={"US-2": "failed"})
+    from sqlalchemy import select
+    try:
+        resp = c.post("/api/workspaces/ws-1/build/stories")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["status"] == "failed"
+        assert "failed" in (body["error"] or "")
+        with Session(eng) as s:
+            assert s.execute(select(JourneyStage.status).where(
+                JourneyStage.stage_key == "build")).scalar_one() != "passed"
+        # The per-story status map is still surfaced via the job error path / GET.
+        st = c.get("/api/workspaces/ws-1/build/stories").json()
+        assert st["job"]["status"] == "failed"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_all_generated_unverified_still_passes_stage(monkeypatch, tmp_path):
+    # Toolchain-absent (mvn missing) yields generated_unverified — the degrade
+    # contract: that MUST NOT fail the build. Stage passes; job ends done.
+    c, eng, tp, stub = _setup(
+        monkeypatch, tmp_path,
+        status_for={"US-1": "generated-unverified", "US-2": "generated-unverified"})
+    from sqlalchemy import select
+    try:
+        resp = c.post("/api/workspaces/ws-1/build/stories")
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "done"
+        with Session(eng) as s:
+            assert s.execute(select(JourneyStage.status).where(
+                JourneyStage.stage_key == "build")).scalar_one() == "passed"
     finally:
         app.dependency_overrides.clear()
 
