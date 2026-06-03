@@ -4,6 +4,7 @@ is here, not the LLM). Zero LLM in the verdict/diff path; an optional Haiku
 'equivalence_triage' narrative may be attached later by the control plane."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from cobol_modernizer.equivalence.defect import build_defects
@@ -54,6 +55,21 @@ class EquivalenceLab:
             dialect=self._dialect,
             online_uses_recorded_fixtures=online_uses_recorded_fixtures)
         return LabResult(report=report, diff=diff, defects=defects)
+
+    async def run_equivalence_async(self, *, workspace_id: str, slice_name: str,
+                                    program: str, candidate_records: list[dict],
+                                    record_key: str,
+                                    online_uses_recorded_fixtures: bool) -> LabResult:
+        """Async-wrappable entrypoint: runs the SAME synchronous diff/defect/report
+        work off the event loop (via a worker thread) so the control plane can
+        `asyncio.gather` several slices under one timeout without blocking the loop.
+        The verdict + defects are identical to `run_equivalence`; the per-story
+        fan-out / timeout policy lives in the caller, not here."""
+        return await asyncio.to_thread(
+            self.run_equivalence,
+            workspace_id=workspace_id, slice_name=slice_name, program=program,
+            candidate_records=candidate_records, record_key=record_key,
+            online_uses_recorded_fixtures=online_uses_recorded_fixtures)
 
     def _latest_golden(self, workspace_id: str, slice_name: str) -> list[dict]:
         uri = self._golden_uris.get((workspace_id, slice_name))

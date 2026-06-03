@@ -25,6 +25,9 @@ from sqlalchemy.orm import Session
 from cobol_modernizer.backlog.storage import BacklogStorage
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.controlplane.gates_util import upsert_gate
+from cobol_modernizer.controlplane.verify_storage import (
+    latest_verify_report, record_verify_report,
+)
 from cobol_modernizer.equivalence.golden import InMemoryGoldenStore
 from cobol_modernizer.equivalence.lab import EquivalenceLab
 from cobol_modernizer.equivalence.seam_link import resolve_source_seam
@@ -165,8 +168,7 @@ def run_verify(*, session: Session, neo4j, workspace: Workspace,
         logger.warning("verify: story-behavior gate evaluation failed; equivalence verdict stands",
                        exc_info=True)
 
-    session.flush()
-    return {
+    payload = {
         "repo_slug": workspace.repo_slug,
         "verdict": result.report.verdict,
         "records_compared": result.report.records_compared,
@@ -174,6 +176,15 @@ def run_verify(*, session: Session, neo4j, workspace: Workspace,
         "open_questions": result.report.open_questions,
         "defects": [_serialize_defect(d) for d in result.defects],
     }
+
+    # Durable, versioned record of this verify run (max(prev)+1) so the verdict
+    # survives a refresh and GET /verify/status can replay it. Mirrors build's
+    # `_record_generated_test_refs` Artifact-versioning pattern.
+    art = record_verify_report(session, workspace_id=workspace.id,
+                               evidence_map=dict(payload))
+
+    session.flush()
+    return {**payload, "version": art.version}
 
 
 @router.post("/workspaces/{wid}/verify")
@@ -187,3 +198,36 @@ def verify_workspace(wid: str, req: VerifyRequest,
         raise
     except _NEO4J_ERRORS as exc:
         raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
+
+
+def _verify_stage_status(session: Session, wid: str) -> str | None:
+    return session.execute(
+        select(JourneyStage.status).where(JourneyStage.workspace_id == wid,
+                                          JourneyStage.stage_key == "verify")
+    ).scalars().first()
+
+
+@router.get("/workspaces/{wid}/verify/status")
+def verify_status(wid: str, session: Session = Depends(get_session)) -> dict:
+    """Replay the latest persisted `verify_report` Artifact so the verdict survives
+    a refresh (durable re-trigger). Mirrors the other `*_status` GETs: `idle` when
+    no run has been persisted, else `done` + the latest report (+ the verify stage
+    status as the gate view)."""
+    ws = _workspace(session, wid)
+    art = latest_verify_report(session, ws.id)
+    if art is None:
+        return {"status": "idle", "result": None, "error": None,
+                "started_at": None, "finished_at": None}
+    ev = art.evidence_map or {}
+    result = {
+        "version": art.version,
+        "repo_slug": ev.get("repo_slug", ws.repo_slug),
+        "verdict": ev.get("verdict"),
+        "records_compared": ev.get("records_compared"),
+        "defect_count": ev.get("defect_count"),
+        "open_questions": ev.get("open_questions"),
+        "defects": ev.get("defects", []),
+        "stage_status": _verify_stage_status(session, ws.id),
+    }
+    return {"status": "done", "result": result, "error": None,
+            "started_at": None, "finished_at": None}
