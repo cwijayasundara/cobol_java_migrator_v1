@@ -65,16 +65,32 @@ def latest_verify_report(session: Session, workspace_id: str) -> Artifact | None
 
 
 def record_equivalence_check(session: Session, *, workspace_id: str,
-                             evidence_map: dict[str, Any]) -> Artifact:
-    """Persist a versioned per-slice/story `equivalence_check` Artifact (max+1).
+                             evidence_map: dict[str, Any],
+                             story_id: str | None = None) -> Artifact:
+    """Persist a versioned per-story `equivalence_check` Artifact (max+1).
 
-    Optional scaffolding for the later per-story fan-out task; the synchronous
-    verify path does not call this (it persists a single `verify_report`)."""
+    Used by the per-story Verify fan-out: one row per story carrying that story's
+    sub-verdict (`verdict` / `defect_count` / `defects_json`). `story_id` (when
+    given) is folded into `evidence_map["story_id"]` so the row is self-describing
+    — the Artifact table keys on (workspace_id, kind, version), so the global
+    monotonic `version` (max+1) keeps every per-story row unique."""
+    ev = dict(evidence_map)
+    if story_id is not None:
+        ev.setdefault("story_id", story_id)
     version = _next_version(session, workspace_id, EQUIVALENCE_CHECK_KIND)
     art = Artifact(workspace_id=workspace_id, kind=EQUIVALENCE_CHECK_KIND,
                    version=version, object_uri="inline://equivalence_check",
-                   content_hash=_content_hash(evidence_map),
-                   evidence_map=evidence_map)
+                   content_hash=_content_hash(ev),
+                   evidence_map=ev)
     session.add(art)
     session.flush()
     return art
+
+
+def latest_equivalence_checks(session: Session, workspace_id: str) -> list[Artifact]:
+    """All `equivalence_check` Artifacts for a workspace, oldest-version first."""
+    return list(session.execute(
+        select(Artifact).where(Artifact.workspace_id == workspace_id,
+                               Artifact.kind == EQUIVALENCE_CHECK_KIND)
+        .order_by(Artifact.version)
+    ).scalars().all())
