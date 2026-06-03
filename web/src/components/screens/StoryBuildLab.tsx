@@ -1,0 +1,245 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import {
+  Boxes, Play, PlayCircle, RefreshCw, AlertTriangle, CheckCircle2,
+  FlaskConical, CircleDashed, ShieldQuestion, Ban,
+} from "lucide-react";
+import {
+  api,
+  type StoryCodegenPlan, type StoryCodegenItem,
+  type StoryStatusRecord, type StoryStatusResponse,
+} from "@/lib/api";
+import { useJob } from "@/lib/useJob";
+
+// Story-sliced codegen view (Tasks 1-7). Surfaces the deterministic story DAG
+// (GET .../build/story-plan) merged with the richer persisted per-story telemetry
+// (GET .../build/stories), and buttons to drive the background build jobs.
+//
+// `generated-unverified` (mvn/JDK absent on the host) is rendered DISTINCTLY in
+// amber so it reads as "generated but not test-verified", NOT as a real pass
+// (green) / failure (red) / blocked (grey). One status→style source of truth below.
+
+type StatusStyle = { label: string; dot: string; text: string; Icon: typeof CheckCircle2; pulse?: boolean };
+
+// Single source of truth for status → colour mapping.
+function statusStyle(raw?: string): StatusStyle {
+  switch ((raw ?? "pending").toLowerCase()) {
+    case "passed":
+      return { label: "passed", dot: "bg-emerald-500", text: "text-emerald-400", Icon: CheckCircle2 };
+    case "failed":
+      return { label: "failed", dot: "bg-red-500", text: "text-red-400", Icon: AlertTriangle };
+    case "generated-unverified":
+      return { label: "generated-unverified", dot: "bg-amber-500", text: "text-amber-400", Icon: ShieldQuestion };
+    case "blocked":
+      return { label: "blocked", dot: "bg-zinc-600", text: "text-zinc-400", Icon: Ban };
+    case "running":
+      return { label: "running", dot: "bg-indigo-500", text: "text-indigo-400", Icon: RefreshCw, pulse: true };
+    case "skipped":
+      return { label: "skipped", dot: "bg-zinc-700", text: "text-zinc-600", Icon: CircleDashed };
+    case "pending":
+    default:
+      return { label: "pending", dot: "bg-zinc-700", text: "text-zinc-500", Icon: CircleDashed };
+  }
+}
+
+// A dep is "satisfied" once it has produced code, verified or not.
+const SATISFIED = new Set(["passed", "generated-unverified", "skipped"]);
+
+export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
+  const [plan, setPlan] = useState<StoryCodegenPlan | null>(null);
+  const [statuses, setStatuses] = useState<StoryStatusResponse["stories"]>({});
+  const [error, setError] = useState<string | null>(null);
+  const [perStoryBusy, setPerStoryBusy] = useState(false);
+
+  // Fetch the deterministic plan + persisted telemetry. Defensive: either may 404
+  // before the stage has run; leave the screen in manual mode on failure.
+  const refresh = useCallback(async () => {
+    try {
+      const [p, s] = await Promise.all([
+        api.getStoryPlan(workspaceId),
+        api.getStoryStatuses(workspaceId).catch(() => null),
+      ]);
+      setPlan(p);
+      if (s) setStatuses(s.stories ?? {});
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [workspaceId]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  // Build-all: existing job-polling pattern. We poll the story-status endpoint and
+  // map to its embedded job-view; each tick also re-pulls the plan + telemetry so
+  // the table updates live, then a final refresh when the job settles.
+  const buildAll = useJob(
+    () => api.startStoryBuild(workspaceId),
+    async () => {
+      const s = await api.getStoryStatuses(workspaceId);
+      setStatuses(s.stories ?? {});
+      void refresh();
+      return { status: s.job.status, result: s.job.result, error: s.job.error };
+    },
+  );
+
+  // Merge plan item status with the (superseding) persisted status map by story_id.
+  const merged = (plan?.items ?? []).map((item) => {
+    const rec: StoryStatusRecord = statuses[item.story_id] ?? {};
+    const status = rec.status ?? item.status;
+    return { item, rec, status };
+  });
+
+  const statusOf = (id: string): string =>
+    statuses[id]?.status ?? plan?.items.find((i) => i.story_id === id)?.status ?? "pending";
+
+  // The next ready story: own status pending/failed AND every dep satisfied.
+  const nextReady = (): StoryCodegenItem | undefined =>
+    (plan?.items ?? []).find((i) => {
+      const st = (statusOf(i.story_id) || "").toLowerCase();
+      const ready = st === "pending" || st === "failed";
+      const depsOk = i.depends_on.every((d) => SATISFIED.has(statusOf(d).toLowerCase()));
+      return ready && depsOk;
+    });
+
+  const buildOne = async (storyId: string) => {
+    setPerStoryBusy(true); setError(null);
+    try {
+      await api.startStory(workspaceId, storyId);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPerStoryBusy(false);
+    }
+  };
+
+  const busy = buildAll.busy || perStoryBusy;
+  const next = nextReady();
+  // A failed story is retryable via the same per-story POST.
+  const firstFailed = (plan?.items ?? []).find(
+    (i) => (statusOf(i.story_id) || "").toLowerCase() === "failed",
+  );
+
+  return (
+    <div className="p-4 space-y-4 max-w-3xl">
+      <div className="flex items-center gap-2">
+        <Boxes className="w-4 h-4 text-indigo-400" />
+        <h3 className="text-sm font-medium text-zinc-300">Story build (per-story codegen)</h3>
+      </div>
+      <p className="text-xs text-zinc-500">
+        Drives the per-story codegen loop over the deterministic story DAG. Each story
+        is scaffolded from the technical design + BRD, patched test-first, then run.
+        <span className="text-amber-400"> generated-unverified</span> means the code was
+        generated but the toolchain (mvn/JDK) was absent — not a test failure.
+      </p>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          onClick={() => next && buildOne(next.story_id)}
+          disabled={busy || !next}
+          className="inline-flex items-center gap-2 px-4 py-2 text-sm rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40">
+          <Play className="w-4 h-4" />
+          {next ? `Build next ready story (${next.story_id})` : "Build next ready story"}
+        </button>
+        <button
+          onClick={buildAll.run}
+          disabled={busy}
+          className="inline-flex items-center gap-2 px-4 py-2 text-sm rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40">
+          <PlayCircle className="w-4 h-4" />
+          {buildAll.busy ? "Building all…" : "Build all ready stories"}
+        </button>
+        <button
+          onClick={() => firstFailed && buildOne(firstFailed.story_id)}
+          disabled={busy || !firstFailed}
+          className="inline-flex items-center gap-2 px-4 py-2 text-sm rounded bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40">
+          <RefreshCw className="w-4 h-4" />Retry failed story
+        </button>
+      </div>
+
+      {error && (
+        <div className="flex items-start gap-2 rounded-md border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span className="font-mono break-all">{error}</span>
+        </div>
+      )}
+      {buildAll.error && (
+        <div className="flex items-start gap-2 rounded-md border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span className="font-mono break-all">{buildAll.error}</span>
+        </div>
+      )}
+
+      {plan && (
+        <div className="space-y-2">
+          <div className="text-xs text-zinc-500">
+            {plan.repo_slug} · plan v{plan.version} · {plan.items.length} stor
+            {plan.items.length === 1 ? "y" : "ies"}
+          </div>
+          <ol className="space-y-1">
+            {merged.map(({ item, rec, status }) => {
+              const st = statusStyle(status);
+              const { Icon } = st;
+              return (
+                <li key={item.story_id} className="flex flex-col gap-1 border-b border-zinc-900 py-2">
+                  <div className="flex flex-wrap items-baseline gap-3 text-sm">
+                    <span className="font-mono text-zinc-200">{item.story_id}</span>
+                    <span className="text-xs text-zinc-400">{item.bounded_context}</span>
+                    <span className="text-xs text-zinc-600 font-mono">{item.service_name}</span>
+                    <span className={`inline-flex items-center gap-1 text-xs ${st.text}`}>
+                      <span className={`w-2 h-2 rounded-full ${st.dot} ${st.pulse ? "animate-pulse" : ""}`} />
+                      <Icon className={`w-3.5 h-3.5 ${st.pulse ? "animate-spin" : ""}`} />
+                      {st.label}
+                    </span>
+                    {item.depends_on.length > 0 && (
+                      <span className="text-xs text-zinc-500">after {item.depends_on.join(", ")}</span>
+                    )}
+                  </div>
+
+                  {/* AC coverage — prefer the telemetry split, fall back to the plan's ids. */}
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                    <span>AC:</span>
+                    {(rec.ac_covered ?? item.acceptance_criteria_ids).map((ac) => (
+                      <span key={ac} className="text-emerald-400 font-mono">{ac}</span>
+                    ))}
+                    {(rec.ac_missing ?? []).map((ac) => (
+                      <span key={ac} className="text-red-400 font-mono line-through">{ac}</span>
+                    ))}
+                  </div>
+
+                  {/* Per-story telemetry from the status map (rendered defensively). */}
+                  {(rec.cost_usd != null || rec.wall_time_s != null || rec.model || rec.attempts != null) && (
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-600 font-mono">
+                      {rec.cost_usd != null && <span>${rec.cost_usd.toFixed(2)}</span>}
+                      {rec.wall_time_s != null && <span>{rec.wall_time_s}s</span>}
+                      {rec.model && <span>{rec.model}</span>}
+                      {rec.attempts != null && <span>{rec.attempts} attempt{rec.attempts === 1 ? "" : "s"}</span>}
+                    </div>
+                  )}
+
+                  {rec.test_result && (
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <FlaskConical className={`w-3.5 h-3.5 shrink-0 ${st.text}`} />
+                      <span className="text-zinc-400">{rec.test_result}</span>
+                    </div>
+                  )}
+
+                  {(rec.changed_files ?? []).length > 0 && (
+                    <ul className="ml-1 space-y-0.5">
+                      {(rec.changed_files ?? []).map((f) => (
+                        <li key={f} className="font-mono text-xs text-zinc-500 break-all">{f}</li>
+                      ))}
+                    </ul>
+                  )}
+
+                  {rec.rationale && (
+                    <p className="text-xs text-zinc-600 italic">{rec.rationale}</p>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
+    </div>
+  );
+}

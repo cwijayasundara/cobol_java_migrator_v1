@@ -189,6 +189,51 @@ export interface TechnicalDesignJob {
   error: string | null;
 }
 
+// ---- story-sliced codegen (Tasks 1-7) ----
+// Deterministic story DAG + per-item codegen status (GET .../build/story-plan).
+export interface StoryCodegenItem {
+  story_id: string;
+  bounded_context: string;
+  service_name: string;
+  acceptance_criteria_ids: string[];
+  cobol_refs: string[];
+  depends_on: string[];
+  status: string;
+}
+export interface StoryCodegenPlan {
+  repo_slug: string;
+  version: number;
+  items: StoryCodegenItem[];
+}
+// Per-story build telemetry (GET .../build/stories → stories map). All fields are
+// best-effort from the backend, so every field is optional and rendered defensively.
+export interface StoryStatusRecord {
+  status?: string;
+  wall_time_s?: number;
+  model?: string;
+  token_usage?: Record<string, number>;
+  cost_usd?: number;
+  attempts?: number;
+  changed_files?: string[];
+  test_result?: string;
+  context_hash?: string;
+  ac_covered?: string[];
+  ac_missing?: string[];
+  rationale?: string;
+}
+// Job-view shared by the story-build POSTs (same shape useJob consumes).
+export interface StoryBuildJob {
+  status: JobStatus;
+  result: unknown;
+  error: string | null;
+  started_at?: number | null;
+  finished_at?: number | null;
+}
+export interface StoryStatusResponse {
+  stories: Record<string, StoryStatusRecord>;
+  job: StoryBuildJob;
+}
+
 // Answer from POST /api/workspaces/{id}/ask (grounded "ask the codebase" chat).
 export interface AskAnswer {
   answer: string;
@@ -359,4 +404,19 @@ export const api = {
     json<TechnicalDesignJob>(`/api/workspaces/${workspaceId}/technical-design`),
   technicalDesignHtmlUrl: (workspaceId: string) =>
     `/api/workspaces/${workspaceId}/technical-design/html`,
+
+  // ---- story-sliced codegen (deterministic plan + per-story background builds) ----
+  // GET the deterministic story DAG + per-item codegen status (no LLM / key needed).
+  getStoryPlan: (workspaceId: string) =>
+    json<StoryCodegenPlan>(`/api/workspaces/${workspaceId}/build/story-plan`),
+  // POST build all ready stories → 202 job-view (drive with useJob).
+  startStoryBuild: (workspaceId: string) =>
+    json<StoryBuildJob>(`/api/workspaces/${workspaceId}/build/stories`, { method: "POST" }),
+  // POST build a single story → 202 job-view (drive with useJob).
+  startStory: (workspaceId: string, storyId: string) =>
+    json<StoryBuildJob>(
+      `/api/workspaces/${workspaceId}/build/stories/${storyId}`, { method: "POST" }),
+  // GET the richer per-story telemetry map + the in-flight/last job view.
+  getStoryStatuses: (workspaceId: string) =>
+    json<StoryStatusResponse>(`/api/workspaces/${workspaceId}/build/stories`),
 };
