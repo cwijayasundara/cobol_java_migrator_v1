@@ -468,6 +468,40 @@ async def test_generated_test_refs_still_written(session, tmp_path):
     assert refs[0].evidence_map["acceptance_criteria"] == ["AC-1"]
 
 
+@pytest.mark.asyncio
+async def test_generated_test_refs_cumulative_across_stories(session, tmp_path):
+    """BUG 1 (the Verify contract): every story's `_persist` records a NEW
+    `generated_test_refs` version filtered to ITS OWN acceptance_criteria_ids. The
+    Verify story-behavior gate reads the SINGLE LATEST version and checks it against
+    ALL stories' ACs. So the latest version MUST hold the UNION of every story's ACs,
+    not just the last story's — otherwise a perfectly-built multi-story run reports
+    "missing generated tests" for every story but the last and the gate fails.
+
+    Drive the REAL run_story_plan (no stub) for a 2-story plan with injected non-LLM
+    seams (canned JUnit citing each story's AC + green run_tests), then assert the
+    latest version's acceptance_criteria == the UNION {AC-1, AC-2}."""
+    items = [_item("US-1", ac_ids=("AC-1",)), _item("US-2", ac_ids=("AC-2",))]
+    packs = {it.story_id: _pack(it) for it in items}
+    statuses = itertools.cycle([StoryTestStatus.tests_failed, StoryTestStatus.ok])
+
+    def run(module_dir, target, **k):
+        return _result(next(statuses))
+
+    results = await run_story_plan(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
+        run_tests=run, now=_clock())
+    assert all(r.status == StoryCodegenStatus.passed for r in results)
+
+    refs = session.execute(
+        select(Artifact).where(Artifact.kind == "generated_test_refs")
+    ).scalars().all()
+    latest = max(refs, key=lambda a: a.version)
+    # The LATEST version (what Verify reads) must hold BOTH stories' ACs.
+    assert set(latest.evidence_map["acceptance_criteria"]) == {"AC-1", "AC-2"}
+
+
 # --------------------------------------------------------------------------- #
 # Telemetry                                                                  #
 # --------------------------------------------------------------------------- #
@@ -522,6 +556,65 @@ async def test_run_story_plan_runs_in_order(session, tmp_path):
         gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
         run_tests=run, now=_clock())
     assert [r.story_id for r in results] == ["US-1", "US-2"]
+    assert seen == ["US-1", "US-2"]
+    assert all(r.status == StoryCodegenStatus.passed for r in results)
+
+
+@pytest.mark.asyncio
+async def test_run_story_plan_threads_completed_summaries(session, tmp_path):
+    """BUG 2: `run_story_plan` accumulates already-built story summaries and threads
+    them into LATER stories' context (so the "Completed Dependencies" pack section is
+    actually populated). A two-arg `context_pack_for(item, completed_summaries)`
+    receives the running list: empty for the first story, the first story's summary for
+    the second."""
+    items = [_item("US-1"), _item("US-2")]
+    seen: list[tuple[str, list[str]]] = []
+
+    def context_pack_for(it, completed_summaries):
+        seen.append((it.story_id, list(completed_summaries)))
+        return build_story_context(
+            it,
+            story=UserStory(
+                id=it.story_id, epic_id="E-1", actor="user", title="t",
+                narrative="n", context="Posting",
+                acceptance_criteria=[AcceptanceCriterion(id=a, statement=f"c {a}")
+                                     for a in it.acceptance_criteria_ids]),
+            service=None, aggregate=None, brd_requirements=[],
+            completed_summaries=completed_summaries, source_pack="COBOL HERE")
+
+    statuses = itertools.cycle([StoryTestStatus.tests_failed, StoryTestStatus.ok])
+
+    def run(module_dir, target, **k):
+        return _result(next(statuses))
+
+    await run_story_plan(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=context_pack_for, runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
+        run_tests=run, now=_clock())
+    # First story: no completed deps. Second story: US-1's summary is threaded in.
+    assert seen[0] == ("US-1", [])
+    assert seen[1][0] == "US-2"
+    assert len(seen[1][1]) == 1 and "US-1" in seen[1][1][0]
+
+
+@pytest.mark.asyncio
+async def test_run_story_plan_supports_legacy_single_arg_callback(session, tmp_path):
+    """The completed-summaries threading is backward compatible: a legacy single-arg
+    `context_pack_for(item)` callback still works (it just doesn't receive summaries)."""
+    items = [_item("US-1"), _item("US-2")]
+    seen: list[str] = []
+
+    def context_pack_for(it):  # single-arg legacy contract
+        seen.append(it.story_id)
+        return _pack(it)
+
+    statuses = itertools.cycle([StoryTestStatus.tests_failed, StoryTestStatus.ok])
+    results = await run_story_plan(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=context_pack_for, runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
+        run_tests=lambda md, t, **k: _result(next(statuses)), now=_clock())
     assert seen == ["US-1", "US-2"]
     assert all(r.status == StoryCodegenStatus.passed for r in results)
 

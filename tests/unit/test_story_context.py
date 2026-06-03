@@ -279,9 +279,15 @@ def test_hash_uses_pre_truncation_content():
     assert a.context_hash != b.context_hash
 
 
-def test_changing_completed_summaries_changes_hash():
+def test_changing_completed_summaries_does_not_change_hash():
+    # `completed_summaries` is DERIVED run context (the running list of already-built
+    # dependency stories the plan loop threads in), NOT a primary spec input. It is
+    # deliberately EXCLUDED from the context_hash so resume stays stable: if it were
+    # hashed, the hash would shift on every run as earlier stories complete and
+    # `budget.should_skip` would never skip an unchanged-spec story.
     base = _build().context_hash
-    assert _build(completed_summaries=["US-0: something else."]).context_hash != base
+    assert _build(completed_summaries=["US-0: something else."]).context_hash == base
+    assert _build(completed_summaries=[]).context_hash == base
 
 
 if __name__ == "__main__":

@@ -161,6 +161,13 @@ def build_story_context(
     The `context_hash` is computed over the REAL (pre-truncation) content so it
     changes only when BRD/story/DDD/technical/COBOL-evidence content changes,
     never merely because rendering truncated.
+
+    `completed_summaries` is DELIBERATELY excluded from `context_hash`: it is derived
+    RUN context (the running list of already-built dependency stories, which the
+    plan-level loop threads in as it iterates), not a primary spec input. Including it
+    would shift the hash on every run as earlier stories complete, defeating resume —
+    `budget.should_skip` would never skip an unchanged-spec story. The summaries still
+    appear in the rendered prompt; they just don't define a story's identity.
     """
     acceptance = [ac.statement for ac in story.acceptance_criteria]
 
@@ -180,7 +187,6 @@ def build_story_context(
         title=story.title,
         narrative=story.narrative,
         acceptance=acceptance,
-        completed_summaries=summaries,
         aggregate_name=aggregate_name,
         invariants=invariants,
         methods=methods,

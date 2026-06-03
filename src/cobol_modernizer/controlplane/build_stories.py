@@ -202,6 +202,21 @@ def _brd_req_strings(brd_node: dict | None) -> list[str]:
     return out
 
 
+def _module_file_index(module_dir: Path) -> list[str]:
+    """The scaffolded module's relative file paths, shown to the model as the
+    `project_index` so it can SEE the scaffolded layout (`_project_index_section`
+    renders it). Bounded to the scaffold's own source/config files; deterministic
+    (sorted). Empty when the dir does not yet exist (defensive)."""
+    root = Path(module_dir)
+    if not root.is_dir():
+        return []
+    out: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            out.append(str(path.relative_to(root)))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Injectable heavy step (default = real scaffold + slice-pack + run_story_plan) #
 # --------------------------------------------------------------------------- #
@@ -236,9 +251,13 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
     items = list(plan.items)
     if story_id is not None:
         items = [i for i in items if i.story_id == story_id]
-    completed: list[str] = []
 
-    def _context_pack_for(item: StoryCodegenItem):
+    def _context_pack_for(item: StoryCodegenItem,
+                          completed_summaries: list[str]):
+        # `completed_summaries` is the running list of already-built stories, threaded
+        # in by `run_story_plan` as it iterates (so the "Completed Dependencies" pack
+        # section is actually populated — it is NOT part of the story's context_hash,
+        # so this does not destabilize resume).
         story = story_by_id[item.story_id]
         service = _service_for_item(technical, item)
         aggregate = _aggregate_for_context(domain, item.bounded_context)
@@ -254,15 +273,14 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
             max_chars=int(os.environ.get("CODEGEN_PACK_MAX_CHARS", "60000")))
         return build_story_context(
             item, story=story, service=service, aggregate=aggregate,
-            brd_requirements=brd_reqs, completed_summaries=list(completed),
+            brd_requirements=brd_reqs, completed_summaries=list(completed_summaries),
             source_pack=pack)
 
     runner = SdkAgentRunner()
     results = asyncio.run(run_story_plan(
         items, session=session, workspace_id=workspace.id, module_dir=module_dir,
-        context_pack_for=_context_pack_for, runner=runner))
-    for r in results:
-        completed.append(r.story_id)
+        context_pack_for=_context_pack_for, runner=runner,
+        project_index=_module_file_index(module_dir)))
     return {
         "repo_slug": slug, "module_dir": str(module_dir),
         "story_id": story_id, "story_count": len(items),

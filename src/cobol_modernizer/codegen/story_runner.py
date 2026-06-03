@@ -27,6 +27,7 @@ the injected runner's `.token_usage`/`.cost_usd`; wall time uses an injectable
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 import time
@@ -443,13 +444,41 @@ def _persist(session, *, workspace_id: str, item: StoryCodegenItem,
 # --------------------------------------------------------------------------- #
 # Plan-level iteration                                                        #
 # --------------------------------------------------------------------------- #
+def _summary_line(item: StoryCodegenItem, out: StoryRunResult) -> str:
+    """A short, deterministic one-liner summarizing a just-completed story, used as the
+    dependency context for stories built later in the plan. Kept terse on purpose — the
+    downstream pack only needs to know WHAT was built and its outcome, not the full
+    telemetry."""
+    return f"{item.story_id} [{out.status.value}]"
+
+
+def _call_context_pack_for(
+    context_pack_for: Callable[..., StoryContextPack],
+    item: StoryCodegenItem, completed_summaries: list[str],
+) -> StoryContextPack:
+    """Invoke the caller's `context_pack_for`, threading the running
+    `completed_summaries` when the callback accepts a second argument. Legacy
+    single-arg callbacks (`lambda item: ...`) are still supported — they simply don't
+    receive the summaries — so existing callers/tests need no change."""
+    try:
+        params = inspect.signature(context_pack_for).parameters
+        arity = len([p for p in params.values()
+                     if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
+        accepts_varargs = any(p.kind == p.VAR_POSITIONAL for p in params.values())
+    except (TypeError, ValueError):  # builtins / un-introspectable callables
+        arity, accepts_varargs = 1, False
+    if arity >= 2 or accepts_varargs:
+        return context_pack_for(item, completed_summaries)
+    return context_pack_for(item)
+
+
 async def run_story_plan(
     items: list[StoryCodegenItem],
     *,
     session,
     workspace_id: str,
     module_dir: Path,
-    context_pack_for: Callable[[StoryCodegenItem], StoryContextPack],
+    context_pack_for: Callable[..., StoryContextPack],
     runner: AgentRunner,
     model: str = "sonnet",
     project_index: list[str] | None = None,
@@ -466,15 +495,27 @@ async def run_story_plan(
     shared module dir, so by the end the Verify gate sees every cited AC. A story that
     raises is recorded `failed` and does NOT abort the plan — the loop continues.
 
+    As it iterates, the loop accumulates a running list of completed-story summaries
+    (one terse line per finished story, ANY outcome) and threads it into the per-story
+    context: `context_pack_for(item, completed_summaries)` when the callback accepts a
+    second argument (legacy single-arg callbacks still work and just don't get them).
+    This is what makes the "Completed Dependencies" pack section actually populate.
+    `completed_summaries` is intentionally NOT part of the story's `context_hash` (it's
+    derived run context), so threading it does not destabilize resume.
+
     NOTE: every story writes into the SAME `module_dir`; path-uniqueness of generated
     files across stories is the CALLER/scaffold's responsibility — a later story
     emitting an already-used path silently overwrites the earlier file."""
     results: list[StoryRunResult] = []
+    completed_summaries: list[str] = []
     for item in items:
-        pack = context_pack_for(item)
-        results.append(await run_story(
+        pack = _call_context_pack_for(context_pack_for, item,
+                                      list(completed_summaries))
+        out = await run_story(
             item, session=session, workspace_id=workspace_id,
             module_dir=module_dir, context_pack=pack, runner=runner, model=model,
             project_index=project_index, gen_tests=gen_tests, gen_impl=gen_impl,
-            run_tests=run_tests, now=now, repair_max_attempts=repair_max_attempts))
+            run_tests=run_tests, now=now, repair_max_attempts=repair_max_attempts)
+        results.append(out)
+        completed_summaries.append(_summary_line(item, out))
     return results

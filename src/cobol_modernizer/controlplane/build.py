@@ -96,17 +96,33 @@ def scan_generated_test_refs(project_dir, acceptance_criteria_ids: list[str]) ->
 def _record_generated_test_refs(session: Session, *, workspace_id: str, project_dir,
                                 acceptance_criteria_ids: list[str]) -> None:
     """Persist which acceptance-criterion ids the generated tests cite, as a
-    versioned Artifact the Verify stage's story-behavior gate reads."""
+    versioned Artifact the Verify stage's story-behavior gate reads.
+
+    The new version is CUMULATIVE: the newly-scanned refs are UNIONed with the prior
+    latest version's `acceptance_criteria`, so the latest row is always the accumulated
+    set across every story built so far. The story path calls this ONCE PER STORY
+    (`story_runner._persist`) scoped to that story's AC ids; without the merge, each
+    new version would hold ONLY the last story's ACs, and the Verify story-behavior
+    gate — which reads the single latest version and checks it against ALL stories' ACs
+    — would report "missing generated tests" for every story but the last and fail a
+    perfectly-built run. The merge is also harmless to the legacy `run_build` path: on a
+    fresh build prior is empty so union == today's scan; a re-run merges forward
+    idempotently. Single-story `POST /build/stories/{id}` builds accumulate likewise."""
     refs = scan_generated_test_refs(project_dir, acceptance_criteria_ids)
     prev = session.execute(
         select(Artifact).where(Artifact.workspace_id == workspace_id,
                                Artifact.kind == "generated_test_refs")
     ).scalars().all()
     version = max((a.version for a in prev), default=0) + 1
+    prior_refs: list[str] = []
+    if prev:
+        latest = max(prev, key=lambda a: a.version)
+        prior_refs = (latest.evidence_map or {}).get("acceptance_criteria", []) or []
+    merged = sorted(set(refs) | set(prior_refs))
     session.add(Artifact(workspace_id=workspace_id, kind="generated_test_refs",
                          version=version, object_uri="inline://generated_test_refs",
                          content_hash="sha256:refs",
-                         evidence_map={"acceptance_criteria": refs}))
+                         evidence_map={"acceptance_criteria": merged}))
     session.flush()
 
 
