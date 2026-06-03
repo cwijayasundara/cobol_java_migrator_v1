@@ -101,11 +101,24 @@ def run_technical_design(*, session: Session, neo4j, workspace: Workspace,
     # (NO truncation — the legacy 200-ref prompt cap is gone). We pass the FULL
     # `known_refs` so it can compute per-context relevance and so grounding in
     # `parse_technical_design_payload` below sees every known ref.
+    #
+    # NO single outer 300s wall: `timeout_s` here is the PER-CONTEXT budget (the
+    # decomposed path uses it only as the default for TECH_DESIGN_CONTEXT_TIMEOUT_S,
+    # and each unit retries with escalation TECH_DESIGN_UNIT_ATTEMPTS times). It does
+    # NOT cap the whole multi-context orchestration — the orchestrator never wraps its
+    # fan-out gather in a single asyncio wall, and the JobRunner lets the long job run
+    # to completion, so a slow-but-progressing design is never killed mid-flight. We
+    # read TECH_DESIGN_CONTEXT_TIMEOUT_S first (falling back to the legacy
+    # TECHNICAL_DESIGN_TIMEOUT_S, then 300s) so the knob name reflects the new
+    # per-context contract.
+    per_context_timeout_s = float(
+        os.environ.get("TECH_DESIGN_CONTEXT_TIMEOUT_S")
+        or os.environ.get("TECHNICAL_DESIGN_TIMEOUT_S", "300"))
     gen = generate or generate_technical_design_result
     result: EnrichmentResult = asyncio.run(
         gen(runner=SdkAgentRunner(),
             model=os.environ.get("TECHNICAL_DESIGN_MODEL", _DEFAULT_MODEL),
-            timeout_s=float(os.environ.get("TECHNICAL_DESIGN_TIMEOUT_S", "300")),
+            timeout_s=per_context_timeout_s,
             max_turns=int(os.environ.get("TECHNICAL_DESIGN_MAX_TURNS", "6")),
             contexts=contexts, stories=stories, seam_waves=seam_waves,
             known_refs=sorted(known_refs), known_story_ids=sorted(known_story_ids)))
