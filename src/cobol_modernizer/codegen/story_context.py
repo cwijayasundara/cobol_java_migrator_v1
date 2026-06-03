@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 
 from pydantic import BaseModel, Field
@@ -29,6 +30,8 @@ from cobol_modernizer.backlog.schema import UserStory
 from cobol_modernizer.codegen.story_plan import StoryCodegenItem
 from cobol_modernizer.domain.schema import Aggregate
 from cobol_modernizer.technical_design.schema import TechnicalService
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_CHARS = 24000
 DEFAULT_SOURCE_MAX_CHARS = 12000
@@ -62,14 +65,14 @@ class StoryContextPack(BaseModel):
 
     context_hash: str = ""
 
-    max_chars: int = DEFAULT_MAX_CHARS
-    source_max_chars: int = DEFAULT_SOURCE_MAX_CHARS
+    max_chars: int | None = None
+    source_max_chars: int | None = None
 
     def render(self) -> str:
         """Render the bounded prompt text. The COBOL source section is capped at
         `source_max_chars`, then the whole assembled pack is capped at
-        `max_chars`. Both honour env overrides unless explicit limits were
-        supplied at build time."""
+        `max_chars`. For each limit: an explicit build-time value wins; else an
+        env override; else the default."""
         max_chars = _resolve_limit(
             self.max_chars, DEFAULT_MAX_CHARS, "STORY_CONTEXT_MAX_CHARS"
         )
@@ -81,17 +84,21 @@ class StoryContextPack(BaseModel):
         return _render_text(self, max_chars=max_chars, source_max_chars=source_max)
 
 
-def _resolve_limit(explicit: int, default: int, env_var: str) -> int:
-    """Explicit non-default build-time value wins; else env override; else
-    default."""
-    if explicit != default:
+def _resolve_limit(explicit: int | None, default: int, env_var: str) -> int:
+    """Explicit build-time value wins; else env override; else default."""
+    if explicit is not None:
         return explicit
     raw = os.environ.get(env_var)
     if raw is not None:
         try:
             return int(raw)
         except ValueError:
-            pass
+            logger.warning(
+                "Ignoring non-integer %s=%r; using default %d",
+                env_var,
+                raw,
+                default,
+            )
     return default
 
 
@@ -105,24 +112,26 @@ def _truncate(text: str, limit: int) -> str:
 
 def _api_lines(service: TechnicalService) -> list[str]:
     lines: list[str] = []
-    for c in service.api_contracts:
-        line = f"{c.method} {c.path} ({c.name})"
-        if c.request_model or c.response_model:
-            line += f" req={c.request_model} resp={c.response_model}"
-        if c.details:
-            line += f" - {c.details}"
+    for contract in service.api_contracts:
+        line = f"{contract.method} {contract.path} ({contract.name})"
+        if contract.request_model or contract.response_model:
+            line += (
+                f" req={contract.request_model} resp={contract.response_model}"
+            )
+        if contract.details:
+            line += f" - {contract.details}"
         lines.append(line)
     return lines
 
 
 def _persistence_lines(service: TechnicalService) -> list[str]:
     lines: list[str] = []
-    for p in service.persistence:
-        line = f"{p.resource} [{p.access_pattern}]"
-        if p.owner_service:
-            line += f" owner={p.owner_service}"
-        if p.details:
-            line += f" - {p.details}"
+    for persistence in service.persistence:
+        line = f"{persistence.resource} [{persistence.access_pattern}]"
+        if persistence.owner_service:
+            line += f" owner={persistence.owner_service}"
+        if persistence.details:
+            line += f" - {persistence.details}"
         lines.append(line)
     return lines
 
@@ -136,8 +145,8 @@ def build_story_context(
     brd_requirements: list[str],
     completed_summaries: list[str],
     source_pack: str,
-    max_chars: int = DEFAULT_MAX_CHARS,
-    source_max_chars: int = DEFAULT_SOURCE_MAX_CHARS,
+    max_chars: int | None = None,
+    source_max_chars: int | None = None,
 ) -> StoryContextPack:
     """Build the per-story context pack for a single `StoryCodegenItem`.
 

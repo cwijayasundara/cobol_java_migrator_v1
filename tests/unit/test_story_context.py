@@ -4,6 +4,7 @@ import pytest
 
 from cobol_modernizer.backlog.schema import AcceptanceCriterion, UserStory
 from cobol_modernizer.codegen.story_context import (
+    DEFAULT_MAX_CHARS,
     StoryContextPack,
     build_story_context,
 )
@@ -205,6 +206,23 @@ def test_explicit_args_override_env(monkeypatch):
     pack = _build(brd_requirements=["q" * 100000], max_chars=300)
     text = pack.render()
     assert len(text) <= 300
+
+
+def test_explicit_default_value_overrides_env(monkeypatch):
+    # Pinning max_chars to exactly the default must still win over a differing
+    # env override (sentinel-None distinguishes "pinned" from "unset").
+    monkeypatch.setenv("STORY_CONTEXT_MAX_CHARS", "500")
+    pack = _build(brd_requirements=["w" * 100000], max_chars=DEFAULT_MAX_CHARS)
+    text = pack.render()
+    assert 500 < len(text) <= DEFAULT_MAX_CHARS
+
+
+def test_non_integer_env_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("STORY_CONTEXT_MAX_CHARS", "abc")
+    pack = _build(brd_requirements=["v" * 100000])
+    text = pack.render()
+    assert len(text) <= DEFAULT_MAX_CHARS
+    assert len(text) > 500
 
 
 # -- Step 3: stable hashing ---------------------------------------------------
