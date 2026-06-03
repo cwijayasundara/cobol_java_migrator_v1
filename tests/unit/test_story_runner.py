@@ -11,12 +11,14 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from cobol_modernizer.codegen.budget import StoryBudget
 from cobol_modernizer.codegen.schema import GeneratedFile
 from cobol_modernizer.codegen.story_context import build_story_context
 from cobol_modernizer.codegen.patch_agent import StoryPatch
 from cobol_modernizer.codegen.story_plan import StoryCodegenItem, StoryCodegenStatus
-from cobol_modernizer.codegen.story_runner import run_story, run_story_plan
+from cobol_modernizer.codegen.budget import BuildBudget, StoryBudget
+from cobol_modernizer.codegen.story_runner import (
+    run_story, run_story_plan, run_story_plan_until_done,
+)
 from cobol_modernizer.codegen.story_storage import (
     STORY_CODEGEN_STATUS_KIND, get_status_map, get_story_record,
 )
@@ -971,3 +973,284 @@ async def test_waves_persist_and_merge_like_sequential(session, tmp_path):
     assert set(m) == {"US-1", "US-2", "US-3"}
     for sid in ("US-1", "US-2", "US-3"):
         assert get_story_record(session, "ws1", sid)["status"] == "passed"
+
+
+# --------------------------------------------------------------------------- #
+# Repeat-until-done OUTER loop + pass-with-deferred + pooled budget            #
+# --------------------------------------------------------------------------- #
+def _story_id_from_target(target):
+    """Recover the story id from a targeted test class name `PostUS-NTest`."""
+    return target.replace("Post", "").replace("Test", "")
+
+
+def _per_story_run_tests(red_passes_by_story):
+    """A run_tests stub keyed on the targeted story id. `red_passes_by_story` maps a
+    story id -> how many GREEN passes still need to RED before it goes green. Every call
+    consumes one: while the story's remaining-red count > 0 it returns tests_failed (and
+    decrements); at 0 it returns ok. A story absent from the map is green immediately."""
+    state = dict(red_passes_by_story)
+    calls = {"by_story": {}}
+
+    def run(module_dir, target, **k):
+        sid = _story_id_from_target(target)
+        calls["by_story"][sid] = calls["by_story"].get(sid, 0) + 1
+        remaining = state.get(sid, 0)
+        if remaining > 0:
+            state[sid] = remaining - 1
+            return _result(StoryTestStatus.tests_failed)
+        return _result(StoryTestStatus.ok)
+
+    run.calls = calls
+    return run
+
+
+@pytest.mark.asyncio
+async def test_until_done_all_pass_single_pass(session, tmp_path):
+    """Happy path: every story passes on pass 1, so the loop runs exactly ONE pass."""
+    items = [_dep_item("US-1"), _dep_item("US-2")]
+    packs = {it.story_id: _pack(it) for it in items}
+    passes = {"count": 0}
+    iters: dict[str, object] = {}
+
+    def run(module_dir, target, **k):
+        sid = _story_id_from_target(target)
+        if sid not in iters:
+            iters[sid] = iter([StoryTestStatus.tests_failed, StoryTestStatus.ok])
+        return _result(next(iters[sid]))
+
+    def on_pass(failed):
+        passes["count"] += 1
+
+    results = await run_story_plan_until_done(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
+        run_tests=run, now=_clock(), on_pass=on_pass)
+    assert {r.story_id: r.status for r in results} == {
+        "US-1": StoryCodegenStatus.passed, "US-2": StoryCodegenStatus.passed}
+    assert passes["count"] == 1  # no retry passes
+
+
+@pytest.mark.asyncio
+async def test_until_done_failing_then_passing_story_reruns_only_it(session, tmp_path):
+    """US-2 fails pass 1 but passes pass 2; US-1 passes pass 1. The loop re-runs ONLY
+    US-2 on pass 2 (US-1 is accepted and not re-touched) and US-2 ends accepted."""
+    items = [_dep_item("US-1"), _dep_item("US-2")]
+    packs = {it.story_id: _pack(it) for it in items}
+    # Per-story: each gen-impl pass triggers one run_tests (after the red baseline).
+    # US-1 goes green immediately. US-2 stays red through its whole FIRST run_story
+    # (baseline + impl + repairs all red) so pass 1 -> failed, then green on pass 2.
+    seq = {
+        "US-1": iter([StoryTestStatus.tests_failed, StoryTestStatus.ok,
+                      StoryTestStatus.ok]),
+        # pass1: red baseline + impl-red + repair-red(x2) -> failed
+        # pass2: red baseline + impl-GREEN
+        "US-2": iter([StoryTestStatus.tests_failed, StoryTestStatus.tests_failed,
+                      StoryTestStatus.tests_failed, StoryTestStatus.tests_failed,
+                      StoryTestStatus.tests_failed, StoryTestStatus.tests_failed,
+                      StoryTestStatus.tests_failed, StoryTestStatus.ok]),
+    }
+    reran: dict[str, int] = {}
+
+    def context_pack_for(it):
+        reran[it.story_id] = reran.get(it.story_id, 0) + 1
+        return packs[it.story_id]
+
+    def run(module_dir, target, **k):
+        sid = _story_id_from_target(target)
+        return _result(next(seq[sid]))
+
+    results = await run_story_plan_until_done(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=context_pack_for, runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
+        run_tests=run, repair_max_attempts=2, now=_clock())
+    by = {r.story_id: r.status for r in results}
+    assert by["US-1"] == StoryCodegenStatus.passed
+    assert by["US-2"] == StoryCodegenStatus.passed
+    # US-1 built once; US-2 re-run on pass 2 -> its context_pack_for called twice.
+    assert reran["US-1"] == 1
+    assert reran["US-2"] == 2
+    # Final-result ordering preserved (plan order).
+    assert [r.story_id for r in results] == ["US-1", "US-2"]
+
+
+@pytest.mark.asyncio
+async def test_until_done_permanent_failure_becomes_deferred_and_terminates(
+        session, tmp_path):
+    """A story that NEVER goes green is marked `deferred` after BUILD_MAX_STORY_ATTEMPTS
+    passes, the loop TERMINATES (bounded pass count, no infinite loop), and the other
+    story is unaffected (passes pass 1, never re-run)."""
+    items = [_dep_item("US-1"), _dep_item("US-2")]
+    packs = {it.story_id: _pack(it) for it in items}
+    pass_count = {"n": 0}
+    built: dict[str, int] = {}
+
+    def context_pack_for(it):
+        built[it.story_id] = built.get(it.story_id, 0) + 1
+        return packs[it.story_id]
+
+    def run(module_dir, target, **k):
+        sid = _story_id_from_target(target)
+        if sid == "US-1":
+            # red baseline then green
+            it = run._g.setdefault(
+                sid, iter([StoryTestStatus.tests_failed, StoryTestStatus.ok]))
+            try:
+                return _result(next(it))
+            except StopIteration:
+                return _result(StoryTestStatus.ok)
+        # US-2 is ALWAYS red.
+        return _result(StoryTestStatus.tests_failed)
+    run._g = {}
+
+    def on_pass(failed):
+        pass_count["n"] += 1
+
+    results = await run_story_plan_until_done(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=context_pack_for, runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
+        run_tests=run, repair_max_attempts=0, max_story_attempts=3, now=_clock(),
+        on_pass=on_pass)
+    by = {r.story_id: r.status for r in results}
+    assert by["US-1"] == StoryCodegenStatus.passed
+    assert by["US-2"] == StoryCodegenStatus.deferred  # exhausted, not a hard error
+    # Bounded: never more than BUILD_MAX_STORY_ATTEMPTS passes (terminates — no
+    # infinite loop). The exact count may be smaller (no-progress can stop it earlier).
+    assert pass_count["n"] <= 3
+    assert pass_count["n"] >= 1
+    # US-1 built exactly once (accepted on pass 1; NOT re-run on US-2's retries).
+    assert built["US-1"] == 1
+    # US-2 re-run at least once (the loop did retry the failing story).
+    assert built["US-2"] >= 2
+    # Deferred is DURABLE and NOT in the accepted set.
+    rec = get_story_record(session, "ws1", "US-2")
+    assert rec["status"] == "deferred"
+
+
+@pytest.mark.asyncio
+async def test_until_done_no_progress_pass_stops_the_loop(session, tmp_path):
+    """If a retry pass yields NO newly-accepted story (no progress), the loop stops even
+    though attempts remain — and the stuck story is deferred. Pass count is bounded by
+    no-progress, not by exhausting the full attempt cap."""
+    items = [_dep_item("US-1")]
+    packs = {it.story_id: _pack(it) for it in items}
+    pass_count = {"n": 0}
+
+    def run(module_dir, target, **k):
+        return _result(StoryTestStatus.tests_failed)  # always red
+
+    def on_pass(failed):
+        pass_count["n"] += 1
+
+    results = await run_story_plan_until_done(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
+        run_tests=run, repair_max_attempts=0, max_story_attempts=5, now=_clock(),
+        on_pass=on_pass)
+    assert results[0].status == StoryCodegenStatus.deferred
+    # No-progress: pass 1 built nothing new, so the loop stopped after ~2 passes (the
+    # first pass + one confirming no-progress pass) — well under the attempt cap of 5.
+    assert pass_count["n"] <= 2
+
+
+@pytest.mark.asyncio
+async def test_until_done_pool_exhaustion_stops_new_attempts(session, tmp_path):
+    """When the pooled token budget is exhausted, the loop stops spawning NEW retry
+    passes (no runaway) and the still-failing story is deferred — even though attempts
+    remained. Each pass burns tokens on the shared FakeRunner-driven gen seams."""
+    items = [_dep_item("US-1")]
+    packs = {it.story_id: _pack(it) for it in items}
+    pass_count = {"n": 0}
+
+    async def gen_impl(**kwargs):
+        # Burn a big chunk of the pool every impl pass.
+        kwargs["runner"].token_usage["output"] += 400
+        return _impl_patch(story_id=kwargs["item"].story_id,
+                           cobol_refs=tuple(kwargs["item"].cobol_refs))
+
+    def run(module_dir, target, **k):
+        return _result(StoryTestStatus.tests_failed)  # always red
+
+    def on_pass(failed):
+        pass_count["n"] += 1
+
+    # Pass 1 burns 400 tokens; the pool (300) is then exhausted, so the outer loop must
+    # stop spawning NEW attempts BEFORE pass 2. Per-story cap kept generous so the
+    # per-story gate isn't what stops it — the POOL is.
+    build_budget = BuildBudget(max_pool_tokens=300, per_story_max_tokens=1_000_000)
+    results = await run_story_plan_until_done(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=gen_impl,
+        run_tests=run, repair_max_attempts=0, max_story_attempts=10,
+        build_budget=build_budget, now=_clock(), on_pass=on_pass)
+    assert results[0].status == StoryCodegenStatus.deferred
+    # The pool exhausted after the first pass, so NO runaway: only the single pass ran.
+    assert pass_count["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_until_done_threads_per_story_cap_into_run_story(session, tmp_path):
+    """The pooled budget's retained per-story cap is threaded into each story's run so a
+    single story can't exceed it. Here a tiny per-story cap stops the repair loop early
+    (attempts < repair_max_attempts + 1) and the story ends failed/deferred — proving
+    the cap reached run_story."""
+    items = [_dep_item("US-1")]
+    packs = {it.story_id: _pack(it) for it in items}
+
+    async def gen_impl(**kwargs):
+        kwargs["runner"].token_usage["output"] += 1000  # over the 500 per-story cap
+        return _impl_patch(story_id=kwargs["item"].story_id,
+                           cobol_refs=tuple(kwargs["item"].cobol_refs))
+
+    def run(module_dir, target, **k):
+        return _result(StoryTestStatus.tests_failed)  # always red
+
+    captured: list[int] = []
+    orig = StoryBudget.exceeded
+
+    def spy_exceeded(self, *, tokens_used, wall_s):
+        captured.append(self.max_tokens)
+        return orig(self, tokens_used=tokens_used, wall_s=wall_s)
+
+    # Generous pool so it's the PER-STORY cap (500), not the pool, that bites.
+    build_budget = BuildBudget(max_pool_tokens=10_000_000, per_story_max_tokens=500,
+                               per_story_repair_attempts=5)
+    import unittest.mock as _mock
+    with _mock.patch.object(StoryBudget, "exceeded", spy_exceeded):
+        results = await run_story_plan_until_done(
+            items, session=session, workspace_id="ws1", module_dir=tmp_path,
+            context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
+            gen_tests=_make_gen_tests(), gen_impl=gen_impl, run_tests=run,
+            repair_max_attempts=5, max_story_attempts=1,
+            build_budget=build_budget, now=_clock())
+    # run_story consulted a StoryBudget carrying the retained per-story cap (500).
+    assert 500 in captured
+    # Single pass, attempt cap of 1 -> deferred (never accepted, exhausted attempts).
+    assert results[0].status == StoryCodegenStatus.deferred
+
+
+@pytest.mark.asyncio
+async def test_until_done_already_accepted_not_in_failed_set(session, tmp_path):
+    """generated-unverified (accepted-but-unverified) stories are NOT re-run by the outer
+    loop — they're accepted, so a toolchain-absent run converges in one pass."""
+    items = [_dep_item("US-1")]
+    packs = {it.story_id: _pack(it) for it in items}
+    pass_count = {"n": 0}
+
+    def run(module_dir, target, **k):
+        return _result(StoryTestStatus.toolchain_unavailable)
+
+    def on_pass(failed):
+        pass_count["n"] += 1
+
+    results = await run_story_plan_until_done(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
+        run_tests=run, now=_clock(), on_pass=on_pass)
+    assert results[0].status == StoryCodegenStatus.generated_unverified
+    assert pass_count["n"] == 1  # accepted -> no retry pass
