@@ -356,3 +356,145 @@ def test_fanout_409_without_golden_preserved():
         }).status_code == 409
     finally:
         app.dependency_overrides.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Decompose-further repeat-until-done (localize defects)
+# --------------------------------------------------------------------------- #
+
+_SCALE_TOL = ("record: ACCT-RECORD\ndefault:\n  matcher: exact\n"
+              "rules:\n  - field: BAL\n    matcher: numeric_scale\n    scale: 2\n")
+
+# Two programs in one slice; only CBACT01C's record actually drifts at BAL.
+_TWO_PROGRAM_GOLDEN = [
+    {"program": "CBPOST1M", "ID": "1", "BAL": "100.00"},
+    {"program": "CBACT01C", "ID": "2", "BAL": "200.00"},
+]
+_TWO_PROGRAM_CANDIDATE_ONE_BAD = [
+    {"program": "CBPOST1M", "ID": "1", "BAL": "100.00"},   # this program is fine
+    {"program": "CBACT01C", "ID": "2", "BAL": "200.50"},   # this one drifts
+]
+
+
+def test_decompose_localizes_the_single_failing_subslice():
+    # The story fails as a WHOLE (one of two programs drifts), but decompose
+    # splits per program and pins the failure to CBACT01C; CBPOST1M passes.
+    stories = [_story("S1")]
+    c, eng = _client(_BacklogNeo4j(stories))
+    try:
+        body = c.post("/api/workspaces/ws-1/verify", json={
+            "program": "CBPOST1M", "record": "ACCT-RECORD", "record_key": "ID",
+            "tolerance_yaml": _SCALE_TOL,
+            "golden_records": _TWO_PROGRAM_GOLDEN,
+            "candidate_records": _TWO_PROGRAM_CANDIDATE_ONE_BAD,
+        }).json()
+        assert body["verdict"] == "fail"
+        per = body["per_story_verdicts"]
+        assert len(per) == 1
+        story = per[0]
+        assert story["ok"] is False
+        subs = story["subslices"]
+        by_key = {s["subslice"]: s for s in subs}
+        assert set(by_key) == {"CBPOST1M", "CBACT01C"}
+        assert by_key["CBPOST1M"]["ok"] is True
+        assert by_key["CBACT01C"]["ok"] is False
+        # The report names the failing sub-slice.
+        assert "CBACT01C" in body["failing_subslices"]
+        assert "CBPOST1M" not in body["failing_subslices"]
+        assert _stage(eng) == "failed"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_decompose_localized_subresults_persisted():
+    stories = [_story("S1")]
+    c, eng = _client(_BacklogNeo4j(stories))
+    try:
+        c.post("/api/workspaces/ws-1/verify", json={
+            "program": "CBPOST1M", "record": "ACCT-RECORD", "record_key": "ID",
+            "tolerance_yaml": _SCALE_TOL,
+            "golden_records": _TWO_PROGRAM_GOLDEN,
+            "candidate_records": _TWO_PROGRAM_CANDIDATE_ONE_BAD,
+        })
+        checks = _equiv_checks(eng)
+        # One parent equivalence_check carrying the localized sub-results.
+        parent = [c for c in checks if c.evidence_map.get("story_id") == "S1"][0]
+        subs = json.loads(parent.evidence_map["subslices_json"])
+        by_key = {s["subslice"]: s for s in subs}
+        assert by_key["CBACT01C"]["ok"] is False
+        assert by_key["CBPOST1M"]["ok"] is True
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_decompose_terminates_when_unlocalizable(monkeypatch):
+    # A single-context candidate (no program field) cannot be decomposed further;
+    # the loop must terminate (no-progress) and not spin. We assert it returns and
+    # the story stays failed with a bounded number of equivalence runs.
+    import cobol_modernizer.controlplane.verify as verify_mod
+
+    calls = {"n": 0}
+    real = verify_mod.EquivalenceLab.run_equivalence
+
+    def _counting(self, **kwargs):
+        calls["n"] += 1
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(verify_mod.EquivalenceLab, "run_equivalence", _counting)
+    monkeypatch.setenv("VERIFY_MAX_REPAIR_ATTEMPTS", "2")
+
+    stories = [_story("S1")]
+    c, eng = _client(_BacklogNeo4j(stories))
+    try:
+        body = c.post("/api/workspaces/ws-1/verify", json={
+            "program": "CBPOST1M", "record": "ACCT-RECORD", "record_key": "ID",
+            "tolerance_yaml": _SCALE_TOL,
+            # one context only -> nothing to split -> no-progress termination.
+            "golden_records": [{"ID": "1", "BAL": "100.00"}],
+            "candidate_records": [{"ID": "1", "BAL": "100.50"}],
+        }).json()
+        assert body["verdict"] == "fail"
+        # Bounded: the synchronous decompose re-runs are finite (no infinite loop).
+        assert calls["n"] <= 8
+        assert _stage(eng) == "failed"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_decompose_disabled_keeps_task10_behavior(monkeypatch):
+    monkeypatch.setenv("VERIFY_DECOMPOSE_FURTHER", "0")
+    stories = [_story("S1")]
+    c, eng = _client(_BacklogNeo4j(stories))
+    try:
+        body = c.post("/api/workspaces/ws-1/verify", json={
+            "program": "CBPOST1M", "record": "ACCT-RECORD", "record_key": "ID",
+            "tolerance_yaml": _SCALE_TOL,
+            "golden_records": _TWO_PROGRAM_GOLDEN,
+            "candidate_records": _TWO_PROGRAM_CANDIDATE_ONE_BAD,
+        }).json()
+        assert body["verdict"] == "fail"
+        per = body["per_story_verdicts"]
+        # No decomposition performed -> no subslices key (Task-10 shape).
+        assert "subslices" not in per[0] or not per[0].get("subslices")
+        assert body.get("failing_subslices", []) == []
+        assert _stage(eng) == "failed"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_decompose_all_pass_no_decomposition_triggered():
+    # When every story already passes, decompose-further never fires.
+    stories = [_story("S1")]
+    c, eng = _client(_BacklogNeo4j(stories))
+    try:
+        body = c.post("/api/workspaces/ws-1/verify", json={
+            "program": "CBPOST1M", "record": "ACCT-RECORD", "record_key": "ID",
+            "tolerance_yaml": _SCALE_TOL,
+            "golden_records": _TWO_PROGRAM_GOLDEN,
+            "candidate_records": list(_TWO_PROGRAM_GOLDEN),
+        }).json()
+        assert body["verdict"] == "pass"
+        assert body.get("failing_subslices", []) == []
+        assert _stage(eng) == "passed"
+    finally:
+        app.dependency_overrides.clear()
