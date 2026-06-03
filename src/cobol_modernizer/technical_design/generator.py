@@ -354,18 +354,27 @@ def build_service_prompt(*, context: dict, backlog_json: str, seam_waves_json: s
 async def generate_service_for_context(*, runner, model: str, timeout_s: float,
                                        max_turns: int, context: dict, backlog_json: str,
                                        seam_waves_json: str, relevant_refs: list[str],
-                                       known_story_ids: list[str]) -> EnrichmentResult:
+                                       known_story_ids: list[str],
+                                       attempts: int = 2,
+                                       escalate: bool = True) -> EnrichmentResult:
     """MAP unit: a single bounded structured call that emits the service for ONE
     bounded context. `relevant_refs` is the lossless relevant set for THIS context
     (computed by the caller) and is inlined as-is — never truncated. Returns the
-    typed result so a gating caller can surface the concrete failure cause."""
+    typed result so a gating caller can surface the concrete failure cause.
+
+    `attempts`/`escalate` are threaded into the shared `run_batched_result` retry
+    primitive: a context whose call times out (or empties out at the turn cap) is
+    re-issued with an ESCALATED per-context budget before being skipped — so one
+    transient timeout no longer drops a whole context. `timeout_s` is the PER-CONTEXT
+    budget (TECH_DESIGN_CONTEXT_TIMEOUT_S upstream), not a single outer wall."""
     prompt = build_service_prompt(
         context=context, backlog_json=backlog_json, seam_waves_json=seam_waves_json,
         relevant_refs=relevant_refs, known_story_ids=known_story_ids)
     return await run_batched_result(
         runner=runner, system=SERVICE_SYSTEM, prompt=prompt, schema=SERVICE_SCHEMA,
         model=model, timeout_s=timeout_s,
-        label=f"technical-design:{context.get('name', '?')}", max_turns=max_turns)
+        label=f"technical-design:{context.get('name', '?')}", max_turns=max_turns,
+        attempts=attempts, escalate=escalate)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -427,8 +436,17 @@ async def generate_technical_design_result(*, runner, model: str, timeout_s: flo
             schema=TECHNICAL_DESIGN_SCHEMA, model=model, timeout_s=timeout_s,
             label="technical-design-generate", max_turns=max_turns)
 
+    # PER-CONTEXT budgets, NO single outer 300s wall: each unit is bounded by its OWN
+    # TECH_DESIGN_CONTEXT_TIMEOUT_S (defaulting to the passed timeout_s) and retries
+    # with escalation up to TECH_DESIGN_UNIT_ATTEMPTS before being skipped. The outer
+    # `asyncio.gather` below is intentionally NOT wrapped in a single asyncio wall, so a
+    # slow-but-progressing multi-context run is never killed mid-flight (the JobRunner
+    # lets the long job finish). A context that exhausts its attempts is dropped (its
+    # service is absent from the merge), and only an ALL-contexts-fail run yields the
+    # typed failure that the control plane degrades to the deterministic fallback.
     ctx_timeout_s = _env_float("TECH_DESIGN_CONTEXT_TIMEOUT_S", timeout_s)
     ctx_max_turns = _env_int("TECH_DESIGN_CONTEXT_MAX_TURNS", max_turns)
+    unit_attempts = max(1, _env_int("TECH_DESIGN_UNIT_ATTEMPTS", 2))
     max_concurrency = max(1, _env_int("TECH_DESIGN_MAX_CONCURRENCY", 4))
     semaphore = asyncio.Semaphore(max_concurrency)
 
@@ -441,7 +459,8 @@ async def generate_technical_design_result(*, runner, model: str, timeout_s: flo
                 runner=runner, model=model, timeout_s=ctx_timeout_s,
                 max_turns=ctx_max_turns, context=context, backlog_json=backlog_json,
                 seam_waves_json=seam_waves_json, relevant_refs=refs,
-                known_story_ids=known_story_ids)
+                known_story_ids=known_story_ids,
+                attempts=unit_attempts, escalate=True)
         if not res.ok:
             logger.warning("technical-design: service call for context %s failed (%s) "
                            "— no service from this context", context.get("name"), res.cause)
