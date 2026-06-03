@@ -257,6 +257,66 @@ def test_story_mode_is_default_and_returns_compatible_summary(monkeypatch, tmp_p
         app.dependency_overrides.clear()
 
 
+def _stub_story_step_with(out_root, results):
+    """A story-step stub returning the given per-story `results` (list of
+    {story_id,status,attempts}) plus a scaffolded module so the summary scan finds
+    files. Used to drive the pass-with-deferred gate through `POST /build`."""
+    def _step(*, session, neo4j, workspace, source_root, output_root, plan, story_id):
+        from cobol_modernizer.codegen.scaffold_from_design import module_name_for
+        root = output_root / module_name_for(workspace.repo_slug)
+        (root / "src/main/java/x").mkdir(parents=True, exist_ok=True)
+        (root / "src/test/java/x").mkdir(parents=True, exist_ok=True)
+        (root / "src/main/java/x/PostingService.java").write_text(
+            "class PostingService {}", encoding="utf-8")
+        (root / "src/test/java/x/PostingServiceTest.java").write_text(
+            "class PostingServiceTest {}", encoding="utf-8")
+        return {"repo_slug": workspace.repo_slug, "module_dir": str(root),
+                "story_id": story_id, "story_count": len(results),
+                "results": results}
+    return _step
+
+
+def test_story_mode_passes_with_deferred_and_surfaces_counts(monkeypatch, tmp_path):
+    # A deferred story (exhausted its repeat-until-done allotment) must NOT wedge the
+    # build: the gate passes WITH it, and the summary surfaces progress counts.
+    c, eng, tp = _setup(monkeypatch, tmp_path, mode="story")
+    monkeypatch.setattr(bs, "_run_story_build_step", _stub_story_step_with(
+        tmp_path / "out",
+        [{"story_id": "US-1", "status": "passed", "attempts": 1},
+         {"story_id": "US-2", "status": "deferred", "attempts": 3}]))
+    try:
+        resp = c.post("/api/workspaces/ws-1/build")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["status"] == "done", body
+        counts = body["result"]["story_counts"]
+        assert counts["pass_count"] == 1
+        assert counts["deferred_count"] == 1
+        with Session(eng) as s:
+            assert s.execute(select(JourneyStage.status).where(
+                JourneyStage.stage_key == "build")).scalar_one() == "passed"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_story_mode_error_story_fails_build(monkeypatch, tmp_path):
+    # A genuine error/failed story (NOT deferred) still fails the build gate.
+    c, eng, tp = _setup(monkeypatch, tmp_path, mode="story")
+    monkeypatch.setattr(bs, "_run_story_build_step", _stub_story_step_with(
+        tmp_path / "out",
+        [{"story_id": "US-1", "status": "passed", "attempts": 1},
+         {"story_id": "US-2", "status": "failed", "attempts": 3}]))
+    try:
+        resp = c.post("/api/workspaces/ws-1/build")
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "failed"
+        with Session(eng) as s:
+            assert s.execute(select(JourneyStage.status).where(
+                JourneyStage.stage_key == "build")).scalar_one() != "passed"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_story_mode_409_without_backlog(monkeypatch, tmp_path):
     # story mode needs backlog/domain/technical — missing specs gives a clear 409.
     c, eng, tp = _setup(monkeypatch, tmp_path, mode="story", has_specs=False)
