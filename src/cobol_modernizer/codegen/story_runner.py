@@ -39,7 +39,8 @@ from typing import Any, Awaitable, Callable
 
 from cobol_modernizer.agent.harness import AgentRunner
 from cobol_modernizer.codegen.budget import (
-    StoryBudget, should_skip as budget_should_skip, story_budget_from_env,
+    BuildBudget, StoryBudget, build_budget_from_env, build_max_story_attempts,
+    should_skip as budget_should_skip, story_budget_from_env,
 )
 from cobol_modernizer.codegen.patch_agent import (
     StoryPatch, generate_story_implementation, generate_story_tests,
@@ -541,6 +542,8 @@ async def run_story_plan(
     now: Clock = time.monotonic,
     repair_max_attempts: int | None = None,
     max_concurrency: int | None = None,
+    budget: StoryBudget | None = None,
+    items_override: list[StoryCodegenItem] | None = None,
 ) -> list[StoryRunResult]:
     """Run a plan's stories in DEPENDENCY WAVES with bounded parallel fan-out
     (Fan-Out-and-Synthesize). The plan is already dependency-sorted by
@@ -585,7 +588,11 @@ async def run_story_plan(
         # (no-arg constructor — matches SdkAgentRunner / the test FakeRunner).
         runner_factory = type(runner)
 
-    waves = _dependency_waves(items)
+    # `items_override` lets the repeat-until-done OUTER loop re-run ONLY the still-failing
+    # subset while reusing this single-pass wave fan-out unchanged. The results are still
+    # reassembled in the (sub)list's input order.
+    run_items = items if items_override is None else items_override
+    waves = _dependency_waves(run_items)
     sem = asyncio.Semaphore(max(1, max_concurrency))
     by_id: dict[str, StoryRunResult] = {}
     completed_summaries: list[str] = []
@@ -599,7 +606,7 @@ async def run_story_plan(
                 module_dir=module_dir, context_pack=pack, runner=runner_factory(),
                 model=model, project_index=project_index, gen_tests=gen_tests,
                 gen_impl=gen_impl, run_tests=run_tests, now=now,
-                repair_max_attempts=repair_max_attempts)
+                repair_max_attempts=repair_max_attempts, budget=budget)
 
     for wave in waves:
         # Snapshot the prior-wave summaries: stories in THIS wave all see the same
@@ -613,5 +620,196 @@ async def run_story_plan(
         completed_summaries.extend(
             _summary_line(item, by_id[item.story_id]) for item in wave)
 
-    # Reassemble in the plan's deterministic input order for downstream consumers.
-    return [by_id[item.story_id] for item in items]
+    # Reassemble in the (run) plan's deterministic input order for downstream consumers.
+    return [by_id[item.story_id] for item in run_items]
+
+
+# --------------------------------------------------------------------------- #
+# Repeat-until-done OUTER loop (+ pass-with-deferred + pooled budget)          #
+# --------------------------------------------------------------------------- #
+#: Statuses the OUTER loop treats as ACCEPTED (do not re-run). Mirrors
+#: ``ACCEPTED_STORY_STATUSES`` conceptually but is expressed over the enum here:
+#: passed / generated-unverified / skipped. ``failed`` is the ONLY status the outer
+#: loop retries; ``deferred``/``blocked`` are terminal non-accepted (never retried).
+_OUTER_ACCEPTED = frozenset({
+    StoryCodegenStatus.passed,
+    StoryCodegenStatus.generated_unverified,
+    StoryCodegenStatus.skipped,
+})
+
+
+def _pool_tokens(out: StoryRunResult) -> int:
+    """The total tokens a single story's run drew from the pool (sum of its usage
+    delta)."""
+    return sum(int(v) for v in (out.token_usage or {}).values())
+
+
+def _mark_deferred(session, *, workspace_id: str, item: StoryCodegenItem,
+                   out: StoryRunResult, model: str, context_hash: str,
+                   module_dir: Path, reason: str) -> StoryRunResult:
+    """Re-stamp a story that exhausted the outer loop's allotment as ``deferred``
+    (terminal — the loop stops retrying it) and persist that. Carries the last run's
+    telemetry forward and appends WHY it was deferred so the durable record is legible.
+    Deferred is NOT accepted; the build gate (a later task) decides its fate. No NEW
+    files are written here — `_persist` only (re)records the status + the same
+    generated_test_refs scan against the shared module_dir."""
+    rationale = f"deferred: {reason}"
+    if out.rationale:
+        rationale = f"{rationale}; {out.rationale}"
+    deferred = StoryRunResult(
+        story_id=out.story_id, status=StoryCodegenStatus.deferred,
+        test_result=out.test_result, red_status=out.red_status,
+        attempts=out.attempts, ac_covered=out.ac_covered, ac_missing=out.ac_missing,
+        changed_files=out.changed_files, wall_time_s=out.wall_time_s,
+        token_usage=out.token_usage, cost_usd=out.cost_usd, rationale=rationale)
+    _persist(session, workspace_id=workspace_id, item=item, out=deferred,
+             model=model, context_hash=context_hash, module_dir=module_dir)
+    return deferred
+
+
+async def run_story_plan_until_done(
+    items: list[StoryCodegenItem],
+    *,
+    session,
+    workspace_id: str,
+    module_dir: Path,
+    context_pack_for: Callable[..., StoryContextPack],
+    runner: AgentRunner,
+    runner_factory: Callable[[], AgentRunner] | None = None,
+    model: str = "sonnet",
+    project_index: list[str] | None = None,
+    gen_tests: GenTests = generate_story_tests,
+    gen_impl: GenImpl = generate_story_implementation,
+    run_tests: RunTests = run_targeted_tests,
+    now: Clock = time.monotonic,
+    repair_max_attempts: int | None = None,
+    max_concurrency: int | None = None,
+    max_story_attempts: int | None = None,
+    build_budget: BuildBudget | None = None,
+    on_pass: Callable[[list[StoryCodegenItem]], None] | None = None,
+) -> list[StoryRunResult]:
+    """REPEAT-UNTIL-DONE wrapper around the single-pass dependency-wave fan-out
+    (`run_story_plan`). Per the user's rulings the build must NEVER wedge on one bad
+    story and the budget is POOLED with a retained per-story cap (hybrid).
+
+    THE LOOP (always terminates — bounded by attempts AND no-progress AND the pool):
+
+      pass 1 : run the WHOLE plan once (the Task-5 wave fan-out, unchanged).
+      pass k : collect the stories still ``failed`` AND still under their attempt cap,
+               rebuild ONLY their context (via the caller's ``context_pack_for``), and
+               re-run ONLY them. Stop when ANY of:
+                 - no story is still ``failed`` (all accepted) -> DONE;
+                 - a retry pass yields NO newly-accepted story (NO-PROGRESS);
+                 - every still-failing story has reached ``BUILD_MAX_STORY_ATTEMPTS``;
+                 - the pooled token budget is exhausted (stop spawning NEW attempts).
+
+    PASS-WITH-DEFERRED: any story still ``failed`` when the loop stops (attempts
+    exhausted / no-progress / pool exhausted) is re-stamped TERMINAL ``deferred`` (not
+    ``failed``) so a single bad story can never wedge the build. ``deferred`` is NOT in
+    the accepted set — the build gate (a later task) decides whether it fails the build.
+
+    POOLED BUDGET (hybrid): ``build_budget`` (default :func:`build_budget_from_env`,
+    sized ``story_count * STORY_MAX_TOKENS``) is the build-level pool; its retained
+    per-story cap is threaded into every ``run_story`` as a :class:`StoryBudget`, so a
+    single story can't exceed its cap AND the loop stops spawning new attempts once the
+    pool is drained.
+
+    ``on_pass`` (optional) is called once per pass with the items that pass ran — a test
+    hook to assert the pass count is bounded (no infinite loop). Returns the FINAL
+    per-story results in the plan's deterministic input order."""
+    if max_story_attempts is None:
+        max_story_attempts = build_max_story_attempts()
+    max_story_attempts = max(1, max_story_attempts)
+    if build_budget is None:
+        build_budget = build_budget_from_env(len(items))
+    per_story_budget = build_budget.story_budget()
+
+    # Per-story attempt counter (how many full passes a story has participated in) and
+    # the LATEST result per story. The first pass runs the whole plan.
+    attempts: dict[str, int] = {}
+    latest: dict[str, StoryRunResult] = {}
+    item_by_id = {it.story_id: it for it in items}
+    pool_used = 0
+
+    async def _one_pass(pass_items: list[StoryCodegenItem]) -> None:
+        nonlocal pool_used
+        if on_pass is not None:
+            on_pass(pass_items)
+        results = await run_story_plan(
+            items, session=session, workspace_id=workspace_id, module_dir=module_dir,
+            context_pack_for=context_pack_for, runner=runner,
+            runner_factory=runner_factory, model=model, project_index=project_index,
+            gen_tests=gen_tests, gen_impl=gen_impl, run_tests=run_tests, now=now,
+            repair_max_attempts=repair_max_attempts, max_concurrency=max_concurrency,
+            budget=per_story_budget, items_override=pass_items)
+        for out in results:
+            attempts[out.story_id] = attempts.get(out.story_id, 0) + 1
+            latest[out.story_id] = out
+            pool_used += _pool_tokens(out)
+
+    def _accepted(out: StoryRunResult) -> bool:
+        return out.status in _OUTER_ACCEPTED
+
+    def _failed_ids() -> list[str]:
+        # Stories still in `failed` (the only retryable status) — in plan order.
+        return [it.story_id for it in items
+                if latest.get(it.story_id) is not None
+                and latest[it.story_id].status == StoryCodegenStatus.failed]
+
+    # --- Pass 1: the whole plan. ------------------------------------------------ #
+    await _one_pass(items)
+
+    # --- Repeat-until-done. ----------------------------------------------------- #
+    while True:
+        failed = _failed_ids()
+        if not failed:
+            break  # all stories accepted (or terminal non-failed) — DONE.
+
+        # Retry only the failed stories still under their attempt cap.
+        retryable = [sid for sid in failed if attempts.get(sid, 0) < max_story_attempts]
+        if not retryable:
+            break  # every failing story hit BUILD_MAX_STORY_ATTEMPTS — stop, defer.
+
+        # POOLED BUDGET: stop spawning NEW attempts once the pool is drained (no
+        # runaway). The still-failing stories are deferred below.
+        if build_budget.pool_exhausted(pool_used):
+            logger.info("build budget pool exhausted (used=%d) — deferring %d "
+                        "still-failing stories", pool_used, len(retryable))
+            break
+
+        accepted_before = {sid for sid, out in latest.items() if _accepted(out)}
+        retry_items = [item_by_id[sid] for sid in retryable]
+        await _one_pass(retry_items)
+        accepted_after = {sid for sid, out in latest.items() if _accepted(out)}
+
+        if accepted_after <= accepted_before:
+            # NO-PROGRESS: this pass made nothing newly accepted -> stop (defer rest).
+            logger.info("repeat-until-done made no progress this pass — stopping")
+            break
+
+    # PASS-WITH-DEFERRED: any story still `failed` after the loop stopped is terminal
+    # `deferred` (never wedge the build on it).
+    for sid in _failed_ids():
+        out = latest[sid]
+        n = attempts.get(sid, 0)
+        reason = (f"still failing after {n} build pass(es) "
+                  f"(cap {max_story_attempts}); no-progress/pool/attempt-cap reached")
+        item = item_by_id[sid]
+        latest[sid] = _mark_deferred(
+            session, workspace_id=workspace_id, item=item, out=out, model=model,
+            context_hash=_context_hash_for(context_pack_for, item),
+            module_dir=module_dir, reason=reason)
+
+    return [latest[it.story_id] for it in items]
+
+
+def _context_hash_for(context_pack_for: Callable[..., StoryContextPack],
+                      item: StoryCodegenItem) -> str:
+    """The story's context_hash for the deferred re-stamp — recomputed from the caller's
+    pack callback (the same hash the resume policy keys on). Best-effort: if the callback
+    raises, fall back to empty (the deferred record still persists; resume simply can't
+    short-circuit it, which is the safe direction)."""
+    try:
+        return _call_context_pack_for(context_pack_for, item, []).context_hash
+    except Exception:  # noqa: BLE001 — never let hashing wedge the defer-stamp
+        return ""

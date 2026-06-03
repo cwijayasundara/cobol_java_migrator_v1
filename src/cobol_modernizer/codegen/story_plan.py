@@ -39,6 +39,12 @@ class StoryCodegenStatus(str, Enum):
     skipped = "skipped"
     generated_unverified = "generated-unverified"
     blocked = "blocked"
+    #: A story that exhausted its retry/repair/budget allotment in the
+    #: repeat-until-done build loop WITHOUT acceptance, but is not a hard error.
+    #: Terminal (the outer loop stops retrying it) so one bad story can never wedge
+    #: the build. Deliberately NOT in ``ACCEPTED_STORY_STATUSES`` — the build gate
+    #: (a later task) decides whether deferred stories fail or merely warn.
+    deferred = "deferred"
 
 
 #: The SINGLE accepted-terminal status set, shared by the build gate
