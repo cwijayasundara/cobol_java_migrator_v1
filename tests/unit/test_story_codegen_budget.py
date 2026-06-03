@@ -30,8 +30,8 @@ def test_budget_defaults_from_env(monkeypatch):
     monkeypatch.delenv("STORY_REPAIR_MAX_ATTEMPTS", raising=False)
     b = story_budget_from_env()
     assert b.max_tokens == DEFAULT_STORY_MAX_TOKENS
-    # wall-time REUSES patch_agent's STORY_CODEGEN_TIMEOUT_S (default 90.0)
-    assert b.max_wall_s == 90.0
+    # wall-time REUSES patch_agent's STORY_CODEGEN_TIMEOUT_S (default 120.0)
+    assert b.max_wall_s == 120.0
     # repair attempts REUSE patch_agent's STORY_REPAIR_MAX_ATTEMPTS (default 2)
     assert b.max_repair_attempts == 2
     assert b.max_concurrent_jobs == MAX_CONCURRENT_STORY_JOBS == 1

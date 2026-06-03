@@ -21,7 +21,6 @@ I/O of its own (the caller resolves the pack, writes files, and runs Maven). The
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from typing import Any
@@ -30,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from cobol_modernizer.agent.harness import AgentRunner
 from cobol_modernizer.codegen.schema import GeneratedFile
+from cobol_modernizer.enrichment.base import run_batched_result
 from cobol_modernizer.codegen.story_context import StoryContextPack
 from cobol_modernizer.codegen.story_plan import StoryCodegenItem
 
@@ -60,20 +60,41 @@ class StoryPatch(BaseModel):
 STORY_CODEGEN_TIMEOUT_S_ENV = "STORY_CODEGEN_TIMEOUT_S"
 STORY_CODEGEN_MAX_TURNS_ENV = "STORY_CODEGEN_MAX_TURNS"
 STORY_REPAIR_MAX_ATTEMPTS_ENV = "STORY_REPAIR_MAX_ATTEMPTS"
+STORY_CODEGEN_ATTEMPTS_ENV = "STORY_CODEGEN_ATTEMPTS"
+STORY_CODEGEN_ESCALATE_ENV = "STORY_CODEGEN_ESCALATE"
 
-DEFAULT_STORY_TIMEOUT_S = 90.0
+# Default 120s matches BACKLOG_STORY_TIMEOUT_S: real structured LLM calls on the
+# build machine routinely take 51-115s, so a 90s deadline tripped on the first slow
+# call. The retry/escalation below (attempts=2, escalate=True) covers residual spikes,
+# exactly as the backlog generator drives the same shared `run_batched_result`.
+DEFAULT_STORY_TIMEOUT_S = 120.0
 DEFAULT_STORY_MAX_TURNS = 2
 DEFAULT_STORY_REPAIR_MAX_ATTEMPTS = 2
+DEFAULT_STORY_CODEGEN_ATTEMPTS = 2
+DEFAULT_STORY_CODEGEN_ESCALATE = True
 
 
 def story_timeout_s() -> float:
-    """Per-story runner timeout (seconds), env-overridable; default 90s."""
+    """Per-story runner timeout (seconds), env-overridable; default 120s."""
     return _env_float(STORY_CODEGEN_TIMEOUT_S_ENV, DEFAULT_STORY_TIMEOUT_S)
 
 
 def story_max_turns() -> int:
     """Per-story agent turn budget, env-overridable; default 2 (fast path)."""
     return _env_int(STORY_CODEGEN_MAX_TURNS_ENV, DEFAULT_STORY_MAX_TURNS)
+
+
+def story_codegen_attempts() -> int:
+    """Per-story structured-call attempt budget, env-overridable; default 2. With
+    attempts=2 a SUCCESS on the first call still makes exactly ONE call (no retry);
+    only a RETRYABLE failure (timeout / harness turn-cap) escalates and re-issues."""
+    return max(1, _env_int(STORY_CODEGEN_ATTEMPTS_ENV, DEFAULT_STORY_CODEGEN_ATTEMPTS))
+
+
+def story_codegen_escalate() -> bool:
+    """Whether a retried per-story call escalates its timeout/turns (×1.5 each),
+    env-overridable; default True. Mirrors the backlog generator's escalation."""
+    return _env_bool(STORY_CODEGEN_ESCALATE_ENV, DEFAULT_STORY_CODEGEN_ESCALATE)
 
 
 def story_repair_max_attempts() -> int:
@@ -104,6 +125,13 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         logger.warning("Ignoring non-integer %s=%r; using %d", name, raw, default)
         return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # Patch schema: the SHAPE of CODEGEN_SCHEMA (files[] with path/kind/content/evidence)
@@ -201,20 +229,29 @@ def _require_files(raw: dict, *, label: str, max_turns: int) -> None:
 
 async def _run_story_call(*, runner: AgentRunner, system: str, prompt: str,
                           model: str, max_turns: int, label: str,
-                          timeout_s: float) -> dict[str, Any]:
-    """Tool-free, schema-bounded runner call with a hard timeout, mirroring
-    `generator.py::_run_codegen_call` but pinned to the fast path (server=None,
-    allowed_tools=[])."""
-    try:
-        return await asyncio.wait_for(
-            runner.run_structured(
-                system=system, prompt=prompt, server=None, allowed_tools=[],
-                model=model, max_turns=max_turns, schema=PATCH_SCHEMA, label=label),
-            timeout=timeout_s)
-    except asyncio.TimeoutError as exc:
-        logger.warning("story codegen %s timed out after %.0fs", label, timeout_s)
-        raise ValueError(
-            f"story codegen {label} timed out after {timeout_s:.0f}s") from exc
+                          timeout_s: float, attempts: int, escalate: bool,
+                          ) -> dict[str, Any]:
+    """Tool-free, schema-bounded runner call routed through the SHARED escalation
+    primitive `enrichment.base.run_batched_result` (the same one BACKLOG uses to
+    survive this machine's 51-115s structured calls). With `attempts>1` a RETRYABLE
+    failure (a timeout, or an empty payload because the harness hit its turn cap) is
+    re-issued with an escalated timeout/max_turns (×1.5 each per attempt when
+    `escalate`); a SUCCESS on attempt 1 still makes exactly one call.
+
+    `run_batched_result` NEVER raises (it silently degrades to a typed failure), but
+    this module's callers (story_runner's try/except) rely on a ValueError contract —
+    so we re-raise on `not ok`, preserving the prior `_run_story_call` behavior. An
+    `ok` result with an empty `files` list still flows through `_require_files`."""
+    # run_batched_result / _run_once already pin the fast path (server=None,
+    # allowed_tools=[]); they take no server/allowed_tools args.
+    result = await run_batched_result(
+        runner=runner, system=system, prompt=prompt,
+        model=model, max_turns=max_turns, schema=PATCH_SCHEMA, label=label,
+        timeout_s=timeout_s, attempts=attempts, escalate=escalate)
+    if not result.ok:
+        logger.warning("story codegen %s failed: %s", label, result.cause)
+        raise ValueError(f"story codegen {label}: {result.cause}")
+    return result.payload
 
 
 def _project_index_section(project_index: list[str]) -> str:
@@ -297,18 +334,24 @@ async def generate_story_tests(
     *, runner: AgentRunner, item: StoryCodegenItem,
     context_pack: StoryContextPack, project_index: list[str], model: str,
     max_turns: int | None = None, timeout_s: float | None = None,
+    attempts: int | None = None, escalate: bool | None = None,
 ) -> StoryPatch:
     """Generate the FAILING JUnit5 tests for one story. Returns a `StoryPatch` whose
     `files` are ONLY kind='test', plus the model's `rationale`. Raises ValueError on
-    an empty runner payload (turn cap / error) or on a timeout. Mirrors the contract
-    of `generator.py::_emit_tests_only`."""
+    an empty runner payload (turn cap / error) or on an exhausted timeout. Mirrors the
+    contract of `generator.py::_emit_tests_only`. `attempts`/`escalate` resolve to the
+    STORY_CODEGEN_* env defaults when None (attempts=2, escalate=True) so a slow first
+    call is retried with an escalated budget rather than aborting the story."""
     max_turns = story_max_turns() if max_turns is None else max_turns
     timeout_s = story_timeout_s() if timeout_s is None else timeout_s
+    attempts = story_codegen_attempts() if attempts is None else attempts
+    escalate = story_codegen_escalate() if escalate is None else escalate
     prompt = build_tests_prompt(
         item=item, context_pack=context_pack, project_index=project_index)
     raw = await _run_story_call(
         runner=runner, system=STORY_TESTS_SYSTEM, prompt=prompt, model=model,
-        max_turns=max_turns, label=f"story-tests:{item.story_id}", timeout_s=timeout_s)
+        max_turns=max_turns, label=f"story-tests:{item.story_id}", timeout_s=timeout_s,
+        attempts=attempts, escalate=escalate)
     _require_files(raw, label=f"story-tests:{item.story_id}", max_turns=max_turns)
     return StoryPatch(
         files=_files_from(raw, only="test"),
@@ -320,22 +363,27 @@ async def generate_story_implementation(
     context_pack: StoryContextPack, failing_tests: list[GeneratedFile],
     existing_java: list[GeneratedFile], model: str,
     max_turns: int | None = None, timeout_s: float | None = None,
+    attempts: int | None = None, escalate: bool | None = None,
     repair_feedback: dict | None = None,
 ) -> StoryPatch:
     """Generate the MINIMAL production code that satisfies one story's failing tests.
     Returns a `StoryPatch` whose `files` are ONLY kind='main', plus the model's
-    `rationale`. Raises ValueError on an empty runner payload or a timeout. The
-    bounded, per-story analogue of `generate_slice`'s production pass. On a repair
+    `rationale`. Raises ValueError on an empty runner payload or an exhausted timeout.
+    The bounded, per-story analogue of `generate_slice`'s production pass. On a repair
     re-generation, `repair_feedback` (failing gate + build-log excerpt + the touched
-    files) is folded into the prompt, mirroring `repair_loop.py`."""
+    files) is folded into the prompt, mirroring `repair_loop.py`. `attempts`/`escalate`
+    resolve to the STORY_CODEGEN_* env defaults (attempts=2, escalate=True) when None."""
     max_turns = story_max_turns() if max_turns is None else max_turns
     timeout_s = story_timeout_s() if timeout_s is None else timeout_s
+    attempts = story_codegen_attempts() if attempts is None else attempts
+    escalate = story_codegen_escalate() if escalate is None else escalate
     prompt = build_impl_prompt(
         item=item, context_pack=context_pack, failing_tests=failing_tests,
         existing_java=existing_java, repair_feedback=repair_feedback)
     raw = await _run_story_call(
         runner=runner, system=STORY_IMPL_SYSTEM, prompt=prompt, model=model,
-        max_turns=max_turns, label=f"story-impl:{item.story_id}", timeout_s=timeout_s)
+        max_turns=max_turns, label=f"story-impl:{item.story_id}", timeout_s=timeout_s,
+        attempts=attempts, escalate=escalate)
     _require_files(raw, label=f"story-impl:{item.story_id}", max_turns=max_turns)
     return StoryPatch(
         files=_files_from(raw, only="main"),

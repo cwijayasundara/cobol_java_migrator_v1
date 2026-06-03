@@ -12,12 +12,15 @@ import asyncio
 import pytest
 
 from cobol_modernizer.codegen.patch_agent import (
+    DEFAULT_STORY_TIMEOUT_S,
     PATCH_SCHEMA,
     STORY_IMPL_SYSTEM,
     STORY_TESTS_SYSTEM,
     StoryPatch,
     generate_story_implementation,
     generate_story_tests,
+    story_codegen_attempts,
+    story_codegen_escalate,
 )
 from cobol_modernizer.codegen.schema import GeneratedFile
 from cobol_modernizer.codegen.story_context import StoryContextPack
@@ -44,6 +47,22 @@ class HangingRunner:
         self.calls.append(kw)
         await asyncio.sleep(60)
         return {"files": []}
+
+
+class HangThenOkRunner:
+    """Hangs (forcing a timeout) on the first call, then returns a real payload on
+    the next — exercises run_batched_result's escalated retry on a timeout."""
+
+    def __init__(self, payload, *, hang_calls=1):
+        self.payload = payload
+        self.hang_calls = hang_calls
+        self.calls: list[dict] = []
+
+    async def run_structured(self, **kw):
+        self.calls.append(kw)
+        if len(self.calls) <= self.hang_calls:
+            await asyncio.sleep(60)
+        return self.payload
 
 
 def _item() -> StoryCodegenItem:
@@ -171,12 +190,34 @@ async def test_generate_story_tests_empty_output_raises():
 
 
 async def test_generate_story_tests_times_out():
+    # attempts=1 keeps this single-shot: one timed-out call -> one ValueError.
     runner = HangingRunner()
-    with pytest.raises(ValueError, match="timed out"):
+    with pytest.raises(ValueError, match="timeout|timed out"):
         await generate_story_tests(
             runner=runner, item=_item(), context_pack=_pack(),
-            project_index=[], model="m", max_turns=2, timeout_s=0.01)
+            project_index=[], model="m", max_turns=2, timeout_s=0.01, attempts=1)
     assert len(runner.calls) == 1
+
+
+async def test_generate_story_tests_retries_on_timeout_then_succeeds():
+    """A timeout on attempt 1 is retryable: with attempts=2 the escalated retry
+    succeeds, so the call returns rather than raising. TWO runner calls are made."""
+    runner = HangThenOkRunner(_MIXED, hang_calls=1)
+    patch = await generate_story_tests(
+        runner=runner, item=_item(), context_pack=_pack(),
+        project_index=[], model="m", max_turns=2, timeout_s=0.05, attempts=2)
+    assert isinstance(patch, StoryPatch)
+    assert all(f.kind == "test" for f in patch.files)
+    assert len(runner.calls) == 2  # attempt 1 (timed out) + escalated retry (ok)
+
+
+async def test_generate_story_tests_default_attempts_is_two():
+    assert story_codegen_attempts() == 2
+    assert story_codegen_escalate() is True
+
+
+async def test_default_story_timeout_is_120():
+    assert DEFAULT_STORY_TIMEOUT_S == 120.0
 
 
 # -- implementation generation ----------------------------------------------
@@ -263,12 +304,23 @@ async def test_generate_story_implementation_empty_output_raises():
 
 async def test_generate_story_implementation_times_out():
     runner = HangingRunner()
-    with pytest.raises(ValueError, match="timed out"):
+    with pytest.raises(ValueError, match="timeout|timed out"):
         await generate_story_implementation(
             runner=runner, item=_item(), context_pack=_pack(),
             failing_tests=[], existing_java=[], model="m", max_turns=2,
-            timeout_s=0.01)
+            timeout_s=0.01, attempts=1)
     assert len(runner.calls) == 1
+
+
+async def test_generate_story_implementation_retries_on_timeout_then_succeeds():
+    runner = HangThenOkRunner(_MIXED, hang_calls=1)
+    patch = await generate_story_implementation(
+        runner=runner, item=_item(), context_pack=_pack(),
+        failing_tests=[], existing_java=[], model="m", max_turns=2,
+        timeout_s=0.05, attempts=2)
+    assert isinstance(patch, StoryPatch)
+    assert all(f.kind == "main" for f in patch.files)
+    assert len(runner.calls) == 2
 
 
 # -- system prompts ---------------------------------------------------------

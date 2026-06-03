@@ -44,7 +44,7 @@ from cobol_modernizer.codegen.budget import (
 )
 from cobol_modernizer.codegen.patch_agent import (
     StoryPatch, generate_story_implementation, generate_story_tests,
-    story_repair_max_attempts,
+    story_codegen_attempts, story_codegen_escalate, story_repair_max_attempts,
 )
 from cobol_modernizer.codegen.schema import GeneratedFile
 from cobol_modernizer.codegen.story_context import StoryContextPack
@@ -248,6 +248,8 @@ async def run_story(
     run_tests: RunTests = run_targeted_tests,
     now: Clock = time.monotonic,
     repair_max_attempts: int | None = None,
+    gen_attempts: int | None = None,
+    gen_escalate: bool | None = None,
     budget: StoryBudget | None = None,
     persist: bool = True,
 ) -> StoryRunResult:
@@ -262,6 +264,10 @@ async def run_story(
     """
     if repair_max_attempts is None:
         repair_max_attempts = story_repair_max_attempts()
+    if gen_attempts is None:
+        gen_attempts = story_codegen_attempts()
+    if gen_escalate is None:
+        gen_escalate = story_codegen_escalate()
     if budget is None:
         budget = story_budget_from_env()
     project_index = project_index or []
@@ -276,6 +282,13 @@ async def run_story(
                               status=StoryCodegenStatus.skipped, skipped=True)
 
     started = now()
+    # Emit a 'running' status the instant the story starts so the cockpit's
+    # GET /build/stories reflects in-flight work (the whole run otherwise looked
+    # hung — no per-story status was written until the terminal `_persist`). The
+    # terminal status overwrites this at the end, so no stale 'running' lingers.
+    if persist:
+        record_story_status(session, workspace_id=workspace_id,
+                            story_id=item.story_id, payload={"status": "running"})
     usage_before = _usage_snapshot(runner)
     cost_before = float(getattr(runner, "cost_usd", 0.0) or 0.0)
 
@@ -288,7 +301,8 @@ async def run_story(
         # 2. Generate the FAILING tests, then write them into the scaffold.
         tests_patch = await gen_tests(
             runner=runner, item=item, context_pack=context_pack,
-            project_index=project_index, model=model)
+            project_index=project_index, model=model,
+            attempts=gen_attempts, escalate=gen_escalate)
         test_files = list(tests_patch.files)
         _write_files(module_dir, test_files)
         target = _test_classes(test_files)
@@ -303,7 +317,7 @@ async def run_story(
         impl_patch = await gen_impl(
             runner=runner, item=item, context_pack=context_pack,
             failing_tests=test_files, existing_java=_existing_java(module_dir),
-            model=model)
+            model=model, attempts=gen_attempts, escalate=gen_escalate)
         impl_files = list(impl_patch.files)
         changed = _write_files(module_dir, impl_files)
         attempts = 1
@@ -334,7 +348,7 @@ async def run_story(
             impl_patch = await gen_impl(
                 runner=runner, item=item, context_pack=context_pack,
                 failing_tests=test_files, existing_java=_existing_java(module_dir),
-                model=model,
+                model=model, attempts=gen_attempts, escalate=gen_escalate,
                 repair_feedback=_repair_feedback(result, changed))
             impl_files = list(impl_patch.files)
             changed = _write_files(module_dir, impl_files)
@@ -457,13 +471,15 @@ def _summary_line(item: StoryCodegenItem, out: StoryRunResult) -> str:
 
 #: Default fan-out width within a dependency wave. One in-flight story holds an LLM
 #: test-gen + impl-gen (+ repairs) and a Maven run, so the concurrency cap bounds the
-#: peak LLM/Maven load. Tunable via ``BUILD_MAX_CONCURRENCY`` (default 4); clamped to
-#: >=1 so a bad env value can never deadlock the plan.
-_BUILD_MAX_CONCURRENCY_DEFAULT = 4
+#: peak LLM/Maven load. Lowered 4 -> 2: four concurrent SDK calls contended for the
+#: same API quota, pushing calls past the per-story deadline; halving the fan-out cuts
+#: that contention (the patch_agent escalation covers any residual spike). Tunable via
+#: ``BUILD_MAX_CONCURRENCY``; clamped to >=1 so a bad env value can never deadlock.
+_BUILD_MAX_CONCURRENCY_DEFAULT = 2
 
 
 def build_max_concurrency() -> int:
-    """The per-wave fan-out width from ``BUILD_MAX_CONCURRENCY`` (default 4, min 1)."""
+    """The per-wave fan-out width from ``BUILD_MAX_CONCURRENCY`` (default 2, min 1)."""
     raw = os.environ.get("BUILD_MAX_CONCURRENCY")
     if raw is None:
         return _BUILD_MAX_CONCURRENCY_DEFAULT

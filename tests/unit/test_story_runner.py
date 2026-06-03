@@ -17,7 +17,7 @@ from cobol_modernizer.codegen.patch_agent import StoryPatch
 from cobol_modernizer.codegen.story_plan import StoryCodegenItem, StoryCodegenStatus
 from cobol_modernizer.codegen.budget import BuildBudget, StoryBudget
 from cobol_modernizer.codegen.story_runner import (
-    run_story, run_story_plan, run_story_plan_until_done,
+    build_max_concurrency, run_story, run_story_plan, run_story_plan_until_done,
 )
 from cobol_modernizer.codegen.story_storage import (
     STORY_CODEGEN_STATUS_KIND, get_status_map, get_story_record,
@@ -176,6 +176,69 @@ async def test_targeted_test_class_derived_from_test_files(session, tmp_path):
                     gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
                     run_tests=run, now=_clock())
     assert run.calls[0]["target"] == "PostUS-1Test"
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1: a 'running' status is emitted the instant a story starts              #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_running_status_emitted_at_start(session, tmp_path):
+    """The cockpit's GET /build/stories must reflect an in-flight story. run_story
+    records `status: running` the moment it starts (before any gen call returns), so
+    a reader sees it BEFORE the terminal status overwrites it. We observe it from
+    INSIDE gen_tests (which runs after the running-status write)."""
+    item = _item()
+    observed: dict = {}
+
+    async def gen_tests(**kwargs):
+        # The running status must already be persisted/visible by now.
+        observed["rec"] = get_story_record(session, "ws1", item.story_id)
+        return _test_patch(story_id=item.story_id,
+                           ac_ids=tuple(item.acceptance_criteria_ids))
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(item, session=session, workspace_id="ws1",
+                          module_dir=tmp_path, context_pack=_pack(item),
+                          runner=FakeRunner(), gen_tests=gen_tests,
+                          gen_impl=_make_gen_impl(), run_tests=run, now=_clock())
+    assert observed["rec"] is not None
+    assert observed["rec"]["status"] == "running"
+    # The terminal status overwrites 'running' — no stale record remains.
+    assert out.status == StoryCodegenStatus.passed
+    assert get_story_record(session, "ws1", item.story_id)["status"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_running_status_not_written_when_persist_false(session, tmp_path):
+    """The running-status write is guarded by `persist` like the terminal write."""
+    item = _item()
+    observed: dict = {}
+
+    async def gen_tests(**kwargs):
+        observed["rec"] = get_story_record(session, "ws1", item.story_id)
+        return _test_patch(story_id=item.story_id,
+                           ac_ids=tuple(item.acceptance_criteria_ids))
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    await run_story(item, session=session, workspace_id="ws1", module_dir=tmp_path,
+                    context_pack=_pack(item), runner=FakeRunner(),
+                    gen_tests=gen_tests, gen_impl=_make_gen_impl(), run_tests=run,
+                    now=_clock(), persist=False)
+    assert observed["rec"] is None  # nothing persisted when persist=False
+    assert get_story_record(session, "ws1", item.story_id) is None
+
+
+# --------------------------------------------------------------------------- #
+# Fix 4: default build concurrency lowered 4 -> 2                              #
+# --------------------------------------------------------------------------- #
+def test_build_max_concurrency_default_is_two(monkeypatch):
+    monkeypatch.delenv("BUILD_MAX_CONCURRENCY", raising=False)
+    assert build_max_concurrency() == 2
+
+
+def test_build_max_concurrency_env_override(monkeypatch):
+    monkeypatch.setenv("BUILD_MAX_CONCURRENCY", "5")
+    assert build_max_concurrency() == 5
 
 
 # --------------------------------------------------------------------------- #
@@ -429,7 +492,9 @@ async def test_persisted_artifact_payload_and_version(session, tmp_path):
     arts = session.execute(
         select(Artifact).where(Artifact.kind == STORY_CODEGEN_STATUS_KIND)
     ).scalars().all()
-    assert max(a.version for a in arts) == 1
+    # Two versions per story now: the 'running' status at start (Fix 1) + the
+    # terminal status at the end. The latest version is the terminal one.
+    assert max(a.version for a in arts) == 2
     assert arts[0].object_uri == "inline://story_codegen_status"
     assert arts[0].content_hash.startswith("sha256:")
 
@@ -453,7 +518,8 @@ async def test_second_story_increments_version_and_merges_map(session, tmp_path)
     arts = session.execute(
         select(Artifact).where(Artifact.kind == STORY_CODEGEN_STATUS_KIND)
     ).scalars().all()
-    assert max(art.version for art in arts) == 2
+    # Each story writes twice now (running + terminal, Fix 1): 2 stories -> v4.
+    assert max(art.version for art in arts) == 4
 
 
 @pytest.mark.asyncio
