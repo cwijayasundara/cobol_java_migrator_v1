@@ -3,12 +3,19 @@
 story ids, and known DDD context names. Parser drops anything ungrounded."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import re
 from typing import Any
 
-from cobol_modernizer.enrichment.base import run_batched
+from cobol_modernizer.enrichment.base import (
+    EnrichmentResult,
+    run_batched,
+    run_batched_result,
+)
+from cobol_modernizer.enrichment.refs import relevant_refs
 from cobol_modernizer.technical_design.schema import (
     ApiContract,
     IntegrationContract,
@@ -286,3 +293,169 @@ async def generate_technical_design_payload(*, runner, model: str, timeout_s: fl
     return await run_batched(runner=runner, system=TECHNICAL_DESIGN_SYSTEM, prompt=prompt,
                              schema=TECHNICAL_DESIGN_SCHEMA, model=model, timeout_s=timeout_s,
                              label="technical-design-generate", max_turns=max_turns)
+
+
+# --- Classify-and-Act + Fan-Out: per-bounded-context decomposition ----------
+# The single TECHNICAL_DESIGN_SCHEMA above emits ALL services in ONE call (kept for
+# the size-routed one-shot path). The schema below scopes a single call to ONE
+# bounded context. Because every service is parsed independently by
+# `parse_technical_design_payload` (and cross-service ownership is checked AFTER the
+# merge, in the gate), the merged {services: [...]} from per-context calls is
+# byte-for-byte what the parser already consumes. Each per-context call inlines ONLY
+# that context's lossless-relevant refs (no truncation), so a large repo never has
+# to dump the whole graph into one prompt.
+
+SERVICE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "services": TECHNICAL_DESIGN_SCHEMA["properties"]["services"],
+    },
+    "required": ["services"],
+}
+
+
+SERVICE_SYSTEM = (
+    "You transform ONE DDD bounded context (plus the business backlog and seam "
+    "delivery waves) into the technical design for THAT context's service in a "
+    "Spring Boot system. Emit exactly one service for the given bounded context. "
+    "The service cites the story ids it delivers and the graph evidence refs it "
+    "derives from. Specify API contracts, persistence access patterns, and "
+    "integration contracts. Use access_pattern only for the enum legacy-mimic, "
+    "repository, event-sourced, or read-replica; put COBOL-specific read/write "
+    "semantics, transaction boundaries, file-status rules, and source refs in "
+    "details. Do not invent story ids, context names, or graph refs — use only the "
+    "ones provided."
+)
+
+
+def build_service_prompt(*, context: dict, backlog_json: str, seam_waves_json: str,
+                         relevant_refs: list[str], known_story_ids: list[str]) -> str:
+    """Prompt for the per-context service call. Scoped to ONE bounded context: only
+    this context's declaration is inlined (so other contexts never leak in), plus the
+    backlog, seam waves, this context's FULL relevant graph refs (no truncation), and
+    the citable story ids."""
+    ctx_name = str(context.get("name", ""))
+    return (
+        "## Bounded context (design the service for THIS context only)\n```json\n"
+        + json.dumps(context) + "\n```\n"
+        "## Business backlog (stories)\n```json\n" + backlog_json + "\n```\n"
+        "## Seam delivery waves (cutover order)\n```json\n" + seam_waves_json + "\n```\n"
+        "## Known graph evidence refs (cite only these)\n```json\n"
+        + json.dumps(relevant_refs) + "\n```\n"
+        "## Known story ids (cite only these)\n" + ", ".join(known_story_ids) + "\n"
+        f"Produce exactly one technical service for the bounded context "
+        f"\"{ctx_name}\" with API, persistence, and integration contracts. Every "
+        "writer resource this service owns must be owned by exactly one service. "
+        "For persistence, keep access_pattern to the allowed enum and put detailed "
+        "COBOL semantics in details."
+    )
+
+
+async def generate_service_for_context(*, runner, model: str, timeout_s: float,
+                                       max_turns: int, context: dict, backlog_json: str,
+                                       seam_waves_json: str, relevant_refs: list[str],
+                                       known_story_ids: list[str]) -> EnrichmentResult:
+    """MAP unit: a single bounded structured call that emits the service for ONE
+    bounded context. `relevant_refs` is the lossless relevant set for THIS context
+    (computed by the caller) and is inlined as-is — never truncated. Returns the
+    typed result so a gating caller can surface the concrete failure cause."""
+    prompt = build_service_prompt(
+        context=context, backlog_json=backlog_json, seam_waves_json=seam_waves_json,
+        relevant_refs=relevant_refs, known_story_ids=known_story_ids)
+    return await run_batched_result(
+        runner=runner, system=SERVICE_SYSTEM, prompt=prompt, schema=SERVICE_SCHEMA,
+        model=model, timeout_s=timeout_s,
+        label=f"technical-design:{context.get('name', '?')}", max_turns=max_turns)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _decompose(contexts: list[dict], *, mode: str | None = None) -> bool:
+    """Classify-and-Act size router. Proxy = number of bounded contexts (each becomes
+    one service — the unit decomposition parallelizes). TECH_DESIGN_GEN_MODE forces
+    the path; in `auto`, decompose at/above TECH_DESIGN_DECOMPOSE_MIN_CONTEXTS
+    (default 3)."""
+    m = (mode or os.environ.get("TECH_DESIGN_GEN_MODE", "auto")).strip().lower()
+    if m == "decomposed":
+        return True
+    if m == "oneshot":
+        return False
+    min_contexts = _env_int("TECH_DESIGN_DECOMPOSE_MIN_CONTEXTS", 3)
+    return len([c for c in contexts if isinstance(c, dict) and c.get("name")]) >= min_contexts
+
+
+async def generate_technical_design_result(*, runner, model: str, timeout_s: float,
+                                           contexts: list[dict], stories: list[dict],
+                                           seam_waves: list, known_refs: list[str],
+                                           known_story_ids: list[str],
+                                           max_turns: int = 6,
+                                           mode: str | None = None) -> EnrichmentResult:
+    """Size-routed technical-design generation returning the typed result.
+
+    auto/oneshot small input -> preserved one-shot path (all services in ONE call).
+    Decomposed path: fan out ONE bounded structured call per bounded context (bounded
+    concurrency, partial failure tolerated), each scoped to that context's OWN lossless
+    relevant refs, then merge into the {services: [...]} shape the parser consumes.
+    Never caps/truncates. Fails loud (ok=False with a typed cause) only when NO context
+    produced a service."""
+    backlog_json = json.dumps({"stories": stories})
+    seam_waves_json = json.dumps(seam_waves)
+    named = [c for c in contexts if isinstance(c, dict) and c.get("name")]
+
+    if not _decompose(contexts, mode=mode):
+        # Preserved one-shot path: all services in a single structured call. Inline
+        # only the BRD/DDD-relevant refs (lossless, NO cap) into the prompt; the full
+        # `known_refs` stays available to the caller for grounding.
+        relevant = relevant_refs(contexts, known_refs)
+        prompt = build_technical_design_prompt(
+            ddd_json=json.dumps({"contexts": contexts}), backlog_json=backlog_json,
+            seam_waves_json=seam_waves_json, graph_summary={"refs": relevant})
+        return await run_batched_result(
+            runner=runner, system=TECHNICAL_DESIGN_SYSTEM, prompt=prompt,
+            schema=TECHNICAL_DESIGN_SCHEMA, model=model, timeout_s=timeout_s,
+            label="technical-design-generate", max_turns=max_turns)
+
+    ctx_timeout_s = _env_float("TECH_DESIGN_CONTEXT_TIMEOUT_S", timeout_s)
+    ctx_max_turns = _env_int("TECH_DESIGN_CONTEXT_MAX_TURNS", max_turns)
+    max_concurrency = max(1, _env_int("TECH_DESIGN_MAX_CONCURRENCY", 4))
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def _one(context: dict) -> list[dict]:
+        # Each context inlines ONLY its OWN lossless-relevant refs (no truncation):
+        # walk the context declaration for cited known refs.
+        refs = relevant_refs(context, known_refs)
+        async with semaphore:
+            res = await generate_service_for_context(
+                runner=runner, model=model, timeout_s=ctx_timeout_s,
+                max_turns=ctx_max_turns, context=context, backlog_json=backlog_json,
+                seam_waves_json=seam_waves_json, relevant_refs=refs,
+                known_story_ids=known_story_ids)
+        if not res.ok:
+            logger.warning("technical-design: service call for context %s failed (%s) "
+                           "— no service from this context", context.get("name"), res.cause)
+            return []
+        return [s for s in res.payload.get("services", []) if isinstance(s, dict)]
+
+    results = await asyncio.gather(*[_one(c) for c in named])
+    merged: list[dict] = []
+    for services in results:
+        merged.extend(services)
+
+    if not merged:
+        return EnrichmentResult(
+            payload={}, ok=False,
+            cause="no output (turn cap / parse / api error): no service produced for "
+                  "any bounded context")
+    return EnrichmentResult(payload={"services": merged}, ok=True, cause=None)

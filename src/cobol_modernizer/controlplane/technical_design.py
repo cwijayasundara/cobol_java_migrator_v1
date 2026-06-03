@@ -21,11 +21,12 @@ from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.controlplane.domain import DomainDesignStorage
 from cobol_modernizer.controlplane.gates_util import upsert_gate
+from cobol_modernizer.enrichment.base import EnrichmentResult
 from cobol_modernizer.persistence.tables import Workspace
 from cobol_modernizer.seam.service import rank_candidates
 from cobol_modernizer.technical_design.generator import (
     fallback_technical_design_payload,
-    generate_technical_design_payload,
+    generate_technical_design_result,
     parse_technical_design_payload,
 )
 from cobol_modernizer.technical_design.render import render_html
@@ -96,19 +97,29 @@ def run_technical_design(*, session: Session, neo4j, workspace: Workspace,
     # Ensure a :Repository node exists for TechnicalDesignStorage (uses MATCH, like blueprint/backlog).
     neo4j.run("MERGE (r:Repository {slug: $slug}) SET r.name = coalesce(r.name, $slug)", slug=slug)
 
-    gen = generate or generate_technical_design_payload
-    raw = asyncio.run(gen(runner=SdkAgentRunner(),
-                          model=os.environ.get("TECHNICAL_DESIGN_MODEL", _DEFAULT_MODEL),
-                          timeout_s=float(os.environ.get("TECHNICAL_DESIGN_TIMEOUT_S", "300")),
-                          max_turns=int(os.environ.get("TECHNICAL_DESIGN_MAX_TURNS", "6")),
-                          ddd_json=json.dumps({"contexts": contexts}),
-                          backlog_json=json.dumps({"stories": stories}),
-                          seam_waves_json=json.dumps(seam_waves),
-                          graph_summary={"refs": sorted(known_refs)[:200]}))
+    # The typed orchestrator scopes each context to its OWN lossless-relevant refs
+    # (NO truncation — the legacy 200-ref prompt cap is gone). We pass the FULL
+    # `known_refs` so it can compute per-context relevance and so grounding in
+    # `parse_technical_design_payload` below sees every known ref.
+    gen = generate or generate_technical_design_result
+    result: EnrichmentResult = asyncio.run(
+        gen(runner=SdkAgentRunner(),
+            model=os.environ.get("TECHNICAL_DESIGN_MODEL", _DEFAULT_MODEL),
+            timeout_s=float(os.environ.get("TECHNICAL_DESIGN_TIMEOUT_S", "300")),
+            max_turns=int(os.environ.get("TECHNICAL_DESIGN_MAX_TURNS", "6")),
+            contexts=contexts, stories=stories, seam_waves=seam_waves,
+            known_refs=sorted(known_refs), known_story_ids=sorted(known_story_ids)))
     generation_mode = "llm"
-    if not raw:
-        logger.warning("technical_design: LLM returned no output for %s; using "
-                       "deterministic fallback", slug)
+    generation_cause = None
+    raw = result.payload
+    if not result.ok or not raw:
+        # The orchestrator swallows an LLM error/timeout/turn-cap/empty-output into a
+        # typed failure. Surface the CONCRETE cause, then degrade to the deterministic
+        # graph-grounded fallback so migration planning stays usable without another
+        # model call (technical_design keeps this fallback that backlog does not).
+        generation_cause = result.cause or "no output"
+        logger.warning("technical_design: generation failed for %s (%s); using "
+                       "deterministic fallback", slug, generation_cause)
         raw = fallback_technical_design_payload(contexts=contexts, stories=stories,
                                                 seam_waves=seam_waves,
                                                 known_refs=known_refs)
@@ -125,7 +136,7 @@ def run_technical_design(*, session: Session, neo4j, workspace: Workspace,
     session.flush()
     return {"repo_slug": slug, "services": len(design.services),
             "data_ownership_ok": ok, "version": design.version,
-            "generation_mode": generation_mode}
+            "generation_mode": generation_mode, "generation_cause": generation_cause}
 
 
 @router.post("/workspaces/{wid}/technical-design", status_code=202)
