@@ -427,6 +427,34 @@ def test_decompose_localized_subresults_persisted():
         app.dependency_overrides.clear()
 
 
+def test_verify_status_surfaces_per_story_verdicts_and_failing_subslices():
+    # Contract pin (cockpit lazy-load): after a FANNED-OUT verify, GET /verify/status
+    # `result` must carry the per-story verdicts AND the localized failing sub-slices
+    # (not just the rollup). The cockpit reads exactly these fields on mount; if the
+    # status endpoint drops them the per-story / localization / Repair UI renders blank.
+    stories = [_story("S1")]
+    c, eng = _client(_BacklogNeo4j(stories))
+    try:
+        c.post("/api/workspaces/ws-1/verify", json={
+            "program": "CBPOST1M", "record": "ACCT-RECORD", "record_key": "ID",
+            "tolerance_yaml": _SCALE_TOL,
+            "golden_records": _TWO_PROGRAM_GOLDEN,
+            "candidate_records": _TWO_PROGRAM_CANDIDATE_ONE_BAD,
+        })
+        status = c.get("/api/workspaces/ws-1/verify/status").json()
+        assert status["status"] == "done"
+        res = status["result"]
+        # Per-story sub-verdicts are surfaced (the UI renders these on mount).
+        per = res["per_story_verdicts"]
+        assert per and {p["story_id"] for p in per} == {"S1"}
+        assert per[0]["ok"] is False
+        # Decompose-further localization is surfaced (the failing sub-slice).
+        assert "CBACT01C" in res["failing_subslices"]
+        assert "CBPOST1M" not in res["failing_subslices"]
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_decompose_terminates_when_unlocalizable(monkeypatch):
     # A single-context candidate (no program field) cannot be decomposed further;
     # the loop must terminate (no-progress) and not spin. We assert it returns and

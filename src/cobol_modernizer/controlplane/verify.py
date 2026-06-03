@@ -546,6 +546,11 @@ def verify_status(wid: str, session: Session = Depends(get_session)) -> dict:
         "defect_count": ev.get("defect_count"),
         "open_questions": ev.get("open_questions"),
         "defects": ev.get("defects", []),
+        # Fanned-out per-story sub-verdicts + decompose-further localization are
+        # persisted in evidence_map; surface them so the cockpit can lazy-load the
+        # per-story verdicts / failing sub-slices / Repair actions on refresh.
+        "per_story_verdicts": ev.get("per_story_verdicts", []),
+        "failing_subslices": ev.get("failing_subslices", []),
         "stage_status": _verify_stage_status(session, ws.id),
     }
     return {"status": "done", "result": result, "error": None,
