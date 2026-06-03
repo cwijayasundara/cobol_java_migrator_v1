@@ -147,11 +147,11 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
     min_cov = _coverage_min()
     passed = report.coverage_ratio >= min_cov
     threshold = {"min_coverage": min_cov}
-    result = {"coverage_ratio": report.coverage_ratio, "uncovered": report.uncovered_refs[:50]}
+    gate_result = {"coverage_ratio": report.coverage_ratio, "uncovered": report.uncovered_refs[:50]}
     upsert_gate(session, workspace.id, "backlog", "backlog_coverage",
-                passed=passed, result=result, threshold=threshold)
+                passed=passed, result=gate_result, threshold=threshold)
     upsert_gate(session, workspace.id, "blueprint", "brd_logic_coverage",
-                passed=passed, result=result, threshold=threshold)
+                passed=passed, result=gate_result, threshold=threshold)
     session.flush()
     return {"repo_slug": slug, "epics": len(backlog.epics), "stories": len(backlog.stories),
             "coverage_ratio": report.coverage_ratio, "version": backlog.version}
