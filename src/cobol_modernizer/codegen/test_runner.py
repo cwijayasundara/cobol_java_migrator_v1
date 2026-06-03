@@ -29,6 +29,7 @@ degrade to a clear `error` result, also never raising.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -38,6 +39,8 @@ from pathlib import Path
 from typing import Callable
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 #: Default per-command subprocess timeout (seconds); env STORY_MVN_TIMEOUT_S.
 DEFAULT_TIMEOUT_S = 300
@@ -50,10 +53,17 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 class StoryTestStatus(str, Enum):
     """Outcome of a targeted run. `toolchain_unavailable` maps cleanly to the
     caller's `StoryCodegenStatus.generated_unverified` (the story is recorded as
-    generated-but-unverified, NOT failed, and the build continues)."""
+    generated-but-unverified, NOT failed, and the build continues).
+
+    `no_tests_run` means the targeted `-Dtest=<class>` matched/exercised ZERO
+    tests (no `Tests run:` summary, or `Tests run: 0`) — typically a wrong/
+    uncompiled test class. This must NEVER be reported as `ok`: in the RED/GREEN
+    loop a 0-test run that read as GREEN would let the repair loop accept
+    un-exercised code. The caller routes it like a failure (back to repair)."""
 
     ok = "ok"
     tests_failed = "tests-failed"
+    no_tests_run = "no-tests-run"
     compile_failed = "compile-failed"
     toolchain_unavailable = "toolchain-unavailable"
     error = "error"
@@ -124,11 +134,22 @@ def _parse_failing_tests(text: str) -> list[str]:
     return found
 
 
-def _tests_failure_count(text: str) -> int | None:
-    """Failures+Errors from the highest `Tests run:` line, or None if absent."""
-    counts = [int(m.group(2)) + int(m.group(3))
-              for m in _TESTS_RUN.finditer(text)]
-    return max(counts) if counts else None
+def _tests_run_counts(text: str) -> tuple[int | None, int | None]:
+    """`(total, failures+errors)` from the FINAL `Tests run:` summary line, or
+    `(None, None)` when surefire emitted no summary at all.
+
+    Using the LAST summary (surefire prints a per-class line then a final
+    aggregate) is correct when multiple classes run — `max()` across lines would
+    over/under-count. The `total` is what lets the caller demand POSITIVE
+    evidence that tests actually ran: a wrong/uncompiled `-Dtest=<class>` runs 0
+    tests and must not read as GREEN."""
+    matches = list(_TESTS_RUN.finditer(text))
+    if not matches:
+        return None, None
+    last = matches[-1]
+    total = int(last.group(1))
+    failed = int(last.group(2)) + int(last.group(3))
+    return total, failed
 
 
 # --------------------------------------------------------------------------- #
@@ -205,13 +226,26 @@ def run_targeted_tests(
     if isinstance(test_proc, StoryTestResult):
         return test_proc
     test_out = (test_proc.stdout or "") + (test_proc.stderr or "")
-    failure_count = _tests_failure_count(test_out)
-    tests_passed = test_proc.returncode == 0 and (failure_count or 0) == 0
+    ran, failed = _tests_run_counts(test_out)
 
-    if tests_passed:
+    # GREEN requires POSITIVE evidence that tests actually ran: a clean exit code
+    # alone is not enough, because a wrong/uncompiled `-Dtest=<class>` exits 0
+    # with ZERO tests. Demand a parsed total > 0 with no failures/errors.
+    if test_proc.returncode == 0 and ran is not None and ran > 0 and failed == 0:
         return StoryTestResult(
             status=StoryTestStatus.ok, compile_passed=True, tests_passed=True,
             log_excerpt=_truncate(test_out, log_max))
+
+    # No tests exercised (no summary, or `Tests run: 0`) — never `ok`.
+    if (ran is None or ran == 0) and not failed:
+        logger.warning("targeted test for %s ran 0 tests (no surefire summary "
+                       "or Tests run: 0) — wrong/uncompiled test class?",
+                       test_class)
+        note = (f"no tests run for -Dtest={test_class} "
+                f"(parsed total={ran}); class wrong or not compiled.\n")
+        return StoryTestResult(
+            status=StoryTestStatus.no_tests_run, compile_passed=True,
+            tests_passed=False, log_excerpt=_truncate(note + test_out, log_max))
 
     return StoryTestResult(
         status=StoryTestStatus.tests_failed, compile_passed=True,
@@ -229,14 +263,19 @@ def _exec(
         return exec_run(cmd, cwd=str(cwd), capture_output=True, text=True,
                         timeout=timeout_s)
     except subprocess.TimeoutExpired:
+        logger.warning("`%s` timed out after %gs", " ".join(cmd), timeout_s)
         return StoryTestResult(
             status=StoryTestStatus.error,
             log_excerpt=f"`{' '.join(cmd)}` timed out after {timeout_s:g}s")
     except OSError as exc:
+        logger.exception("failed to run `%s`", " ".join(cmd))
         return StoryTestResult(
             status=StoryTestStatus.error,
             log_excerpt=f"failed to run `{' '.join(cmd)}`: {exc}")
     except Exception as exc:  # noqa: BLE001 — never let the runner raise
+        # A future typo (AttributeError etc.) would otherwise be silently
+        # swallowed into status=error; log the stack trace so real bugs surface.
+        logger.exception("unexpected error running `%s`", " ".join(cmd))
         return StoryTestResult(
             status=StoryTestStatus.error,
             log_excerpt=f"unexpected error running `{' '.join(cmd)}`: {exc}")

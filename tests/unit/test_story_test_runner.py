@@ -143,6 +143,72 @@ def test_all_green(monkeypatch, project_dir):
     assert result.failing_tests == []
 
 
+def test_no_surefire_summary_is_not_green(monkeypatch, project_dir):
+    """Compile OK + test rc=0 but NO `Tests run:` line means ZERO tests were
+    exercised (wrong/uncompiled -Dtest=<class>). Must NOT read as ok/green —
+    otherwise the RED step would falsely pass and accept un-exercised code."""
+    monkeypatch.setattr(tr.shutil, "which", lambda _name: "/usr/bin/mvn")
+
+    def _run(args, **kwargs):
+        if "compile" in args and "test" not in args:
+            return _completed(args, returncode=0, stdout="BUILD SUCCESS")
+        # surefire matched nothing — no `Tests run:` summary at all
+        return _completed(args, returncode=0, stdout="BUILD SUCCESS\n")
+
+    monkeypatch.setattr(tr.subprocess, "run", _run)
+
+    result = run_targeted_tests(project_dir, "FooTest")
+
+    assert result.status is StoryTestStatus.no_tests_run
+    assert result.status is not StoryTestStatus.ok
+    assert result.compile_passed is True
+    assert result.tests_passed is False
+
+
+def test_zero_tests_run_is_not_green(monkeypatch, project_dir):
+    """`Tests run: 0` (e.g. an empty/filtered class) must NOT read as green."""
+    monkeypatch.setattr(tr.shutil, "which", lambda _name: "/usr/bin/mvn")
+
+    def _run(args, **kwargs):
+        if "compile" in args and "test" not in args:
+            return _completed(args, returncode=0, stdout="OK")
+        return _completed(args, returncode=0,
+                          stdout="Tests run: 0, Failures: 0, Errors: 0, Skipped: 0\n"
+                                 "BUILD SUCCESS")
+
+    monkeypatch.setattr(tr.subprocess, "run", _run)
+
+    result = run_targeted_tests(project_dir, "FooTest")
+
+    assert result.status is StoryTestStatus.no_tests_run
+    assert result.tests_passed is False
+
+
+def test_uses_final_summary_line_when_multiple_classes(monkeypatch, project_dir):
+    """With multiple per-class lines surefire prints a final aggregate; we read
+    the LAST `Tests run:` summary (not max()) for the run total + failures."""
+    monkeypatch.setattr(tr.shutil, "which", lambda _name: "/usr/bin/mvn")
+    surefire = (
+        "Tests run: 3, Failures: 0, Errors: 0, Skipped: 0\n"   # class A (per-class)
+        "Tests run: 2, Failures: 0, Errors: 0, Skipped: 0\n"   # class B (per-class)
+        "Results:\n"
+        "Tests run: 5, Failures: 0, Errors: 0, Skipped: 0\n"   # final aggregate
+        "BUILD SUCCESS\n"
+    )
+
+    def _run(args, **kwargs):
+        if "compile" in args and "test" not in args:
+            return _completed(args, returncode=0, stdout="OK")
+        return _completed(args, returncode=0, stdout=surefire)
+
+    monkeypatch.setattr(tr.subprocess, "run", _run)
+
+    result = run_targeted_tests(project_dir, "FooTest")
+
+    assert result.status is StoryTestStatus.ok
+    assert result.tests_passed is True
+
+
 def test_tests_failed_parses_failing_names(monkeypatch, project_dir):
     """Failing test names are parsed from typical surefire console output."""
     monkeypatch.setattr(tr.shutil, "which", lambda _name: "/usr/bin/mvn")
