@@ -8,6 +8,7 @@ from sqlalchemy.pool import StaticPool
 from cobol_modernizer.api import app
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
+from cobol_modernizer.enrichment.base import EnrichmentResult
 from cobol_modernizer.persistence.tables import Base, Gate, JourneyStage, Workspace
 
 
@@ -37,7 +38,7 @@ class FakeNeo4j:
         return []
 
 
-def _fake_payload(**_kw):
+def _fake_payload_dict():
     return {
         "epics": [{"id": "EPIC-1", "title": "Posting", "outcome": "apply",
                    "brd_requirement_ids": ["FR-1"], "story_ids": ["US-1"],
@@ -49,6 +50,39 @@ def _fake_payload(**_kw):
                                               "evidence_refs": ["CBPOST1M.2100-POST"]}],
                      "evidence_refs": ["CBPOST1M", "CBPOST1M.2100-POST"]}],
     }
+
+
+def _fake_payload(**_kw):
+    """A typed success result (the orchestrator's `EnrichmentResult` contract)."""
+    return EnrichmentResult(payload=_fake_payload_dict(), ok=True, cause=None)
+
+
+def _multi_epic_result():
+    """A typed DECOMPOSED success result whose stories span multiple epics."""
+    return EnrichmentResult(payload={
+        "epics": [
+            {"id": "EPIC-1", "title": "Posting", "outcome": "apply",
+             "brd_requirement_ids": ["FR-1"], "story_ids": ["US-1"],
+             "evidence_refs": ["CBPOST1M"]},
+            {"id": "EPIC-2", "title": "Reporting", "outcome": "report",
+             "brd_requirement_ids": ["FR-1"], "story_ids": ["US-2"],
+             "evidence_refs": ["CBPOST1M"]},
+        ],
+        "stories": [
+            {"id": "US-1", "epic_id": "EPIC-1", "title": "Post valid tx",
+             "actor": "batch", "narrative": "As a batch I post.",
+             "brd_requirement_ids": ["FR-1"],
+             "acceptance_criteria": [{"id": "AC-1", "statement": "balance updates",
+                                      "evidence_refs": ["CBPOST1M.2100-POST"]}],
+             "evidence_refs": ["CBPOST1M", "CBPOST1M.2100-POST"]},
+            {"id": "US-2", "epic_id": "EPIC-2", "title": "Report posted tx",
+             "actor": "analyst", "narrative": "As an analyst I report.",
+             "brd_requirement_ids": ["FR-1"],
+             "acceptance_criteria": [{"id": "AC-2", "statement": "report lists tx",
+                                      "evidence_refs": ["CBPOST1M.2100-POST"]}],
+             "evidence_refs": ["CBPOST1M", "CBPOST1M.2100-POST"]},
+        ],
+    }, ok=True, cause=None)
 
 
 def _client(monkeypatch):
@@ -88,7 +122,7 @@ def test_backlog_status_idle_before_generation(monkeypatch):
 
 def test_backlog_post_generates_persists_and_creates_gate(monkeypatch):
     from cobol_modernizer.controlplane import backlog as bl
-    monkeypatch.setattr(bl, "generate_backlog_payload",
+    monkeypatch.setattr(bl, "generate_backlog_result",
                         lambda **kw: __import__("asyncio").sleep(0, result=_fake_payload()))
     client, eng = _client(monkeypatch)
     try:
@@ -102,6 +136,57 @@ def test_backlog_post_generates_persists_and_creates_gate(monkeypatch):
                      s.execute(select(Gate).where(Gate.workspace_id == "ws-1")).scalars().all()}
             assert "backlog_coverage" in gates
             assert "brd_logic_coverage" in gates
+    finally:
+        app.dependency_overrides.clear()
+        jobs.runner.inline = False
+
+
+def test_backlog_post_decomposed_multi_epic_persists_and_creates_gate(monkeypatch):
+    """A typed DECOMPOSED success whose stories span multiple epics feeds the
+    unchanged reduce: persists, derives the DAG, and publishes coverage gates."""
+    from cobol_modernizer.controlplane import backlog as bl
+
+    async def _gen(**_kw):
+        return _multi_epic_result()
+
+    monkeypatch.setattr(bl, "generate_backlog_result", _gen)
+    client, eng = _client(monkeypatch)
+    try:
+        r = client.post("/api/workspaces/ws-1/backlog")
+        assert r.status_code in (200, 202)
+        done = client.get("/api/workspaces/ws-1/backlog").json()
+        assert done["status"] == "done"
+        assert done["result"]["epics"] == 2
+        assert done["result"]["stories"] == 2
+        with Session(eng) as s:
+            gates = {g.gate_key: g for g in
+                     s.execute(select(Gate).where(Gate.workspace_id == "ws-1")).scalars().all()}
+            assert "backlog_coverage" in gates
+            assert "brd_logic_coverage" in gates
+    finally:
+        app.dependency_overrides.clear()
+        jobs.runner.inline = False
+
+
+def test_backlog_post_typed_failure_surfaces_concrete_cause(monkeypatch):
+    """A typed FAILURE from the orchestrator surfaces as a 502 whose error names the
+    concrete cause — not the old generic string, not a runner-reconstructed guess."""
+    from cobol_modernizer.controlplane import backlog as bl
+
+    async def _fail(**_kw):
+        return EnrichmentResult(payload={}, ok=False,
+                                cause="epics generation failed: timeout after 120s")
+
+    monkeypatch.setattr(bl, "generate_backlog_result", _fail)
+    client, _ = _client(monkeypatch)
+    try:
+        r = client.post("/api/workspaces/ws-1/backlog")
+        assert r.status_code in (200, 202)
+        failed = client.get("/api/workspaces/ws-1/backlog").json()
+        assert failed["status"] == "failed"
+        assert failed["error"]
+        assert "502" in failed["error"]
+        assert "epics generation failed: timeout after 120s" in failed["error"]
     finally:
         app.dependency_overrides.clear()
         jobs.runner.inline = False
@@ -135,7 +220,7 @@ def test_backlog_inlines_only_relevant_refs_but_grounds_full_set(monkeypatch):
 
     async def _capture(**kw):
         captured["known_refs"] = list(kw["known_refs"])
-        return _fake_payload()
+        return _fake_payload()  # typed EnrichmentResult
 
     grounded: dict = {}
     real_parse = bl.parse_backlog_payload
@@ -145,7 +230,7 @@ def test_backlog_inlines_only_relevant_refs_but_grounds_full_set(monkeypatch):
         return real_parse(raw, repo_slug=repo_slug, known_refs=known_refs,
                           known_requirement_ids=known_requirement_ids)
 
-    monkeypatch.setattr(bl, "generate_backlog_payload", _capture)
+    monkeypatch.setattr(bl, "generate_backlog_result", _capture)
     monkeypatch.setattr(bl, "parse_backlog_payload", _parse_spy)
 
     eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
@@ -190,7 +275,7 @@ def test_backlog_post_surfaces_generation_failure(monkeypatch):
     async def _boom(**_kw):
         raise RuntimeError("llm down")
 
-    monkeypatch.setattr(bl, "generate_backlog_payload", _boom)
+    monkeypatch.setattr(bl, "generate_backlog_result", _boom)
     client, _ = _client(monkeypatch)
     try:
         r = client.post("/api/workspaces/ws-1/backlog")

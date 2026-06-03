@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from cobol_modernizer.agent.harness import SdkAgentRunner
 from cobol_modernizer.backlog.dependency import derive_story_dependencies
 from cobol_modernizer.backlog.generator import (
-    generate_backlog_payload,
+    generate_backlog_result,
     parse_backlog_payload,
 )
 from cobol_modernizer.backlog.render import render_html
@@ -27,6 +27,7 @@ from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.controlplane.gates_util import upsert_gate
+from cobol_modernizer.enrichment.base import EnrichmentResult
 from cobol_modernizer.enrichment.refs import relevant_refs
 from cobol_modernizer.persistence.tables import Workspace
 from cobol_modernizer.seam.service import rank_candidates
@@ -63,25 +64,6 @@ def _job_view(job: dict | None) -> dict:
             "finished_at": job.get("finished_at")}
 
 
-def _backlog_failure_cause(runner: Any) -> str:
-    """Build a concrete 502 cause from the runner's last-call diagnostics. The
-    harness swallows turn-cap / parse / api errors to {} (and run_batched/timeout
-    swallow timeouts), so an empty payload here means one of those — name it from
-    `runner.calls[-1]` when present, mirroring enrichment.base.run_batched_result."""
-    cause = "no output (LLM error, timeout, or turn cap) — see server logs"
-    calls = getattr(runner, "calls", None)
-    if calls:
-        last = calls[-1]
-        diag = []
-        if last.get("hit_turn_cap"):
-            diag.append("hit turn cap")
-        if last.get("api_error_status") is not None:
-            diag.append(f"api_error_status={last['api_error_status']}")
-        if diag:
-            cause = f"{cause} ({', '.join(diag)})"
-    return cause
-
-
 def _requirement_ids(sections: list[dict]) -> set[str]:
     ids: set[str] = set()
     for sec in sections:
@@ -94,8 +76,9 @@ def _requirement_ids(sections: list[dict]) -> set[str]:
 
 def run_backlog(*, session: Session, neo4j, workspace: Workspace,
                 generate: Callable[..., Any] | None = None) -> dict:
-    """Generate + persist a backlog and publish its gates. `generate` defaults to the
-    real LLM call (injected by tests)."""
+    """Generate + persist a backlog and publish its gates. `generate` is the TYPED
+    orchestrator returning an `EnrichmentResult` (defaults to `generate_backlog_result`;
+    injected by tests)."""
     slug = workspace.repo_slug
     brd = BRDStorage(neo4j).get_latest(slug)
     if not brd:
@@ -123,21 +106,24 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
     neo4j.run("MERGE (r:Repository {slug: $slug}) SET r.name = coalesce(r.name, $slug)",
               slug=slug)
 
-    gen = generate or generate_backlog_payload
+    gen = generate or generate_backlog_result
     runner = SdkAgentRunner()
-    raw = asyncio.run(gen(runner=runner, model=os.environ.get("BACKLOG_MODEL", _DEFAULT_MODEL),
-                          timeout_s=float(os.environ.get("BACKLOG_TIMEOUT_S", "300")),
-                          max_turns=int(os.environ.get("BACKLOG_MAX_TURNS", "6")),
-                          brd_sections=sections, known_refs=relevant,
-                          known_requirement_ids=sorted(known_req_ids)))
-    if not raw:
-        # run_batched swallows an LLM error/timeout/turn-cap to {}. Fail the job loudly
-        # rather than persist an empty backlog and report success. Surface the concrete
-        # cause from the runner's per-call diagnostics (turn cap / api_error_status) so
-        # the 502 names WHICH failure it was. (Task 5 will consume the typed
-        # EnrichmentResult directly via the orchestrator.)
-        raise HTTPException(status_code=502,
-                            detail=f"backlog generation failed: {_backlog_failure_cause(runner)}")
+    result: EnrichmentResult = asyncio.run(
+        gen(runner=runner, model=os.environ.get("BACKLOG_MODEL", _DEFAULT_MODEL),
+            timeout_s=float(os.environ.get("BACKLOG_TIMEOUT_S", "300")),
+            max_turns=int(os.environ.get("BACKLOG_MAX_TURNS", "6")),
+            brd_sections=sections, known_refs=relevant,
+            known_requirement_ids=sorted(known_req_ids)))
+    if not result.ok or not result.payload:
+        # The orchestrator swallows an LLM error/timeout/turn-cap/empty-output into a
+        # typed failure. Fail the job loudly rather than persist an empty backlog and
+        # report success — and surface the orchestrator's CONCRETE cause (e.g. "epics
+        # generation failed: timeout", "no output (turn cap / parse / api error)") so
+        # the 502 names WHICH failure it was. (ok=True with an empty payload shouldn't
+        # happen, but is defensively treated as a failure too.)
+        cause = result.cause or "no output"
+        raise HTTPException(status_code=502, detail=f"backlog generation failed: {cause}")
+    raw = result.payload
     backlog = parse_backlog_payload(raw, repo_slug=slug, known_refs=set(known_refs),
                                     known_requirement_ids=known_req_ids)
     try:
@@ -149,7 +135,11 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
     backlog.stories = dag.stories
     backlog.evidence_map = {s.id: s.evidence_refs for s in backlog.stories}
 
+    # The orchestrator may return ok=True with some BRD requirements still uncovered
+    # (it stopped at BACKLOG_MAX_ROUNDS). The brd_logic_coverage gate below already
+    # computes/surfaces that and gates on BACKLOG_COVERAGE_MIN — no extra logic here.
     report = brd_logic_coverage(neo4j, slug, sections, backlog.evidence_map)
+    logger.info("backlog: coverage ratio %.3f for %s", report.coverage_ratio, slug)
     coverage = report.model_dump(mode="json")
     BacklogStorage(neo4j).save(backlog, coverage=coverage,
                                html=render_html(backlog, coverage))
