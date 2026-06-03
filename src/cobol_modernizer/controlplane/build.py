@@ -7,6 +7,12 @@ SpotBugs/FindSecBugs, Error Prone, Checkstyle), writes the generated files into
 it, and marks the `build` stage passed. Needs ANTHROPIC_API_KEY and a parsed
 graph; run Blueprint first (the BRD is the codegen brief).
 
+Routing is governed by `CODEGEN_MODE` (default `story`): `POST /build` runs the
+story-sliced engine via `build_stories.run_story_build` (scaffold-from-design +
+per-story TDD loop), mapping its result to a `BuildResult`-compatible summary;
+`legacy_slice` keeps the original one-shot writer-slice path described above as a
+debug/fallback escape hatch.
+
 Compiling + running the quality gates (`mvn verify`) is a separate, slower,
 host-dependent step (needs Maven + a JDK and a reconciled Spring Boot/Java pair),
 so the endpoint produces the source artifact + scaffold, not a compiled jar. The
@@ -516,8 +522,10 @@ def _job_view(job: dict) -> dict:
 def build_workspace(wid: str, session: Session = Depends(get_session),
                     neo4j=Depends(get_neo4j)) -> dict:
     """Kick off the (multi-minute) codegen run as a background job and return 202;
-    the UI polls GET .../build. Validates fast first (key / repo dir / BRD present).
-    A TDD violation surfaces as a 'failed' job (error in the GET status)."""
+    the UI polls GET .../build. Validates fast first (key / repo dir / BRD present),
+    and in story mode (the `CODEGEN_MODE` default) also that the backlog/domain/
+    technical specs exist. A TDD violation surfaces as a 'failed' job (error in the
+    GET status)."""
     ws = _workspace(session, wid)
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(status_code=503,

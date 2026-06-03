@@ -150,6 +150,28 @@ def _setup(monkeypatch, tmp_path, *, mode, has_brd=True, has_specs=True):
 
 
 # --------------------------------------------------------------------------- #
+# Mode switch (`_codegen_mode`) — the default-routing contract is `story`       #
+# --------------------------------------------------------------------------- #
+def test_codegen_mode_defaults_to_story_when_env_absent(monkeypatch):
+    # The spec's headline guarantee: POST /build routes through the story engine
+    # by default. With no CODEGEN_MODE set, the switch resolves to `story`.
+    monkeypatch.delenv("CODEGEN_MODE", raising=False)
+    assert bd._codegen_mode() == "story"
+
+
+def test_codegen_mode_unrecognized_value_falls_back_to_story(monkeypatch):
+    # An unrecognized value is not an error — it degrades to the story default so a
+    # typo can never silently route to the legacy escape hatch.
+    monkeypatch.setenv("CODEGEN_MODE", "garbage")
+    assert bd._codegen_mode() == "story"
+
+
+def test_codegen_mode_legacy_slice_is_honored(monkeypatch):
+    monkeypatch.setenv("CODEGEN_MODE", "legacy_slice")
+    assert bd._codegen_mode() == "legacy_slice"
+
+
+# --------------------------------------------------------------------------- #
 # Legacy-slice mode (the escape hatch) — original behavior, pinned explicitly  #
 # --------------------------------------------------------------------------- #
 def test_legacy_slice_generates_scaffolds_and_writes_files(monkeypatch, tmp_path):
