@@ -14,6 +14,7 @@ from cobol_modernizer.controlplane.technical_design import router as _technical_
 from cobol_modernizer.controlplane.build import router as _build_router
 from cobol_modernizer.controlplane.build_stories import router as _build_stories_router
 from cobol_modernizer.controlplane.verify import router as _verify_router
+from cobol_modernizer.controlplane.verify_repair import router as _verify_repair_router
 from cobol_modernizer.controlplane.ask import router as _ask_router
 from cobol_modernizer.controlplane.graph import router as _graph_router
 from cobol_modernizer.controlplane.events import router as _events_router
@@ -29,6 +30,7 @@ controlplane_router.include_router(_technical_design_router)
 controlplane_router.include_router(_build_router)
 controlplane_router.include_router(_build_stories_router)
 controlplane_router.include_router(_verify_router)
+controlplane_router.include_router(_verify_repair_router)
 controlplane_router.include_router(_ask_router)
 controlplane_router.include_router(_graph_router)
 controlplane_router.include_router(_events_router)
