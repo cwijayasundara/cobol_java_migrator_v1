@@ -41,7 +41,7 @@ from cobol_modernizer.backlog.schema import Backlog
 from cobol_modernizer.backlog.storage import BacklogStorage
 from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.codegen.story_plan import ACCEPTED_STORY_STATUSES, \
-    StoryCodegenItem, StoryCodegenPlan, build_story_codegen_plan
+    StoryCodegenItem, StoryCodegenPlan, StoryCodegenStatus, build_story_codegen_plan
 from cobol_modernizer.codegen.story_storage import get_status_map
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.build import (
@@ -232,9 +232,10 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
 
     from cobol_modernizer.agent.deps import GraphDeps
     from cobol_modernizer.agent.harness import SdkAgentRunner
+    from cobol_modernizer.codegen.budget import build_budget_from_env
     from cobol_modernizer.codegen.scaffold_from_design import scaffold_from_design
     from cobol_modernizer.codegen.story_context import build_story_context
-    from cobol_modernizer.codegen.story_runner import run_story_plan
+    from cobol_modernizer.codegen.story_runner import run_story_plan_until_done
 
     slug = workspace.repo_slug
     repo_dir = source_root / slug
@@ -276,10 +277,20 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
             brd_requirements=brd_reqs, completed_summaries=list(completed_summaries),
             source_pack=pack)
 
+    # Repeat-until-done OUTER loop (Task 6 wrapper): `run_story_plan_until_done` runs the
+    # whole plan, then re-runs ONLY the still-`failed` stories until they pass, the pooled
+    # budget is exhausted, or the per-story attempt cap is hit — at which point any story
+    # still failing is re-stamped TERMINAL `deferred` (pass-with-deferred: one bad story
+    # never wedges the build). The build-level POOLED token budget (with the retained
+    # per-story cap) is sized from the environment off the plan's story count. Each
+    # concurrent story still gets its OWN runner (SdkAgentRunner factory) so per-story
+    # token/cost telemetry is not crosstalked.
     runner = SdkAgentRunner()
-    results = asyncio.run(run_story_plan(
+    results = asyncio.run(run_story_plan_until_done(
         items, session=session, workspace_id=workspace.id, module_dir=module_dir,
         context_pack_for=_context_pack_for, runner=runner,
+        runner_factory=SdkAgentRunner,
+        build_budget=build_budget_from_env(len(items)),
         project_index=_module_file_index(module_dir)))
     return {
         "repo_slug": slug, "module_dir": str(module_dir),
@@ -289,49 +300,150 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
     }
 
 
-#: Statuses that do NOT fail the build. The SINGLE accepted-status set lives in
-#: `story_plan.ACCEPTED_STORY_STATUSES` (shared with the resume policy in
-#: `budget.should_skip`, so the gate and resume never drift). `passed`/`skipped`
-#: are obvious; a toolchain-absent `generated-unverified` is ACCEPTED-but-unverified
-#: by design (the degrade contract — mvn missing must not fail the build), exactly as
-#: the story runner's GATE treats it. Anything else (notably `failed`/`blocked`) fails
-#: the run so the job surfaces as `failed`, mirroring the sibling fail-loud `/build`.
+#: Statuses that count as a story GENUINELY BUILT. The SINGLE accepted-status set lives
+#: in `story_plan.ACCEPTED_STORY_STATUSES` (shared with the resume policy in
+#: `budget.should_skip`, so the gate and resume never drift). `passed` is obvious; a
+#: toolchain-absent `generated-unverified` is ACCEPTED-but-unverified by design (the
+#: degrade contract — mvn missing must not fail the build), exactly as the story
+#: runner's GATE treats it; `skipped` is an already-accepted earlier outcome.
 _ACCEPTABLE_STATUSES = ACCEPTED_STORY_STATUSES
 
+#: The `deferred` status — a story that exhausted its repeat-until-done retry/budget
+#: allotment WITHOUT acceptance, but is not a hard `error`/`failed`. The build gate
+#: TOLERATES it (pass-with-deferred: one bad story can never wedge the build) even
+#: though it is deliberately NOT in `ACCEPTED_STORY_STATUSES`. The operator still sees
+#: every deferred story (counts below + the persisted per-story status map).
+_DEFERRED_STATUS = StoryCodegenStatus.deferred.value
 
-def _gate_stage(result: dict) -> None:
+#: The full set the gate TOLERATES = genuinely-built ∪ {deferred}. A status outside
+#: this set (notably `failed`/`error`/`blocked`) STILL fails the gate, surfacing the
+#: job as `failed` and leaving the stage un-passed — mirroring the sibling fail-loud
+#: `/build`. Deferred passes; error/failed does not.
+_GATE_TOLERATED = frozenset(_ACCEPTABLE_STATUSES) | {_DEFERRED_STATUS}
+
+
+def _gate_stage(result: dict) -> dict[str, int]:
     """Decide whether the `build` stage may be marked passed from the step's per-story
-    results. Raises RuntimeError (so the job ends `failed`, surfacing via the GET job
-    view's `error`) when there are NO results or ANY story ended in a non-acceptable
-    status. The per-story status map is persisted by the runner regardless, so the
-    operator still sees the full detail under GET .../build/stories."""
+    results, PASS-WITH-DEFERRED. Returns a small progress-count summary
+    (`pass_count`/`deferred_count`/`pending`/`story_count`) the caller surfaces so the
+    operator sees real progress.
+
+    Raises RuntimeError (so the job ends `failed`, surfacing via the GET job view's
+    `error`) when:
+      - there are NO results (nothing was built); OR
+      - ANY story ended in a status outside the tolerated set — i.e. a genuine
+        `failed`/`error`/`blocked` (DISTINCT from `deferred`, which is tolerated); OR
+      - NO story was GENUINELY built (every result is `deferred`/`skipped`) — a build
+        that produced zero passed/generated-unverified stories has not really built.
+
+    `deferred` is explicitly tolerated (never wedge the build on one bad story) even
+    though it is NOT in `ACCEPTED_STORY_STATUSES`. The per-story status map is persisted
+    by the runner regardless, so the operator still sees the full detail under GET
+    .../build/stories."""
     results = result.get("results") or []
     if not results:
         raise RuntimeError("story build produced no results — nothing was built")
-    offenders = sorted({r.get("status") for r in results
-                        if r.get("status") not in _ACCEPTABLE_STATUSES})
+
+    statuses = [r.get("status") for r in results]
+    offenders = sorted({s for s in statuses if s not in _GATE_TOLERATED})
     if offenders:
         raise RuntimeError(
             "story build did not pass — story statuses not acceptable: "
             f"{', '.join(s for s in offenders if s)}")
 
+    pass_count = sum(1 for s in statuses if s in _ACCEPTABLE_STATUSES
+                     and s != StoryCodegenStatus.skipped.value)
+    skipped_count = sum(1 for s in statuses
+                        if s == StoryCodegenStatus.skipped.value)
+    deferred_count = sum(1 for s in statuses if s == _DEFERRED_STATUS)
+    # GENUINELY built = passed or generated-unverified (NOT skipped, NOT deferred). At
+    # least one is required so an all-deferred / all-skipped run cannot pass the gate.
+    if pass_count == 0:
+        raise RuntimeError(
+            "story build produced no genuinely-built stories "
+            f"(deferred={deferred_count}, skipped={skipped_count}) — build did not pass")
+    return {
+        "story_count": len(statuses),
+        "pass_count": pass_count,
+        "skipped_count": skipped_count,
+        "deferred_count": deferred_count,
+        # `pending` = anything tolerated-but-not-yet-a-genuine-pass (deferred + skipped):
+        # what the operator still has outstanding from a clean rebuild.
+        "pending": deferred_count + skipped_count,
+    }
+
+
+#: Re-trigger policy. RESTART-FRESH by default (`BUILD_RESUME=0`): a new POST /build(/
+#: stories) regenerates ALL stories, ignoring prior RUNS' persisted accepted state — so
+#: a second trigger never silently skips everything as already-done. The within-RUN
+#: dedup (the repeat-until-done loop not regenerating a story already accepted IN THIS
+#: RUN) is owned by `run_story_plan_until_done`'s in-memory pass bookkeeping and is
+#: UNAFFECTED by this reset. A reserved `BUILD_RESUME=1` (resume/force) flag would keep
+#: prior accepted state to resume across runs — NOT wired yet (reserved; default fresh).
+BUILD_RESUME_ENV = "BUILD_RESUME"
+
+
+def _build_resume() -> bool:
+    """Whether to RESUME across runs (keep prior accepted per-story state). Default
+    False (restart-fresh). Only an explicit truthy `BUILD_RESUME` opts in; the resume
+    path itself is reserved/unbuilt, so today this only ever returns False unless an
+    operator forces it."""
+    return os.environ.get(BUILD_RESUME_ENV, "0").strip().lower() in {"1", "true", "yes"}
+
+
+def _reset_prior_story_status(session: Session, workspace: Workspace,
+                              plan: StoryCodegenPlan, story_id: str | None) -> None:
+    """RESTART-FRESH: clear the persisted `story_codegen_status` records for the stories
+    this run will (re)build, so the cross-run resume policy (`budget.should_skip`, which
+    skips an accepted story whose context_hash is unchanged) finds NO prior record and
+    every targeted story is regenerated from scratch. Bounded to the stories in scope
+    (the one `story_id`, or the whole plan) so a single-story re-trigger never wipes the
+    other stories' history. The within-RUN dedup is untouched (it is in-memory in the
+    repeat loop, not read from these records)."""
+    from cobol_modernizer.codegen.story_storage import (
+        get_status_map, record_story_status,
+    )
+    targets = ({story_id} if story_id is not None
+               else {i.story_id for i in plan.items})
+    current = get_status_map(session, workspace.id)
+    stale = [sid for sid in targets if sid in current]
+    for sid in stale:
+        # Re-stamp to `pending` (a non-accepted status) so the resume policy re-runs the
+        # story. We write rather than hard-delete to preserve the artifact version chain.
+        record_story_status(session, workspace_id=workspace.id, story_id=sid,
+                            payload={"status": StoryCodegenStatus.pending.value})
+    if stale:
+        logger.info("build-stories: restart-fresh reset %d prior story record(s) "
+                    "for repo=%s", len(stale), workspace.repo_slug)
+
 
 def run_story_build(*, session: Session, neo4j, workspace: Workspace,
                     source_root: Path, output_root: Path, story_id: str | None = None,
                     build: Callable[..., dict] = None) -> dict[str, Any]:  # type: ignore[assignment]
-    """Run the story build for a workspace: precheck -> plan -> heavy story-run step
-    -> gate -> mark the `build` stage passed. `build` is the injectable seam: it
-    defaults to the module-level `_run_story_build_step` (whose value is the real
-    `_real_story_build_step`), resolved at call time so tests can monkeypatch it —
-    mirroring how `run_build` resolves `generate=` against `_generate_slice_graph`.
+    """Run the story build for a workspace: precheck -> plan -> (restart-fresh reset)
+    -> heavy story-run step -> gate -> mark the `build` stage passed. `build` is the
+    injectable seam: it defaults to the module-level `_run_story_build_step` (whose
+    value is the real `_real_story_build_step`), resolved at call time so tests can
+    monkeypatch it — mirroring how `run_build` resolves `generate=` against
+    `_generate_slice_graph`.
 
-    The stage is marked passed ONLY when every story ended acceptable (passed /
-    generated_unverified / skipped) — `run_story_plan` NEVER raises on a per-story
-    failure, so an unconditional mark would silently pass a broken build. A
-    non-acceptable status raises (RuntimeError), surfacing the job as `failed`."""
+    RE-TRIGGER is RESTART-FRESH (`BUILD_RESUME=0` default): before running, prior runs'
+    accepted per-story status is cleared so a second POST regenerates ALL stories rather
+    than skipping them as already-done. The within-RUN repeat-until-done dedup is
+    untouched.
+
+    PASS-WITH-DEFERRED: the stage is marked passed when every story is tolerated
+    (passed / generated-unverified / skipped / deferred) AND at least one was genuinely
+    built — `deferred` (a story that exhausted its retry/budget allotment) NEVER wedges
+    the build, but a true `failed`/`error` STILL fails the gate (RuntimeError, surfacing
+    the job as `failed`). The gate's progress counts (pass/deferred/pending) are folded
+    into the returned `result` so the operator sees real progress."""
     slug = workspace.repo_slug
     _precheck(neo4j, workspace, source_root)
     plan = _plan_for(neo4j, slug)
+
+    if not _build_resume():
+        _reset_prior_story_status(session, workspace, plan, story_id)
 
     logger.info("build-stories: running for repo=%s story_id=%s (%d items)",
                 slug, story_id, len(plan.items))
@@ -343,7 +455,12 @@ def run_story_build(*, session: Session, neo4j, workspace: Workspace,
                   source_root=source_root, output_root=output_root,
                   plan=plan, story_id=story_id)
 
-    _gate_stage(result)
+    counts = _gate_stage(result)
+    # Surface the gate's progress counts (pass/deferred/pending) on the step's result so
+    # the operator sees real progress — pass-with-deferred can read as `done` even with
+    # deferred stories, so the counts are how the cockpit shows what was deferred.
+    if isinstance(result, dict):
+        result.update(counts)
     _mark_passed(session, workspace.id, "build")
     session.flush()
     return {"repo_slug": slug, "story_id": story_id,

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 
 from cobol_modernizer.technical_design.generator import (
     TECHNICAL_DESIGN_SCHEMA,
@@ -206,3 +207,101 @@ def test_oneshot_mode_uses_single_call():
         known_refs=[], known_story_ids=[]))
     assert result.ok
     assert len(runner.calls) == 1  # single combined call, not per-context
+
+
+# --- per-context budgets + retry-with-escalation (kill the 300s cliff) --------
+
+
+class TimeoutOnceRunner:
+    """First structured call times out (raised inside run_batched_result's
+    wait_for), every later call succeeds — exercises the retry-with-escalation
+    path (a TIMEOUT is the canonical retryable failure)."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+        self._first = True
+
+    async def run_structured(self, **kw):
+        self.calls.append(kw)
+        if self._first:
+            self._first = False
+            raise asyncio.TimeoutError()
+        return self.payload
+
+
+def test_per_context_timeout_retries_escalated_then_succeeds():
+    # A context whose first call times out must RETRY (escalated) and still produce
+    # a service — no single failure skips the context. The escalated retry uses a
+    # larger max_turns than the first attempt.
+    runner = TimeoutOnceRunner({"services": [
+        {"name": "posting-service", "bounded_context": "Posting", "deployment": "module"}]})
+    result = asyncio.run(generate_technical_design_result(
+        runner=runner, model="m", timeout_s=5.0, mode="decomposed",
+        contexts=[{"name": "Posting", "member_programs": ["CBPOST1M"]}],
+        stories=[], seam_waves=[], known_refs=["CBPOST1M"], known_story_ids=[]))
+    assert result.ok
+    assert len(result.payload["services"]) == 1
+    # retried: more than one structured call for the single context
+    assert len(runner.calls) >= 2
+    # escalation: the retry used a larger max_turns than the first attempt
+    assert runner.calls[1]["max_turns"] > runner.calls[0]["max_turns"]
+
+
+def test_unit_attempts_env_threads_into_run_batched_result(monkeypatch):
+    # TECH_DESIGN_UNIT_ATTEMPTS controls how many attempts each context gets. Set it
+    # to 1 and a single timeout is NOT retried (one call, context skipped).
+    monkeypatch.setenv("TECH_DESIGN_UNIT_ATTEMPTS", "1")
+
+    class TimeoutAlwaysRunner:
+        def __init__(self):
+            self.calls = []
+
+        async def run_structured(self, **kw):
+            self.calls.append(kw)
+            raise asyncio.TimeoutError()
+
+    runner = TimeoutAlwaysRunner()
+    result = asyncio.run(generate_technical_design_result(
+        runner=runner, model="m", timeout_s=5.0, mode="decomposed",
+        contexts=[{"name": "Posting", "member_programs": ["CBPOST1M"]}],
+        stories=[], seam_waves=[], known_refs=["CBPOST1M"], known_story_ids=[]))
+    assert not result.ok  # all contexts failed -> typed failure (fallback upstream)
+    assert len(runner.calls) == 1  # attempts=1 -> no retry
+
+
+def test_all_contexts_fail_yields_typed_failure_for_fallback():
+    # The all-contexts-fail contract is preserved: even with retries, when every
+    # context exhausts its attempts the orchestrator returns ok=False with a typed
+    # cause (the control plane degrades to the deterministic fallback on this).
+    class FailRunner:
+        def __init__(self):
+            self.calls = []
+
+        async def run_structured(self, **kw):
+            self.calls.append(kw)
+            raise asyncio.TimeoutError()
+
+    runner = FailRunner()
+    result = asyncio.run(generate_technical_design_result(
+        runner=runner, model="m", timeout_s=1.0, mode="decomposed",
+        contexts=[{"name": "Posting"}, {"name": "Accounts"}],
+        stories=[], seam_waves=[], known_refs=[], known_story_ids=[]))
+    assert not result.ok
+    assert result.cause and "no output" in result.cause
+
+
+def test_no_single_outer_300s_wall_in_generator_source():
+    # HARD CONSTRAINT: the multi-context decomposed run must NOT be capped by a single
+    # outer asyncio wall (e.g. wait_for around the whole gather). Per-context budgets
+    # (TECH_DESIGN_CONTEXT_TIMEOUT_S) bound each unit instead.
+    from cobol_modernizer.technical_design import generator as gen
+
+    src = inspect.getsource(gen.generate_technical_design_result)
+    # no asyncio.wait_for wrapping the orchestration (the per-context guard lives
+    # inside run_batched_result, not here)
+    assert "wait_for" not in src
+    # per-context budget knob is honored
+    assert "TECH_DESIGN_CONTEXT_TIMEOUT_S" in inspect.getsource(gen)
+    # the unit-attempts knob is threaded in
+    assert "TECH_DESIGN_UNIT_ATTEMPTS" in inspect.getsource(gen)

@@ -420,7 +420,9 @@ def test_completeness_loop_terminates_without_progress(monkeypatch):
     # the loop must stop on the NO-PROGRESS break alone. FR-2 can never be covered
     # (EPIC-1 only ever emits a story for FR-1), so round 1 makes progress and the
     # first top-up round (round 2) makes none -> break. Total EPIC-1 stories calls = 2.
+    # NO_PROGRESS_ROUNDS=1: a single no-progress round ends the loop here.
     monkeypatch.setenv("BACKLOG_MAX_ROUNDS", "5")
+    monkeypatch.setenv("BACKLOG_NO_PROGRESS_ROUNDS", "1")
     epics = [_epic("EPIC-1", ["FR-1", "FR-2"]), _epic("EPIC-2", ["FR-3"])]
 
     def script(*, schema, prompt, idx):
@@ -447,6 +449,255 @@ def test_completeness_loop_terminates_without_progress(monkeypatch):
     # cap can't end the loop here, so removing the no-progress break makes this fail.
     epic1_story_calls = [c for c in runner.stories_calls if "EPIC-1" in c["prompt"]]
     assert len(epic1_story_calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Uncapped completeness loop + per-unit retry (kill the 300s cliff)
+# ---------------------------------------------------------------------------
+
+def test_completeness_loop_is_uncapped_runs_more_than_old_3_rounds(monkeypatch):
+    """The old hard cap was BACKLOG_MAX_ROUNDS=3. A slow-but-progressing repo must
+    keep looping FAR past 3 rounds (one new requirement covered per round) and finish
+    with FULL coverage — proving the round cap is no longer the normal stop."""
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    monkeypatch.delenv("BACKLOG_MAX_ROUNDS", raising=False)
+    monkeypatch.delenv("BACKLOG_NO_PROGRESS_ROUNDS", raising=False)
+    # 8 requirements (>> old cap of 3). EPIC-1 owns them all but only ever covers ONE
+    # more requirement per call, so it takes 8 rounds of stories calls to cover them.
+    req_ids = [f"FR-{i}" for i in range(8)]
+    epics = [_epic("EPIC-1", req_ids)]
+    state = {"covered": 0}
+
+    def script(*, schema, prompt, idx):
+        if schema is EPICS_SCHEMA:
+            return {"epics": epics}
+        if "EPIC-1" in prompt:
+            # Each call covers exactly ONE not-yet-covered requirement (slow progress).
+            i = state["covered"]
+            if i >= len(req_ids):
+                return {"stories": []}
+            state["covered"] += 1
+            return {"stories": [_story(f"US-{i}", "EPIC-1", [f"FR-{i}"])]}
+        return {"stories": []}
+
+    runner = ScriptedRunner(script)
+    out = _run_gen(runner, brd_sections=_sections(req_ids),
+                   known_refs=["CBPOST1M"], known_requirement_ids=req_ids)
+    covered = set()
+    for s in out["stories"]:
+        covered.update(s["brd_requirement_ids"])
+    assert covered == set(req_ids)  # ALL 8 covered — loop ran > 3 rounds
+    # 8 EPIC-1 stories calls (1 per round): impossible under the old MAX_ROUNDS=3 cap.
+    epic1_calls = [c for c in runner.stories_calls if "EPIC-1" in c["prompt"]]
+    assert len(epic1_calls) == 8
+
+
+def test_completeness_loop_stops_after_no_progress_rounds_env(monkeypatch):
+    """The PRIMARY exit is BACKLOG_NO_PROGRESS_ROUNDS consecutive no-progress rounds.
+    With the round cap raised high, the loop must stop after exactly that many
+    consecutive no-progress top-up rounds — not run forever, not stop at 1."""
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    monkeypatch.setenv("BACKLOG_MAX_ROUNDS", "100")  # safety only — must NOT explain the stop
+    monkeypatch.setenv("BACKLOG_NO_PROGRESS_ROUNDS", "3")
+    # FR-9 is never coverable. Round 1 covers FR-1 (progress); every top-up round
+    # after makes NO progress. With NO_PROGRESS_ROUNDS=3 the loop tolerates 3
+    # consecutive no-progress rounds before giving up.
+    epics = [_epic("EPIC-1", ["FR-1", "FR-9"])]
+
+    def script(*, schema, prompt, idx):
+        if schema is EPICS_SCHEMA:
+            return {"epics": epics}
+        if "EPIC-1" in prompt:
+            return {"stories": [_story("US-1", "EPIC-1", ["FR-1"])]}
+        return {"stories": []}
+
+    runner = ScriptedRunner(script)
+    out = _run_gen(runner, brd_sections=_sections(["FR-1", "FR-9"]),
+                   known_refs=["CBPOST1M"], known_requirement_ids=["FR-1", "FR-9"])
+    covered = set()
+    for s in out["stories"]:
+        covered.update(s["brd_requirement_ids"])
+    assert covered == {"FR-1"}
+    assert "FR-9" not in covered  # genuinely uncoverable
+    # EPIC-1 stories calls: round 1 (progress) + 3 consecutive no-progress top-ups.
+    epic1_calls = [c for c in runner.stories_calls if "EPIC-1" in c["prompt"]]
+    assert len(epic1_calls) == 1 + 3
+
+
+def test_no_progress_round_count_resets_on_progress(monkeypatch):
+    """A progress round between no-progress rounds RESETS the consecutive counter, so
+    the loop doesn't give up prematurely on a repo that makes intermittent progress."""
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    monkeypatch.setenv("BACKLOG_MAX_ROUNDS", "100")
+    monkeypatch.setenv("BACKLOG_NO_PROGRESS_ROUNDS", "2")
+    # Coverage timeline for EPIC-1 (owns FR-1, FR-2, FR-9-uncoverable):
+    #  round 1 -> FR-1 (progress)
+    #  round 2 -> nothing (no-progress 1)
+    #  round 3 -> FR-2 (progress -> RESET)
+    #  round 4 -> nothing (no-progress 1)
+    #  round 5 -> nothing (no-progress 2 -> stop)
+    epics = [_epic("EPIC-1", ["FR-1", "FR-2", "FR-9"])]
+    state = {"n": 0}
+
+    def script(*, schema, prompt, idx):
+        if schema is EPICS_SCHEMA:
+            return {"epics": epics}
+        if "EPIC-1" in prompt:
+            state["n"] += 1
+            if state["n"] == 1:
+                return {"stories": [_story("US-1", "EPIC-1", ["FR-1"])]}
+            if state["n"] == 3:
+                return {"stories": [_story("US-2", "EPIC-1", ["FR-2"])]}
+            return {"stories": []}  # rounds 2, 4, 5 -> no progress
+        return {"stories": []}
+
+    runner = ScriptedRunner(script)
+    out = _run_gen(runner, brd_sections=_sections(["FR-1", "FR-2", "FR-9"]),
+                   known_refs=["CBPOST1M"],
+                   known_requirement_ids=["FR-1", "FR-2", "FR-9"])
+    covered = set()
+    for s in out["stories"]:
+        covered.update(s["brd_requirement_ids"])
+    assert covered == {"FR-1", "FR-2"}  # both coverable reqs got covered
+    # 5 EPIC-1 calls total: the reset let it keep going past the first no-progress run.
+    epic1_calls = [c for c in runner.stories_calls if "EPIC-1" in c["prompt"]]
+    assert len(epic1_calls) == 5
+
+
+def test_max_rounds_is_a_high_safety_backstop_not_normal_stop(monkeypatch):
+    """BACKLOG_MAX_ROUNDS still bounds the loop as a SAFETY backstop: a pathological
+    repo that NEVER finishes and NEVER stops on no-progress (a degenerate fixture that
+    always reports 'progress') is still bounded by the round cap so the loop always
+    terminates."""
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    monkeypatch.setenv("BACKLOG_MAX_ROUNDS", "4")
+    monkeypatch.setenv("BACKLOG_NO_PROGRESS_ROUNDS", "2")
+    # 50 requirements but EPIC-1 only ever covers ONE more per round -> would need 50
+    # rounds; the MAX_ROUNDS=4 backstop must stop it well before that (it never hits
+    # a no-progress round because each round covers a fresh requirement).
+    req_ids = [f"FR-{i}" for i in range(50)]
+    epics = [_epic("EPIC-1", req_ids)]
+    state = {"covered": 0}
+
+    def script(*, schema, prompt, idx):
+        if schema is EPICS_SCHEMA:
+            return {"epics": epics}
+        if "EPIC-1" in prompt:
+            i = state["covered"]
+            state["covered"] += 1
+            return {"stories": [_story(f"US-{i}", "EPIC-1", [f"FR-{i}"])]}
+        return {"stories": []}
+
+    runner = ScriptedRunner(script)
+    out = _run_gen(runner, brd_sections=_sections(req_ids),
+                   known_refs=["CBPOST1M"], known_requirement_ids=req_ids)
+    # MAX_ROUNDS=4 bounds the TOP-UP rounds -> initial fan-out (1) + at most 4 top-up
+    # rounds = at most 5 EPIC-1 stories calls; the loop did NOT run all 50 reqs.
+    epic1_calls = [c for c in runner.stories_calls if "EPIC-1" in c["prompt"]]
+    assert 1 <= len(epic1_calls) <= 1 + 4
+    assert len(epic1_calls) < 50
+    assert out["stories"]  # still returns what it could cover
+
+
+class TimeoutOnceRunner:
+    """A runner whose FIRST stories call (per epic id) raises asyncio.TimeoutError —
+    forcing the shared run_batched_result escalation primitive to retry that unit —
+    then succeeds on the retry. Epics calls always succeed. Records attempts so the
+    per-unit retry can be asserted."""
+
+    def __init__(self, epics, story_for):
+        self._epics = epics
+        self._story_for = story_for  # prompt -> story dict (or None)
+        self.calls = []
+        self._story_attempts: dict[str, int] = {}
+
+    async def run_structured(self, *, system, prompt, server, allowed_tools, model,
+                             max_turns, schema, label):
+        self.calls.append({"schema": schema, "prompt": prompt, "label": label,
+                            "max_turns": max_turns})
+        await asyncio.sleep(0)
+        if schema is EPICS_SCHEMA:
+            return {"epics": self._epics}
+        if schema is STORIES_SCHEMA:
+            # Identify which epic this stories call is for.
+            eid = next((e["id"] for e in self._epics if e["id"] in prompt), "?")
+            self._story_attempts[eid] = self._story_attempts.get(eid, 0) + 1
+            if self._story_attempts[eid] == 1:
+                # First attempt for this epic times out -> primitive must retry.
+                raise asyncio.TimeoutError()
+            story = self._story_for(prompt)
+            return {"stories": [story]} if story else {"stories": []}
+        return {}
+
+
+def test_per_unit_timeout_on_round1_retries_and_completes(monkeypatch):
+    """A per-unit timeout on round 1 must NOT kill the unit: the shared
+    run_batched_result primitive (attempts=BACKLOG_UNIT_ATTEMPTS, escalate=True)
+    retries the timed-out stories call with an escalated budget and it succeeds, so
+    the backlog still completes with full coverage."""
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    monkeypatch.setenv("BACKLOG_UNIT_ATTEMPTS", "2")
+    # A short per-unit timeout: the FIRST attempt times out, the retry succeeds.
+    monkeypatch.setenv("BACKLOG_STORY_TIMEOUT_S", "5")
+    epics = [_epic("EPIC-1", ["FR-1"]), _epic("EPIC-2", ["FR-2"])]
+
+    def story_for(prompt):
+        for e in epics:
+            if e["id"] in prompt:
+                rid = e["brd_requirement_ids"][0]
+                return _story(f"US-{e['id']}", e["id"], [rid])
+        return None
+
+    runner = TimeoutOnceRunner(epics, story_for)
+    out = _run_gen(runner, brd_sections=_sections(["FR-1", "FR-2"]),
+                   known_refs=["CBPOST1M"], known_requirement_ids=["FR-1", "FR-2"])
+    covered = set()
+    for s in out["stories"]:
+        covered.update(s["brd_requirement_ids"])
+    # Both epics' stories survived the first-attempt timeout via the retry.
+    assert covered == {"FR-1", "FR-2"}
+    # Each epic's stories unit was called TWICE (timeout + escalated retry).
+    story_calls = [c for c in runner.calls if c["schema"] is STORIES_SCHEMA]
+    assert len(story_calls) == 4  # 2 epics x (1 timeout + 1 retry)
+    # The retry escalated max_turns above the configured BACKLOG_STORY_MAX_TURNS (6).
+    assert any(c["max_turns"] > 6 for c in story_calls)
+
+
+def test_epics_unit_retries_on_first_timeout(monkeypatch):
+    """The epics MAP unit also threads attempts/escalate: a first-attempt timeout on
+    the epics call is retried (escalated) rather than failing the whole backlog."""
+    monkeypatch.setenv("BACKLOG_GEN_MODE", "decomposed")
+    monkeypatch.setenv("BACKLOG_UNIT_ATTEMPTS", "2")
+    monkeypatch.setenv("BACKLOG_EPIC_TIMEOUT_S", "5")
+    epics = [_epic("EPIC-1", ["FR-1"]), _epic("EPIC-2", ["FR-2"])]
+    state = {"epics_attempt": 0}
+
+    class _R:
+        def __init__(self):
+            self.calls = []
+            self._story_n: dict[str, int] = {}
+
+        async def run_structured(self, *, system, prompt, server, allowed_tools, model,
+                                 max_turns, schema, label):
+            self.calls.append({"schema": schema, "prompt": prompt})
+            await asyncio.sleep(0)
+            if schema is EPICS_SCHEMA:
+                state["epics_attempt"] += 1
+                if state["epics_attempt"] == 1:
+                    raise asyncio.TimeoutError()
+                return {"epics": epics}
+            for e in epics:
+                if e["id"] in prompt:
+                    rid = e["brd_requirement_ids"][0]
+                    return {"stories": [_story(f"US-{e['id']}", e["id"], [rid])]}
+            return {"stories": []}
+
+    runner = _R()
+    out = _run_gen(runner, brd_sections=_sections(["FR-1", "FR-2"]),
+                   known_refs=["CBPOST1M"], known_requirement_ids=["FR-1", "FR-2"])
+    assert {e["id"] for e in out["epics"]} == {"EPIC-1", "EPIC-2"}
+    # Epics unit was issued twice (timeout + retry).
+    assert state["epics_attempt"] == 2
 
 
 def test_parse_backlog_payload_drops_ungrounded_refs():

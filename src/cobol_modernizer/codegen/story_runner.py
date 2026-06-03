@@ -27,8 +27,10 @@ the injected runner's `.token_usage`/`.cost_usd`; wall time uses an injectable
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -37,7 +39,8 @@ from typing import Any, Awaitable, Callable
 
 from cobol_modernizer.agent.harness import AgentRunner
 from cobol_modernizer.codegen.budget import (
-    StoryBudget, should_skip as budget_should_skip, story_budget_from_env,
+    BuildBudget, StoryBudget, build_budget_from_env, build_max_story_attempts,
+    should_skip as budget_should_skip, story_budget_from_env,
 )
 from cobol_modernizer.codegen.patch_agent import (
     StoryPatch, generate_story_implementation, generate_story_tests,
@@ -452,6 +455,56 @@ def _summary_line(item: StoryCodegenItem, out: StoryRunResult) -> str:
     return f"{item.story_id} [{out.status.value}]"
 
 
+#: Default fan-out width within a dependency wave. One in-flight story holds an LLM
+#: test-gen + impl-gen (+ repairs) and a Maven run, so the concurrency cap bounds the
+#: peak LLM/Maven load. Tunable via ``BUILD_MAX_CONCURRENCY`` (default 4); clamped to
+#: >=1 so a bad env value can never deadlock the plan.
+_BUILD_MAX_CONCURRENCY_DEFAULT = 4
+
+
+def build_max_concurrency() -> int:
+    """The per-wave fan-out width from ``BUILD_MAX_CONCURRENCY`` (default 4, min 1)."""
+    raw = os.environ.get("BUILD_MAX_CONCURRENCY")
+    if raw is None:
+        return _BUILD_MAX_CONCURRENCY_DEFAULT
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return _BUILD_MAX_CONCURRENCY_DEFAULT
+
+
+def _dependency_waves(
+    items: list[StoryCodegenItem],
+) -> list[list[StoryCodegenItem]]:
+    """Group plan items into dependency WAVES for parallel fan-out, preserving the
+    plan's input order WITHIN each wave (the plan is already topologically sorted, so
+    this only partitions it):
+
+      - wave 0  = items with no *unmet* ``depends_on`` (deps not present in the plan
+                  are treated as already satisfied — they cannot be a wave member).
+      - wave k  = items whose deps are all emitted in waves < k.
+
+    A dep that points outside this plan's items is ignored (it cannot gate a wave).
+    Cycles cannot starve the output: if a pass makes no progress, the remaining items
+    are emitted as one final wave (input order) so every item runs exactly once."""
+    known = {it.story_id for it in items}
+    emitted: set[str] = set()
+    remaining = list(items)
+    waves: list[list[StoryCodegenItem]] = []
+    while remaining:
+        wave = [it for it in remaining
+                if all(d in emitted for d in it.depends_on if d in known)]
+        if not wave:
+            # Cycle / self-reference among the rest: emit them all as a final wave so
+            # the plan terminates and every story still runs once.
+            wave = list(remaining)
+        waves.append(wave)
+        wave_ids = {it.story_id for it in wave}
+        emitted |= wave_ids
+        remaining = [it for it in remaining if it.story_id not in wave_ids]
+    return waves
+
+
 def _call_context_pack_for(
     context_pack_for: Callable[..., StoryContextPack],
     item: StoryCodegenItem, completed_summaries: list[str],
@@ -480,6 +533,7 @@ async def run_story_plan(
     module_dir: Path,
     context_pack_for: Callable[..., StoryContextPack],
     runner: AgentRunner,
+    runner_factory: Callable[[], AgentRunner] | None = None,
     model: str = "sonnet",
     project_index: list[str] | None = None,
     gen_tests: GenTests = generate_story_tests,
@@ -487,35 +541,275 @@ async def run_story_plan(
     run_tests: RunTests = run_targeted_tests,
     now: Clock = time.monotonic,
     repair_max_attempts: int | None = None,
+    max_concurrency: int | None = None,
+    budget: StoryBudget | None = None,
+    items_override: list[StoryCodegenItem] | None = None,
 ) -> list[StoryRunResult]:
-    """Run a plan's stories IN ORDER (the plan is already dependency-sorted by
-    `build_story_codegen_plan`). The caller supplies `context_pack_for` to resolve
-    each item's already-built pack (it owns the slice-pack/scaffold; the runner does
-    not). Each `run_story` records that story's `generated_test_refs` against the
-    shared module dir, so by the end the Verify gate sees every cited AC. A story that
-    raises is recorded `failed` and does NOT abort the plan — the loop continues.
+    """Run a plan's stories in DEPENDENCY WAVES with bounded parallel fan-out
+    (Fan-Out-and-Synthesize). The plan is already dependency-sorted by
+    `build_story_codegen_plan`; here we partition it into waves (`_dependency_waves`):
+    wave 0 = items with no unmet `depends_on`, wave k = items whose deps all landed in
+    earlier waves. Each wave's stories run concurrently via `asyncio.gather`, bounded by
+    a semaphore of width `max_concurrency` (default `BUILD_MAX_CONCURRENCY`, env default
+    4). This is SINGLE-PASS: every story runs exactly once — the repeat-until-done outer
+    loop, deferred status, and pooled budget are a separate concern handled elsewhere.
 
-    As it iterates, the loop accumulates a running list of completed-story summaries
-    (one terse line per finished story, ANY outcome) and threads it into the per-story
-    context: `context_pack_for(item, completed_summaries)` when the callback accepts a
+    The caller supplies `context_pack_for` to resolve each item's already-built pack (it
+    owns the slice-pack/scaffold; the runner does not). Each `run_story` records that
+    story's `generated_test_refs` against the shared module dir, so by the end the Verify
+    gate sees every cited AC. A story that raises is recorded `failed` and does NOT abort
+    the plan.
+
+    CONCURRENCY + telemetry: each concurrent story gets its OWN runner instance (from
+    `runner_factory`, defaulting to `type(runner)()`) so per-story token/cost telemetry
+    is not crosstalked across stories sharing one mutable `runner`. The `runner` argument
+    is retained for backward compatibility and as the factory default — it is NOT itself
+    threaded into concurrent stories.
+
+    COMPLETED SUMMARIES are computed from PRIOR WAVES ONLY: stories in the same wave do
+    NOT see each other's summaries (they run concurrently, so there is no ordering among
+    them); a wave-k story's pack carries every finished story from waves < k. As before,
+    `context_pack_for(item, completed_summaries)` is used when the callback accepts a
     second argument (legacy single-arg callbacks still work and just don't get them).
-    This is what makes the "Completed Dependencies" pack section actually populate.
     `completed_summaries` is intentionally NOT part of the story's `context_hash` (it's
     derived run context), so threading it does not destabilize resume.
 
+    The returned results + per-story persistence are in the plan's deterministic order
+    (waves preserve input order, and results are reassembled by story id), so downstream
+    consumers see the same ordering as the old sequential path.
+
     NOTE: every story writes into the SAME `module_dir`; path-uniqueness of generated
-    files across stories is the CALLER/scaffold's responsibility — a later story
-    emitting an already-used path silently overwrites the earlier file."""
-    results: list[StoryRunResult] = []
+    files across stories is the CALLER/scaffold's responsibility — two stories in the
+    same wave emitting an already-used path race on the file."""
+    if max_concurrency is None:
+        max_concurrency = build_max_concurrency()
+    if runner_factory is None:
+        # Per-story runners default to fresh instances of the same class as `runner`
+        # (no-arg constructor — matches SdkAgentRunner / the test FakeRunner).
+        runner_factory = type(runner)
+
+    # `items_override` lets the repeat-until-done OUTER loop re-run ONLY the still-failing
+    # subset while reusing this single-pass wave fan-out unchanged. The results are still
+    # reassembled in the (sub)list's input order.
+    run_items = items if items_override is None else items_override
+    waves = _dependency_waves(run_items)
+    sem = asyncio.Semaphore(max(1, max_concurrency))
+    by_id: dict[str, StoryRunResult] = {}
     completed_summaries: list[str] = []
-    for item in items:
-        pack = _call_context_pack_for(context_pack_for, item,
-                                      list(completed_summaries))
-        out = await run_story(
-            item, session=session, workspace_id=workspace_id,
-            module_dir=module_dir, context_pack=pack, runner=runner, model=model,
-            project_index=project_index, gen_tests=gen_tests, gen_impl=gen_impl,
-            run_tests=run_tests, now=now, repair_max_attempts=repair_max_attempts)
-        results.append(out)
-        completed_summaries.append(_summary_line(item, out))
-    return results
+
+    async def _run_one(item: StoryCodegenItem,
+                       prior_summaries: list[str]) -> StoryRunResult:
+        async with sem:
+            pack = _call_context_pack_for(context_pack_for, item, prior_summaries)
+            return await run_story(
+                item, session=session, workspace_id=workspace_id,
+                module_dir=module_dir, context_pack=pack, runner=runner_factory(),
+                model=model, project_index=project_index, gen_tests=gen_tests,
+                gen_impl=gen_impl, run_tests=run_tests, now=now,
+                repair_max_attempts=repair_max_attempts, budget=budget)
+
+    for wave in waves:
+        # Snapshot the prior-wave summaries: stories in THIS wave all see the same
+        # (frozen) list and never each other's outcomes.
+        prior = list(completed_summaries)
+        wave_results = await asyncio.gather(
+            *(_run_one(item, list(prior)) for item in wave))
+        for item, out in zip(wave, wave_results):
+            by_id[item.story_id] = out
+        # Append this wave's summaries (in wave/input order) for the next wave.
+        completed_summaries.extend(
+            _summary_line(item, by_id[item.story_id]) for item in wave)
+
+    # Reassemble in the (run) plan's deterministic input order for downstream consumers.
+    return [by_id[item.story_id] for item in run_items]
+
+
+# --------------------------------------------------------------------------- #
+# Repeat-until-done OUTER loop (+ pass-with-deferred + pooled budget)          #
+# --------------------------------------------------------------------------- #
+#: Statuses the OUTER loop treats as ACCEPTED (do not re-run). Mirrors
+#: ``ACCEPTED_STORY_STATUSES`` conceptually but is expressed over the enum here:
+#: passed / generated-unverified / skipped. ``failed`` is the ONLY status the outer
+#: loop retries; ``deferred``/``blocked`` are terminal non-accepted (never retried).
+_OUTER_ACCEPTED = frozenset({
+    StoryCodegenStatus.passed,
+    StoryCodegenStatus.generated_unverified,
+    StoryCodegenStatus.skipped,
+})
+
+
+def _pool_tokens(out: StoryRunResult) -> int:
+    """The total tokens a single story's run drew from the pool (sum of its usage
+    delta)."""
+    return sum(int(v) for v in (out.token_usage or {}).values())
+
+
+def _mark_deferred(session, *, workspace_id: str, item: StoryCodegenItem,
+                   out: StoryRunResult, model: str, context_hash: str,
+                   module_dir: Path, reason: str) -> StoryRunResult:
+    """Re-stamp a story that exhausted the outer loop's allotment as ``deferred``
+    (terminal — the loop stops retrying it) and persist that. Carries the last run's
+    telemetry forward and appends WHY it was deferred so the durable record is legible.
+    Deferred is NOT accepted; the build gate (a later task) decides its fate. No NEW
+    files are written here — `_persist` only (re)records the status + the same
+    generated_test_refs scan against the shared module_dir."""
+    rationale = f"deferred: {reason}"
+    if out.rationale:
+        rationale = f"{rationale}; {out.rationale}"
+    deferred = StoryRunResult(
+        story_id=out.story_id, status=StoryCodegenStatus.deferred,
+        test_result=out.test_result, red_status=out.red_status,
+        attempts=out.attempts, ac_covered=out.ac_covered, ac_missing=out.ac_missing,
+        changed_files=out.changed_files, wall_time_s=out.wall_time_s,
+        token_usage=out.token_usage, cost_usd=out.cost_usd, rationale=rationale)
+    _persist(session, workspace_id=workspace_id, item=item, out=deferred,
+             model=model, context_hash=context_hash, module_dir=module_dir)
+    return deferred
+
+
+async def run_story_plan_until_done(
+    items: list[StoryCodegenItem],
+    *,
+    session,
+    workspace_id: str,
+    module_dir: Path,
+    context_pack_for: Callable[..., StoryContextPack],
+    runner: AgentRunner,
+    runner_factory: Callable[[], AgentRunner] | None = None,
+    model: str = "sonnet",
+    project_index: list[str] | None = None,
+    gen_tests: GenTests = generate_story_tests,
+    gen_impl: GenImpl = generate_story_implementation,
+    run_tests: RunTests = run_targeted_tests,
+    now: Clock = time.monotonic,
+    repair_max_attempts: int | None = None,
+    max_concurrency: int | None = None,
+    max_story_attempts: int | None = None,
+    build_budget: BuildBudget | None = None,
+    on_pass: Callable[[list[StoryCodegenItem]], None] | None = None,
+) -> list[StoryRunResult]:
+    """REPEAT-UNTIL-DONE wrapper around the single-pass dependency-wave fan-out
+    (`run_story_plan`). Per the user's rulings the build must NEVER wedge on one bad
+    story and the budget is POOLED with a retained per-story cap (hybrid).
+
+    THE LOOP (always terminates — bounded by attempts AND no-progress AND the pool):
+
+      pass 1 : run the WHOLE plan once (the Task-5 wave fan-out, unchanged).
+      pass k : collect the stories still ``failed`` AND still under their attempt cap,
+               rebuild ONLY their context (via the caller's ``context_pack_for``), and
+               re-run ONLY them. Stop when ANY of:
+                 - no story is still ``failed`` (all accepted) -> DONE;
+                 - a retry pass yields NO newly-accepted story (NO-PROGRESS);
+                 - every still-failing story has reached ``BUILD_MAX_STORY_ATTEMPTS``;
+                 - the pooled token budget is exhausted (stop spawning NEW attempts).
+
+    PASS-WITH-DEFERRED: any story still ``failed`` when the loop stops (attempts
+    exhausted / no-progress / pool exhausted) is re-stamped TERMINAL ``deferred`` (not
+    ``failed``) so a single bad story can never wedge the build. ``deferred`` is NOT in
+    the accepted set — the build gate (a later task) decides whether it fails the build.
+
+    POOLED BUDGET (hybrid): ``build_budget`` (default :func:`build_budget_from_env`,
+    sized ``story_count * STORY_MAX_TOKENS``) is the build-level pool; its retained
+    per-story cap is threaded into every ``run_story`` as a :class:`StoryBudget`, so a
+    single story can't exceed its cap AND the loop stops spawning new attempts once the
+    pool is drained.
+
+    ``on_pass`` (optional) is called once per pass with the items that pass ran — a test
+    hook to assert the pass count is bounded (no infinite loop). Returns the FINAL
+    per-story results in the plan's deterministic input order."""
+    if max_story_attempts is None:
+        max_story_attempts = build_max_story_attempts()
+    max_story_attempts = max(1, max_story_attempts)
+    if build_budget is None:
+        build_budget = build_budget_from_env(len(items))
+    per_story_budget = build_budget.story_budget()
+
+    # Per-story attempt counter (how many full passes a story has participated in) and
+    # the LATEST result per story. The first pass runs the whole plan.
+    attempts: dict[str, int] = {}
+    latest: dict[str, StoryRunResult] = {}
+    item_by_id = {it.story_id: it for it in items}
+    pool_used = 0
+
+    async def _one_pass(pass_items: list[StoryCodegenItem]) -> None:
+        nonlocal pool_used
+        if on_pass is not None:
+            on_pass(pass_items)
+        results = await run_story_plan(
+            items, session=session, workspace_id=workspace_id, module_dir=module_dir,
+            context_pack_for=context_pack_for, runner=runner,
+            runner_factory=runner_factory, model=model, project_index=project_index,
+            gen_tests=gen_tests, gen_impl=gen_impl, run_tests=run_tests, now=now,
+            repair_max_attempts=repair_max_attempts, max_concurrency=max_concurrency,
+            budget=per_story_budget, items_override=pass_items)
+        for out in results:
+            attempts[out.story_id] = attempts.get(out.story_id, 0) + 1
+            latest[out.story_id] = out
+            pool_used += _pool_tokens(out)
+
+    def _accepted(out: StoryRunResult) -> bool:
+        return out.status in _OUTER_ACCEPTED
+
+    def _failed_ids() -> list[str]:
+        # Stories still in `failed` (the only retryable status) — in plan order.
+        return [it.story_id for it in items
+                if latest.get(it.story_id) is not None
+                and latest[it.story_id].status == StoryCodegenStatus.failed]
+
+    # --- Pass 1: the whole plan. ------------------------------------------------ #
+    await _one_pass(items)
+
+    # --- Repeat-until-done. ----------------------------------------------------- #
+    while True:
+        failed = _failed_ids()
+        if not failed:
+            break  # all stories accepted (or terminal non-failed) — DONE.
+
+        # Retry only the failed stories still under their attempt cap.
+        retryable = [sid for sid in failed if attempts.get(sid, 0) < max_story_attempts]
+        if not retryable:
+            break  # every failing story hit BUILD_MAX_STORY_ATTEMPTS — stop, defer.
+
+        # POOLED BUDGET: stop spawning NEW attempts once the pool is drained (no
+        # runaway). The still-failing stories are deferred below.
+        if build_budget.pool_exhausted(pool_used):
+            logger.info("build budget pool exhausted (used=%d) — deferring %d "
+                        "still-failing stories", pool_used, len(retryable))
+            break
+
+        accepted_before = {sid for sid, out in latest.items() if _accepted(out)}
+        retry_items = [item_by_id[sid] for sid in retryable]
+        await _one_pass(retry_items)
+        accepted_after = {sid for sid, out in latest.items() if _accepted(out)}
+
+        if accepted_after <= accepted_before:
+            # NO-PROGRESS: this pass made nothing newly accepted -> stop (defer rest).
+            logger.info("repeat-until-done made no progress this pass — stopping")
+            break
+
+    # PASS-WITH-DEFERRED: any story still `failed` after the loop stopped is terminal
+    # `deferred` (never wedge the build on it).
+    for sid in _failed_ids():
+        out = latest[sid]
+        n = attempts.get(sid, 0)
+        reason = (f"still failing after {n} build pass(es) "
+                  f"(cap {max_story_attempts}); no-progress/pool/attempt-cap reached")
+        item = item_by_id[sid]
+        latest[sid] = _mark_deferred(
+            session, workspace_id=workspace_id, item=item, out=out, model=model,
+            context_hash=_context_hash_for(context_pack_for, item),
+            module_dir=module_dir, reason=reason)
+
+    return [latest[it.story_id] for it in items]
+
+
+def _context_hash_for(context_pack_for: Callable[..., StoryContextPack],
+                      item: StoryCodegenItem) -> str:
+    """The story's context_hash for the deferred re-stamp — recomputed from the caller's
+    pack callback (the same hash the resume policy keys on). Best-effort: if the callback
+    raises, fall back to empty (the deferred record still persists; resume simply can't
+    short-circuit it, which is the safe direction)."""
+    try:
+        return _call_context_pack_for(context_pack_for, item, []).context_hash
+    except Exception:  # noqa: BLE001 — never let hashing wedge the defer-stamp
+        return ""

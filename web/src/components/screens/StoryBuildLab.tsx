@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Boxes, Play, PlayCircle, RefreshCw, AlertTriangle, CheckCircle2,
-  FlaskConical, CircleDashed, ShieldQuestion, Ban,
+  FlaskConical, CircleDashed, ShieldQuestion, Ban, Hourglass,
 } from "lucide-react";
 import {
   api,
   type StoryCodegenPlan, type StoryCodegenItem,
   type StoryStatusRecord, type StoryStatusResponse,
+  type StoryBuildCounts,
 } from "@/lib/api";
 import { useJob } from "@/lib/useJob";
 
@@ -31,6 +32,12 @@ function statusStyle(raw?: string): StatusStyle {
       return { label: "failed", dot: "bg-red-500", text: "text-red-400", Icon: AlertTriangle };
     case "generated-unverified":
       return { label: "generated-unverified", dot: "bg-amber-500", text: "text-amber-400", Icon: ShieldQuestion };
+    case "deferred":
+      // Distinct from passed/failed/generated-unverified/blocked: a story that
+      // exhausted its repeat-until-done attempt budget. Tolerated (pass-with-deferred),
+      // never wedges the build — slate fill with an amber outline so it reads as
+      // "set aside, retryable", NOT a real pass / hard failure / blocked.
+      return { label: "deferred", dot: "bg-slate-500 ring-1 ring-amber-400", text: "text-amber-300", Icon: Hourglass };
     case "blocked":
       return { label: "blocked", dot: "bg-zinc-600", text: "text-zinc-400", Icon: Ban };
     case "running":
@@ -46,9 +53,47 @@ function statusStyle(raw?: string): StatusStyle {
 // A dep is "satisfied" once it has produced code, verified or not.
 const SATISFIED = new Set(["passed", "generated-unverified", "skipped"]);
 
+// Derive each story's dependency WAVE from its `depends_on` (the plan already carries
+// the DAG). wave 0 = no deps; wave k = 1 + max(dep waves). The build runs stories in
+// these waves (Fan-Out-and-Synthesize), so grouping the table by wave mirrors how the
+// engine actually schedules them. Returns story_id -> wave index. Defensive against a
+// missing/cyclic dep (treated as wave 0) so a bad plan can never hang the render.
+function deriveWaves(items: StoryCodegenItem[]): Record<string, number> {
+  const byId = new Map(items.map((i) => [i.story_id, i]));
+  const wave: Record<string, number> = {};
+  const visiting = new Set<string>();
+  const waveOf = (id: string): number => {
+    if (wave[id] != null) return wave[id];
+    const item = byId.get(id);
+    if (!item || visiting.has(id) || item.depends_on.length === 0) {
+      return (wave[id] = 0);
+    }
+    visiting.add(id);
+    const w = 1 + Math.max(...item.depends_on.map((d) => waveOf(d)));
+    visiting.delete(id);
+    return (wave[id] = w);
+  };
+  for (const i of items) waveOf(i.story_id);
+  return wave;
+}
+
+// Pull the gate's progress counts off the (possibly nested) job result. run_story_build
+// returns { ...envelope, result: { pass_count, deferred_count, pending, story_count } },
+// so prefer the nested counts and fall back to the envelope. All best-effort.
+function extractCounts(result: StoryBuildCounts & { result?: StoryBuildCounts } | null | undefined):
+  StoryBuildCounts | null {
+  if (!result) return null;
+  const inner = result.result ?? result;
+  if (inner.pass_count == null && inner.deferred_count == null && inner.pending == null) {
+    return null;
+  }
+  return inner;
+}
+
 export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
   const [plan, setPlan] = useState<StoryCodegenPlan | null>(null);
   const [statuses, setStatuses] = useState<StoryStatusResponse["stories"]>({});
+  const [counts, setCounts] = useState<StoryBuildCounts | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [perStoryBusy, setPerStoryBusy] = useState(false);
 
@@ -61,7 +106,10 @@ export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
         api.getStoryStatuses(workspaceId).catch(() => null),
       ]);
       setPlan(p);
-      if (s) setStatuses(s.stories ?? {});
+      if (s) {
+        setStatuses(s.stories ?? {});
+        setCounts(extractCounts(s.job?.result));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -77,26 +125,42 @@ export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
     async () => {
       const s = await api.getStoryStatuses(workspaceId);
       setStatuses(s.stories ?? {});
+      setCounts(extractCounts(s.job?.result));
       void refresh();
       return { status: s.job.status, result: s.job.result, error: s.job.error };
     },
   );
 
-  // Merge plan item status with the (superseding) persisted status map by story_id.
+  // Dependency waves derived from the plan DAG (wave 0 = no deps; wave k = deps in
+  // earlier waves). The build engine fans these out wave-by-wave, so we group the
+  // rendered stories the same way.
+  const waves = deriveWaves(plan?.items ?? []);
+
+  // Merge plan item status with the (superseding) persisted status map by story_id,
+  // carrying each story's wave index so we can group the table by wave below.
   const merged = (plan?.items ?? []).map((item) => {
     const rec: StoryStatusRecord = statuses[item.story_id] ?? {};
     const status = rec.status ?? item.status;
-    return { item, rec, status };
+    return { item, rec, status, wave: waves[item.story_id] ?? 0 };
   });
+
+  // Group the merged rows by wave index, preserving plan order within each wave.
+  const waveGroups = Array.from(
+    merged.reduce((acc, row) => {
+      (acc.get(row.wave) ?? acc.set(row.wave, []).get(row.wave)!).push(row);
+      return acc;
+    }, new Map<number, typeof merged>()),
+  ).sort((a, b) => a[0] - b[0]);
 
   const statusOf = (id: string): string =>
     statuses[id]?.status ?? plan?.items.find((i) => i.story_id === id)?.status ?? "pending";
 
-  // The next ready story: own status pending/failed AND every dep satisfied.
+  // The next ready story: own status pending/failed/deferred (deferred = exhausted its
+  // budget last run, still retryable) AND every dep satisfied.
   const nextReady = (): StoryCodegenItem | undefined =>
     (plan?.items ?? []).find((i) => {
       const st = (statusOf(i.story_id) || "").toLowerCase();
-      const ready = st === "pending" || st === "failed";
+      const ready = st === "pending" || st === "failed" || st === "deferred";
       const depsOk = i.depends_on.every((d) => SATISFIED.has(statusOf(d).toLowerCase()));
       return ready && depsOk;
     });
@@ -173,10 +237,32 @@ export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
         <div className="space-y-2">
           <div className="text-xs text-zinc-500">
             {plan.repo_slug} · plan v{plan.version} · {plan.items.length} stor
-            {plan.items.length === 1 ? "y" : "ies"}
+            {plan.items.length === 1 ? "y" : "ies"} · {waveGroups.length} wave
+            {waveGroups.length === 1 ? "" : "s"}
           </div>
+
+          {/* Build progress counts (pass-with-deferred): built / deferred / pending of
+              total, from the gate's `story_counts`. Only shown once a build has run. */}
+          {counts && (
+            <div className="flex flex-wrap items-center gap-3 rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs">
+              <span className="text-emerald-400">built {counts.pass_count ?? 0}</span>
+              <span className="text-amber-300">deferred {counts.deferred_count ?? 0}</span>
+              <span className="text-zinc-400">pending {counts.pending ?? 0}</span>
+              <span className="text-zinc-500">of {counts.story_count ?? plan.items.length} total</span>
+            </div>
+          )}
+
+          {waveGroups.map(([waveIdx, rows]) => (
+          <div key={waveIdx} className="space-y-1">
+            <div className="flex items-center gap-2 pt-1 text-xs font-medium text-indigo-300">
+              <Boxes className="w-3.5 h-3.5" />
+              Wave {waveIdx}
+              <span className="text-zinc-600 font-normal">
+                ({rows.length} stor{rows.length === 1 ? "y" : "ies"})
+              </span>
+            </div>
           <ol className="space-y-1">
-            {merged.map(({ item, rec, status }) => {
+            {rows.map(({ item, rec, status }) => {
               const st = statusStyle(status);
               const { Icon } = st;
               return (
@@ -238,6 +324,8 @@ export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
               );
             })}
           </ol>
+          </div>
+          ))}
         </div>
       )}
     </div>

@@ -345,6 +345,126 @@ def test_all_generated_unverified_still_passes_stage(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Pass-with-deferred — a `deferred` story does NOT wedge the build             #
+# --------------------------------------------------------------------------- #
+def test_deferred_story_passes_stage_with_counts_surfaced(monkeypatch, tmp_path):
+    # US-2 exhausted its retry/budget allotment in the repeat-until-done loop and is
+    # terminal `deferred` (NOT a hard error). The gate must PASS (never wedge on one
+    # bad story) AND surface progress counts so the operator sees what happened.
+    c, eng, tp, stub = _setup(monkeypatch, tmp_path,
+                              status_for={"US-2": "deferred"})
+    from sqlalchemy import select
+    try:
+        resp = c.post("/api/workspaces/ws-1/build/stories")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["status"] == "done", body
+        # Counts surfaced so the operator sees real progress.
+        result = body["result"]["result"]
+        assert result["pass_count"] == 1
+        assert result["deferred_count"] == 1
+        # `pending` = outstanding work (deferred + skipped); the one deferred story.
+        assert result["pending"] == 1
+        with Session(eng) as s:
+            assert s.execute(select(JourneyStage.status).where(
+                JourneyStage.stage_key == "build")).scalar_one() == "passed"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_error_story_still_fails_gate(monkeypatch, tmp_path):
+    # A genuine `error`/`failed` story (distinct from `deferred`) STILL fails the gate —
+    # deferred is tolerated, error is not.
+    c, eng, tp, stub = _setup(monkeypatch, tmp_path,
+                              status_for={"US-2": "error"})
+    from sqlalchemy import select
+    try:
+        resp = c.post("/api/workspaces/ws-1/build/stories")
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "failed"
+        with Session(eng) as s:
+            assert s.execute(select(JourneyStage.status).where(
+                JourneyStage.stage_key == "build")).scalar_one() != "passed"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_all_deferred_fails_gate_nothing_genuinely_built(monkeypatch, tmp_path):
+    # The gate requires at least one GENUINELY built story (passed/generated-unverified).
+    # If EVERY story is deferred, nothing was built — the build must NOT pass.
+    c, eng, tp, stub = _setup(
+        monkeypatch, tmp_path,
+        status_for={"US-1": "deferred", "US-2": "deferred"})
+    from sqlalchemy import select
+    try:
+        resp = c.post("/api/workspaces/ws-1/build/stories")
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "failed"
+        with Session(eng) as s:
+            assert s.execute(select(JourneyStage.status).where(
+                JourneyStage.stage_key == "build")).scalar_one() != "passed"
+    finally:
+        app.dependency_overrides.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Restart-fresh — a second POST regenerates ALL stories (no cross-run resume)  #
+# --------------------------------------------------------------------------- #
+class _ResumeAwareStub:
+    """A stub that mimics the real loop's cross-run RESUME behaviour: any story with an
+    accepted persisted `story_codegen_status` record is returned `skipped`; everything
+    else is freshly `passed` (and persisted). This lets the test observe whether the
+    restart-fresh re-trigger truly regenerates (a fresh run must clear prior accepted
+    records, so NO story comes back `skipped` on the second POST)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *, session, neo4j, workspace, source_root, output_root,
+                 plan, story_id):
+        items = ([i for i in plan.items if i.story_id == story_id]
+                 if story_id is not None else list(plan.items))
+        results = []
+        statuses = []
+        for i in items:
+            prior = story_storage.get_story_record(session, workspace.id, i.story_id)
+            if prior and prior.get("status") in {"passed", "generated-unverified",
+                                                 "skipped"}:
+                status = "skipped"
+            else:
+                status = "passed"
+                story_storage.record_story_status(
+                    session, workspace_id=workspace.id, story_id=i.story_id,
+                    payload={"status": status, "attempts": 1})
+            statuses.append(status)
+            results.append({"story_id": i.story_id, "status": status, "attempts": 1})
+        self.calls.append({"story_id": story_id, "statuses": statuses})
+        return {"results": results}
+
+
+def test_second_post_regenerates_all_stories_restart_fresh(monkeypatch, tmp_path):
+    # Default BUILD_RESUME=0: a second trigger starts a NEW run that regenerates EVERY
+    # story — it must NOT skip them all as already-done from the prior run's persisted
+    # accepted records. A resume-aware stub returns `skipped` for any story whose prior
+    # record is accepted; restart-fresh must clear those so the second run rebuilds all.
+    c, eng, tp, _ = _setup(monkeypatch, tmp_path)
+    resume_stub = _ResumeAwareStub()
+    monkeypatch.setattr(bs, "_run_story_build_step", resume_stub)
+    try:
+        r1 = c.post("/api/workspaces/ws-1/build/stories")
+        assert r1.status_code == 202 and r1.json()["status"] == "done"
+        r2 = c.post("/api/workspaces/ws-1/build/stories")
+        assert r2.status_code == 202 and r2.json()["status"] == "done"
+        assert len(resume_stub.calls) == 2
+        # First run: all freshly built. Second run (restart-fresh): NOT all skipped —
+        # the prior accepted records were cleared, so every story is rebuilt.
+        assert resume_stub.calls[0]["statuses"] == ["passed", "passed"]
+        assert resume_stub.calls[1]["statuses"] == ["passed", "passed"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+# --------------------------------------------------------------------------- #
 # One-job-per-workspace guard                                                 #
 # --------------------------------------------------------------------------- #
 def test_one_job_guard(monkeypatch, tmp_path):

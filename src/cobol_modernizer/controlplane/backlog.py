@@ -126,6 +126,12 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
 
     gen = generate or generate_backlog_result
     runner = SdkAgentRunner()
+    # NO OUTER WALL: the orchestrator is run to completion (plain `asyncio.run`, NO
+    # `asyncio.wait_for` around it) so a single BACKLOG_TIMEOUT_S=300 wall can't kill
+    # the whole uncapped multi-round completeness loop mid-coverage at the old 300s
+    # cliff. BACKLOG_TIMEOUT_S is passed DOWN only as the per-unit one-shot `timeout_s`
+    # budget; the decomposed path's per-unit budgets (BACKLOG_EPIC/STORY_TIMEOUT_S, now
+    # retried-with-escalation) bound the work, and the JobRunner lets a long job run.
     result: EnrichmentResult = asyncio.run(
         gen(runner=runner, model=os.environ.get("BACKLOG_MODEL", _DEFAULT_MODEL),
             timeout_s=float(os.environ.get("BACKLOG_TIMEOUT_S", "300")),

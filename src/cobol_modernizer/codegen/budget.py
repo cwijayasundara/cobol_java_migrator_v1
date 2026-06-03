@@ -31,6 +31,8 @@ uses, imported (not re-listed) so the two never drift.
 """
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 
 from cobol_modernizer.codegen.patch_agent import (
@@ -38,10 +40,27 @@ from cobol_modernizer.codegen.patch_agent import (
 )
 from cobol_modernizer.codegen.story_plan import ACCEPTED_STORY_STATUSES
 
+logger = logging.getLogger(__name__)
+
 # Story-scoped token budget. DISTINCT env name from the slice-level CODEGEN_* knobs
 # (mirrors patch_agent's STORY_* naming) so per-story tuning never shadows them.
 STORY_MAX_TOKENS_ENV = "STORY_MAX_TOKENS"
 DEFAULT_STORY_MAX_TOKENS = 200_000
+
+#: Build-level POOLED token budget. The repeat-until-done loop (story_runner) draws
+#: every story's spend from one shared pool; when the pool is exhausted the loop stops
+#: spawning NEW attempts (no runaway). DISTINCT from the per-story ``STORY_MAX_TOKENS``
+#: cap, which is RETAINED (a single story still can't exceed its own per-story cap —
+#: this is the "hybrid pooled + per-story cap" ruling). Default: sized to
+#: ``story_count * STORY_MAX_TOKENS`` so the pool can, in the worst case, give every
+#: story its full per-story allotment.
+BUILD_TOKEN_POOL_ENV = "BUILD_TOKEN_POOL"
+
+#: The outer repeat-until-done attempt cap: a story still ``failed`` after this many
+#: full build passes is marked ``deferred`` (terminal — stop retrying it). Clamped to
+#: >=1 so a bad env value can never make the loop run zero passes / never build.
+BUILD_MAX_STORY_ATTEMPTS_ENV = "BUILD_MAX_STORY_ATTEMPTS"
+DEFAULT_BUILD_MAX_STORY_ATTEMPTS = 3
 
 #: Per-workspace max concurrent story jobs. This is a POLICY CONSTANT only — the
 #: actual one-job-per-workspace lock is already enforced by ``jobs.runner`` keyed on
@@ -102,6 +121,85 @@ def story_budget_from_env() -> StoryBudget:
         max_wall_s=story_timeout_s(),
         max_repair_attempts=story_repair_max_attempts(),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Pooled build budget (hybrid: build-level POOL + retained per-story cap)        #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class BuildBudget:
+    """Build-level budget for the repeat-until-done loop. HYBRID per the user's ruling:
+
+      - ``max_pool_tokens``      : a single POOL shared by every story across every
+                                   pass. When exhausted, the outer loop stops spawning
+                                   NEW attempts (so a runaway plan can't burn unbounded
+                                   tokens). A NEGATIVE pool disables the gate (operator
+                                   opt-out); a ZERO pool is exhausted immediately.
+      - ``per_story_max_tokens`` : the RETAINED per-story cap. Each story's run is
+                                   handed a :class:`StoryBudget` carrying this cap, so a
+                                   single story can never exceed it regardless of the
+                                   pool's headroom. (``story_budget`` builds that.)
+
+    The per-story wall/repair limits default to the same env-derived values a standalone
+    per-story budget would use, so the pooled budget is a strict superset of the
+    per-story API — callers can keep using ``StoryBudget`` directly, or draw one from
+    here via :meth:`story_budget`."""
+
+    max_pool_tokens: int
+    per_story_max_tokens: int
+    per_story_wall_s: float = 0.0
+    per_story_repair_attempts: int = 0
+
+    def pool_exhausted(self, tokens_used: int) -> bool:
+        """True once cumulative ``tokens_used`` leaves NO headroom for another attempt
+        (>= the pool). A negative pool disables the gate (never exhausted); a zero pool
+        is exhausted at 0. Distinct from the per-story ``tokens_exceeded`` (strictly
+        OVER): the pool gate is 'no room left to START a new attempt', so at-limit
+        counts as exhausted."""
+        if self.max_pool_tokens < 0:
+            return False
+        return tokens_used >= self.max_pool_tokens
+
+    def story_budget(self) -> StoryBudget:
+        """A per-story :class:`StoryBudget` carrying the RETAINED per-story token cap (so
+        one story can't exceed it) plus the per-story wall/repair limits."""
+        return StoryBudget(
+            max_tokens=self.per_story_max_tokens,
+            max_wall_s=self.per_story_wall_s,
+            max_repair_attempts=self.per_story_repair_attempts,
+        )
+
+
+def build_budget_from_env(story_count: int) -> BuildBudget:
+    """Build a :class:`BuildBudget` from the environment. PURE (os.environ reads only).
+    The pool defaults to ``max(0, story_count) * STORY_MAX_TOKENS`` (every story can get
+    its full per-story allotment in the worst case) but is overridable via
+    ``BUILD_TOKEN_POOL``. The retained per-story cap + wall/repair limits reuse the same
+    knobs a standalone :func:`story_budget_from_env` would (no duplication)."""
+    per_story = story_budget_from_env()
+    default_pool = max(0, story_count) * per_story.max_tokens
+    return BuildBudget(
+        max_pool_tokens=_env_int(BUILD_TOKEN_POOL_ENV, default_pool),
+        per_story_max_tokens=per_story.max_tokens,
+        per_story_wall_s=per_story.max_wall_s,
+        per_story_repair_attempts=per_story.max_repair_attempts,
+    )
+
+
+def build_max_story_attempts() -> int:
+    """The outer repeat-until-done attempt cap from ``BUILD_MAX_STORY_ATTEMPTS`` (default
+    3, clamped to >=1 so the loop always runs at least one pass). A non-integer value
+    warns and falls back to the default."""
+    raw = os.environ.get(BUILD_MAX_STORY_ATTEMPTS_ENV)
+    if raw is None:
+        return DEFAULT_BUILD_MAX_STORY_ATTEMPTS
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        logger.warning("Ignoring non-integer %s=%r; using %d",
+                       BUILD_MAX_STORY_ATTEMPTS_ENV, raw,
+                       DEFAULT_BUILD_MAX_STORY_ATTEMPTS)
+        return DEFAULT_BUILD_MAX_STORY_ATTEMPTS
 
 
 # --------------------------------------------------------------------------- #

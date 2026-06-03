@@ -11,8 +11,10 @@ only via `monkeypatch`). Two policies are covered:
 from __future__ import annotations
 
 from cobol_modernizer.codegen.budget import (
-    DEFAULT_STORY_MAX_TOKENS, MAX_CONCURRENT_STORY_JOBS, StoryBudget,
-    ResumeDecision, should_skip, story_budget_from_env,
+    DEFAULT_BUILD_MAX_STORY_ATTEMPTS, DEFAULT_STORY_MAX_TOKENS,
+    MAX_CONCURRENT_STORY_JOBS, BuildBudget, StoryBudget, ResumeDecision,
+    build_budget_from_env, build_max_story_attempts, should_skip,
+    story_budget_from_env,
 )
 from cobol_modernizer.codegen.story_plan import (
     ACCEPTED_STORY_STATUSES, StoryCodegenStatus,
@@ -160,3 +162,90 @@ def test_resume_decision_carries_reason():
     d2 = should_skip(_record("failed", "h1"), "h1", as_decision=True)
     assert d2.skip is False
     assert "not accepted" in d2.reason.lower() or "failed" in d2.reason.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Pooled build budget — a build-level token POOL + retained per-story cap        #
+# --------------------------------------------------------------------------- #
+def test_build_budget_default_pool_sized_from_story_count(monkeypatch):
+    # No env override: the pool defaults to story_count * STORY_MAX_TOKENS, and the
+    # retained per-story cap stays STORY_MAX_TOKENS.
+    monkeypatch.delenv("BUILD_TOKEN_POOL", raising=False)
+    monkeypatch.delenv("STORY_MAX_TOKENS", raising=False)
+    b = build_budget_from_env(story_count=3)
+    assert b.max_pool_tokens == 3 * DEFAULT_STORY_MAX_TOKENS
+    assert b.per_story_max_tokens == DEFAULT_STORY_MAX_TOKENS
+
+
+def test_build_budget_pool_override_from_env(monkeypatch):
+    monkeypatch.setenv("BUILD_TOKEN_POOL", "12345")
+    monkeypatch.setenv("STORY_MAX_TOKENS", "7000")
+    b = build_budget_from_env(story_count=10)
+    assert b.max_pool_tokens == 12345
+    assert b.per_story_max_tokens == 7000
+
+
+def test_build_budget_bad_pool_env_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("BUILD_TOKEN_POOL", "not-a-number")
+    monkeypatch.delenv("STORY_MAX_TOKENS", raising=False)
+    b = build_budget_from_env(story_count=2)
+    assert b.max_pool_tokens == 2 * DEFAULT_STORY_MAX_TOKENS
+
+
+def test_build_budget_zero_story_count_pool_is_non_negative(monkeypatch):
+    monkeypatch.delenv("BUILD_TOKEN_POOL", raising=False)
+    monkeypatch.delenv("STORY_MAX_TOKENS", raising=False)
+    b = build_budget_from_env(story_count=0)
+    assert b.max_pool_tokens == 0
+    # A zero/empty pool is exhausted immediately (no headroom to spawn new attempts).
+    assert b.pool_exhausted(tokens_used=0) is True
+
+
+def test_build_budget_pool_exhausted_predicate():
+    b = BuildBudget(max_pool_tokens=1000, per_story_max_tokens=500)
+    assert b.pool_exhausted(tokens_used=0) is False
+    assert b.pool_exhausted(tokens_used=999) is False
+    assert b.pool_exhausted(tokens_used=1000) is True   # at-limit: no headroom left
+    assert b.pool_exhausted(tokens_used=1001) is True
+
+
+def test_build_budget_non_positive_pool_disables_pool_gate_except_zero():
+    # A NEGATIVE pool means "no pool cap" (operator opt-out), like the per-story gates.
+    b = BuildBudget(max_pool_tokens=-1, per_story_max_tokens=500)
+    assert b.pool_exhausted(tokens_used=10_000_000) is False
+
+
+def test_build_budget_yields_per_story_budget_with_retained_cap():
+    # The pooled budget hands out a per-story StoryBudget whose token cap is the
+    # retained per-story cap — so a single story can never exceed it.
+    b = BuildBudget(max_pool_tokens=10_000, per_story_max_tokens=500,
+                    per_story_wall_s=42.0, per_story_repair_attempts=3)
+    sb = b.story_budget()
+    assert isinstance(sb, StoryBudget)
+    assert sb.max_tokens == 500
+    assert sb.max_wall_s == 42.0
+    assert sb.max_repair_attempts == 3
+    assert sb.tokens_exceeded(501) is True
+
+
+# --------------------------------------------------------------------------- #
+# BUILD_MAX_STORY_ATTEMPTS — the outer repeat-until-done attempt cap            #
+# --------------------------------------------------------------------------- #
+def test_build_max_story_attempts_default(monkeypatch):
+    monkeypatch.delenv("BUILD_MAX_STORY_ATTEMPTS", raising=False)
+    assert build_max_story_attempts() == DEFAULT_BUILD_MAX_STORY_ATTEMPTS == 3
+
+
+def test_build_max_story_attempts_override(monkeypatch):
+    monkeypatch.setenv("BUILD_MAX_STORY_ATTEMPTS", "5")
+    assert build_max_story_attempts() == 5
+
+
+def test_build_max_story_attempts_clamped_to_at_least_one(monkeypatch):
+    # A non-positive / bad value must never let the outer loop run zero passes.
+    monkeypatch.setenv("BUILD_MAX_STORY_ATTEMPTS", "0")
+    assert build_max_story_attempts() == 1
+    monkeypatch.setenv("BUILD_MAX_STORY_ATTEMPTS", "-4")
+    assert build_max_story_attempts() == 1
+    monkeypatch.setenv("BUILD_MAX_STORY_ATTEMPTS", "not-a-number")
+    assert build_max_story_attempts() == DEFAULT_BUILD_MAX_STORY_ATTEMPTS
