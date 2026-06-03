@@ -21,6 +21,40 @@ class LabResult:
     defects: list
 
 
+# The natural sub-slice key a candidate/golden record carries — the program /
+# COBOL-context it belongs to. Checked in priority order; the first present field
+# wins. A record with none of these belongs to the catch-all "<whole>" sub-slice
+# (so a split on un-annotated records is a single no-op group — never an error).
+_SUBSLICE_KEY_FIELDS = ("program", "_program", "context", "_context",
+                        "cobol_context", "copybook")
+
+
+def subslice_key_of(record: dict) -> str:
+    """The sub-slice (program/COBOL-context) a record belongs to, or '<whole>'.
+
+    This is the DECOMPOSE-FURTHER split key: a defect-localization re-run groups
+    a story's candidate (and golden) records by this key to find WHICH narrower
+    sub-slice actually fails. Records carrying none of the recognized context
+    fields collapse into one '<whole>' group (a meaningless split → no-op)."""
+    for f in _SUBSLICE_KEY_FIELDS:
+        v = record.get(f)
+        if v not in (None, ""):
+            return str(v)
+    return "<whole>"
+
+
+def split_by_subslice(records: list[dict]) -> dict[str, list[dict]]:
+    """Group records by their sub-slice (program/COBOL-context) key, preserving
+    first-seen order. Used to narrow a failing story onto its per-program/context
+    sub-slices so the defect can be localized. A single resulting group means the
+    records share one context (or carry none) — the caller treats that as
+    'no further decomposition possible'."""
+    groups: dict[str, list[dict]] = {}
+    for r in records:
+        groups.setdefault(subslice_key_of(r), []).append(r)
+    return groups
+
+
 class EquivalenceLab:
     def __init__(self, *, golden_store: GoldenStore, ruleset: ToleranceRuleset,
                  resolve_seam, dialect: str) -> None:

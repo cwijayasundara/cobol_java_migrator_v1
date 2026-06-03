@@ -31,7 +31,7 @@ from cobol_modernizer.controlplane.verify_storage import (
     latest_verify_report, record_equivalence_check, record_verify_report,
 )
 from cobol_modernizer.equivalence.golden import InMemoryGoldenStore
-from cobol_modernizer.equivalence.lab import EquivalenceLab
+from cobol_modernizer.equivalence.lab import EquivalenceLab, split_by_subslice
 from cobol_modernizer.equivalence.seam_link import resolve_source_seam
 from cobol_modernizer.equivalence.tolerance import load_ruleset
 from cobol_modernizer.persistence.tables import Artifact, Gate, JourneyStage, Workspace
@@ -45,6 +45,8 @@ _NEO4J_ERRORS = (Neo4jError, DriverError)
 # The timeout is soft — overrun yields a PARTIAL sub-verdict, never a hard kill.
 _DEFAULT_MAX_CONCURRENCY = 4
 _DEFAULT_EQUIVALENCE_TIMEOUT_S = 60.0
+# Decompose-further (defect localization): bound on repeat-until-done narrowing.
+_DEFAULT_MAX_REPAIR_ATTEMPTS = 2
 
 
 def _max_concurrency() -> int:
@@ -60,6 +62,22 @@ def _equivalence_timeout_s() -> float:
                                         _DEFAULT_EQUIVALENCE_TIMEOUT_S)))
     except (TypeError, ValueError):
         return _DEFAULT_EQUIVALENCE_TIMEOUT_S
+
+
+def _decompose_further_enabled() -> bool:
+    """Gate the decompose-further (defect-localization) loop. Default ON."""
+    return os.getenv("VERIFY_DECOMPOSE_FURTHER", "1").strip().lower() not in (
+        "0", "false", "no", "off", "")
+
+
+def _max_repair_attempts() -> int:
+    """Hard upper bound on decompose-further narrowing passes (guarantees the
+    repeat-until-done loop terminates even before the no-progress guard fires)."""
+    try:
+        return max(1, int(os.getenv("VERIFY_MAX_REPAIR_ATTEMPTS",
+                                    _DEFAULT_MAX_REPAIR_ATTEMPTS)))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_REPAIR_ATTEMPTS
 
 # Writers/movers of a field, for honest seam-linking of a defect. Falls back to
 # the program node (unresolved) when the graph has no writer — never invents lineage.
@@ -229,6 +247,109 @@ def _fan_out_per_story(lab: EquivalenceLab, *, workspace_id: str, req: VerifyReq
     return subs
 
 
+def _subslice_verdict(lab: EquivalenceLab, *, workspace_id: str, slice_name: str,
+                      subslice: str, program: str, golden: list[dict],
+                      candidate: list[dict], record: str, record_key: str,
+                      online_uses_recorded_fixtures: bool,
+                      timeout_s: float) -> dict[str, Any]:
+    """Run equivalence on ONE narrower sub-slice (program/COBOL-context) under the
+    SAME soft-timeout philosophy as the per-story fan-out: an overrun (or any
+    error) yields a PARTIAL sub-verdict (ok=False), never a hard kill. Registers a
+    sub-slice-scoped golden (only this sub-slice's golden records) so the re-run is
+    a TRUE narrowing of the failing story onto this program/context."""
+    sub_name = f"{slice_name}::{subslice}"
+    lab.register_golden(workspace_id=workspace_id, slice_name=sub_name,
+                        record=record, records=golden)
+
+    async def _go():
+        coro = lab.run_equivalence_async(
+            workspace_id=workspace_id, slice_name=sub_name, program=program,
+            candidate_records=candidate, record_key=record_key,
+            online_uses_recorded_fixtures=online_uses_recorded_fixtures)
+        return await (asyncio.wait_for(coro, timeout=timeout_s)
+                      if timeout_s > 0 else coro)
+
+    try:
+        result = asyncio.run(_go())
+    except asyncio.TimeoutError:
+        return {"subslice": subslice, "ok": False, "reason": "timeout",
+                "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+    except Exception as exc:  # noqa: BLE001 — partial sub-verdict, never crash decompose
+        logger.warning("verify: sub-slice equivalence failed for %s; partial sub-verdict",
+                       sub_name, exc_info=True)
+        return {"subslice": subslice, "ok": False, "reason": f"error: {exc}",
+                "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+    ok = result.report.verdict == "pass"
+    return {
+        "subslice": subslice, "ok": ok,
+        "reason": "equivalence passed" if ok else "equivalence failed",
+        "verdict": result.report.verdict,
+        "records_compared": result.report.records_compared,
+        "defect_count": result.report.defect_count,
+        "open_questions": result.report.open_questions,
+        "defects": [_serialize_defect(d) for d in result.defects],
+        "partial": False,
+    }
+
+
+def _decompose_story(lab: EquivalenceLab, *, workspace_id: str, req: VerifyRequest,
+                     slice_name: str) -> list[dict[str, Any]] | None:
+    """DECOMPOSE-FURTHER repeat-until-done: split a FAILING story's records per
+    program/COBOL-context and re-run equivalence on each narrower sub-slice to
+    LOCALIZE which sub-slice actually fails. Returns the leaf sub-slice verdicts,
+    or None when no meaningful split exists (a single context → nothing to localize).
+
+    Termination is guaranteed two ways: (1) a hard attempt bound
+    (VERIFY_MAX_REPAIR_ATTEMPTS), and (2) a no-progress guard — a failing
+    sub-slice that does not split into >1 child is atomic and is not re-queued."""
+    cand_groups = split_by_subslice(req.candidate_records)
+    if len(cand_groups) <= 1:
+        return None  # one context only — no localization possible
+    golden_groups = split_by_subslice(req.golden_records)
+    timeout_s = _equivalence_timeout_s()
+    max_attempts = _max_repair_attempts()
+
+    # Work queue of (subslice_key, candidate_records, golden_records) to localize.
+    pending = [(k, v, golden_groups.get(k, [])) for k, v in cand_groups.items()]
+    leaves: list[dict[str, Any]] = []
+    attempt = 0
+    while pending and attempt < max_attempts:
+        attempt += 1
+        next_pending: list[tuple[str, list[dict], list[dict]]] = []
+        for key, cand, golden in pending:
+            sub = _subslice_verdict(
+                lab, workspace_id=workspace_id, slice_name=slice_name, subslice=key,
+                program=req.program, golden=golden, candidate=cand,
+                record=req.record, record_key=req.record_key,
+                online_uses_recorded_fixtures=req.online_uses_recorded_fixtures,
+                timeout_s=timeout_s)
+            if sub["ok"]:
+                leaves.append(sub)
+                continue
+            # Try to narrow this failing sub-slice FURTHER (loop-until-done). A
+            # split that does NOT increase the group count is no-progress → atomic.
+            child_groups = split_by_subslice(cand)
+            if len(child_groups) > 1:
+                child_golden = split_by_subslice(golden)
+                next_pending.extend(
+                    (ck, cv, child_golden.get(ck, []))
+                    for ck, cv in child_groups.items())
+            else:
+                leaves.append(sub)  # atomic failing leaf — localized here
+        pending = next_pending
+    # Attempt bound hit with work still pending: record those as localized leaves
+    # (we stop narrowing — never an infinite loop).
+    for key, cand, golden in pending:
+        sub = _subslice_verdict(
+            lab, workspace_id=workspace_id, slice_name=slice_name, subslice=key,
+            program=req.program, golden=golden, candidate=cand,
+            record=req.record, record_key=req.record_key,
+            online_uses_recorded_fixtures=req.online_uses_recorded_fixtures,
+            timeout_s=timeout_s)
+        leaves.append(sub)
+    return leaves
+
+
 def _make_lab(neo4j, *, repo_slug: str, req: VerifyRequest) -> EquivalenceLab:
     ruleset = load_ruleset(
         req.tolerance_yaml
@@ -300,7 +421,25 @@ def _run_verify_fanout(*, session: Session, neo4j, workspace: Workspace,
     passes iff EVERY story passes equivalence AND story_behavior."""
     subs = _fan_out_per_story(lab, workspace_id=workspace.id, req=req, stories=stories)
 
-    # Persist one equivalence_check Artifact per story (incl. partial/timeout subs).
+    # DECOMPOSE-FURTHER (defect localization): for each FAILING story, split its
+    # records per program/COBOL-context and re-run to pin WHICH sub-slice fails.
+    # A parent story PASSES iff ALL its sub-verdicts pass (the whole-story verdict
+    # already failed here; decompose only localizes — it never flips fail->pass).
+    failing_subslices: list[str] = []
+    if _decompose_further_enabled():
+        for sub in subs:
+            if sub["ok"]:
+                continue
+            leaves = _decompose_story(lab, workspace_id=workspace.id, req=req,
+                                      slice_name=sub["slice_name"])
+            if not leaves:
+                continue
+            sub["subslices"] = leaves
+            failing_subslices.extend(
+                s["subslice"] for s in leaves if not s["ok"])
+
+    # Persist one equivalence_check Artifact per story (incl. partial/timeout subs
+    # and any localized sub-slice results from decompose-further).
     for sub in subs:
         record_equivalence_check(
             session, workspace_id=workspace.id, story_id=sub["story_id"],
@@ -313,6 +452,9 @@ def _run_verify_fanout(*, session: Session, neo4j, workspace: Workspace,
                 "defect_count": sub.get("defect_count", 0),
                 "defects_json": json.dumps(sub.get("defects", [])),
                 "partial": sub.get("partial", False),
+                "subslices_json": json.dumps(sub.get("subslices", [])),
+                "failing_subslices": [s["subslice"] for s in sub.get("subslices", [])
+                                      if not s["ok"]],
             })
 
     equivalence_passed = bool(subs) and all(s["ok"] for s in subs)
@@ -354,6 +496,9 @@ def _run_verify_fanout(*, session: Session, neo4j, workspace: Workspace,
         "open_questions": open_questions,
         "defects": [d for s in subs for d in s.get("defects", [])],
         "per_story_verdicts": subs,
+        # Localized: the narrower program/COBOL-context sub-slices that actually
+        # failed (deduped, order-preserving). Empty when nothing decomposed.
+        "failing_subslices": list(dict.fromkeys(failing_subslices)),
     }
     art = record_verify_report(session, workspace_id=workspace.id,
                                evidence_map=dict(payload))
