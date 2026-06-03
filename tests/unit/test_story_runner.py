@@ -467,3 +467,132 @@ async def test_run_story_plan_runs_in_order(session, tmp_path):
     assert [r.story_id for r in results] == ["US-1", "US-2"]
     assert seen == ["US-1", "US-2"]
     assert all(r.status == StoryCodegenStatus.passed for r in results)
+
+
+# --------------------------------------------------------------------------- #
+# -Dtest= target derived from the public class NAME, not the file stem        #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_target_uses_public_class_name_not_file_stem(session, tmp_path):
+    item = _item()
+    # File stem (PostTests) differs from the public class (PostTest) — Maven matches
+    # the class, so -Dtest= MUST be the class name or it would run zero tests forever.
+    tests = StoryPatch(files=[GeneratedFile(
+        path="src/test/java/com/example/PostTests.java", kind="test",
+        content="// US-1 AC-1\npublic class PostTest {}", evidence=["AC-1"])])
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    await run_story(item, session=session, workspace_id="ws1", module_dir=tmp_path,
+                    context_pack=_pack(item), runner=FakeRunner(),
+                    gen_tests=_make_gen_tests(patch=tests),
+                    gen_impl=_make_gen_impl(), run_tests=run, now=_clock())
+    assert run.calls[0]["target"] == "PostTest"
+
+
+# --------------------------------------------------------------------------- #
+# Infra `error` status is non-repairable -> failed, budget not burned         #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_error_status_breaks_repair_and_maps_to_failed(session, tmp_path):
+    item = _item()
+    impl_calls = []
+    # red baseline, then error after impl#1; error must STOP repair immediately.
+    run = _scripted(StoryTestStatus.tests_failed,
+                    _result(StoryTestStatus.error, log_excerpt="mvn timed out"))
+
+    async def gen_impl(**kwargs):
+        impl_calls.append(kwargs)
+        return _impl_patch()
+
+    out = await run_story(item, session=session, workspace_id="ws1",
+                          module_dir=tmp_path, context_pack=_pack(item),
+                          runner=FakeRunner(), gen_tests=_make_gen_tests(),
+                          gen_impl=gen_impl, run_tests=run, repair_max_attempts=3,
+                          now=_clock())
+    assert out.status == StoryCodegenStatus.failed
+    # only ONE impl pass — the full repair budget was NOT burned on an infra error
+    assert out.attempts == 1
+    assert len(impl_calls) == 1
+    assert "infra error" in out.rationale
+    rec = get_story_record(session, "ws1", "US-1")
+    assert rec["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_no_tests_run_repair_feedback_notes_class_name(session, tmp_path):
+    item = _item()
+    seen_feedback = []
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.no_tests_run,
+                    StoryTestStatus.ok)
+
+    async def gen_impl(**kwargs):
+        seen_feedback.append(kwargs.get("repair_feedback"))
+        return _impl_patch()
+
+    await run_story(item, session=session, workspace_id="ws1", module_dir=tmp_path,
+                    context_pack=_pack(item), runner=FakeRunner(),
+                    gen_tests=_make_gen_tests(), gen_impl=gen_impl, run_tests=run,
+                    repair_max_attempts=2, now=_clock())
+    # first impl pass: no feedback; repair pass after no_tests_run carries the note.
+    assert seen_feedback[0] is None
+    assert seen_feedback[1]["failing_gate"] == "no-tests-run"
+    assert "matched zero tests" in seen_feedback[1]["log_excerpt"]
+
+
+# --------------------------------------------------------------------------- #
+# Mid-lifecycle exception -> durable `failed`, plan continues                  #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_exception_in_run_story_records_failed_and_returns(session, tmp_path):
+    item = _item()
+
+    def boom(module_dir, target, **k):
+        raise ValueError("simulated empty LLM payload")
+
+    out = await run_story(item, session=session, workspace_id="ws1",
+                          module_dir=tmp_path, context_pack=_pack(item),
+                          runner=FakeRunner(), gen_tests=_make_gen_tests(),
+                          gen_impl=_make_gen_impl(), run_tests=boom, now=_clock())
+    assert out.status == StoryCodegenStatus.failed
+    assert "simulated empty LLM payload" in out.rationale
+    # the failure is DURABLE
+    rec = get_story_record(session, "ws1", "US-1")
+    assert rec is not None and rec["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_plan_continues_after_a_raising_story(session, tmp_path):
+    items = [_item("US-1"), _item("US-2")]
+    ran = []
+
+    def context_pack_for(it):
+        return _pack(it)
+
+    # US-1's second run_tests raises; US-2 runs red->green normally.
+    seq = iter([
+        _result(StoryTestStatus.tests_failed),          # US-1 red
+        "BOOM",                                          # US-1 impl run -> raise
+        _result(StoryTestStatus.tests_failed),          # US-2 red
+        _result(StoryTestStatus.ok),                    # US-2 green
+    ])
+
+    def run(module_dir, target, **k):
+        nxt = next(seq)
+        if nxt == "BOOM":
+            raise RuntimeError("mvn exploded")
+        return nxt
+
+    async def gen_impl(**kwargs):
+        ran.append(kwargs["item"].story_id)
+        return _impl_patch(story_id=kwargs["item"].story_id)
+
+    results = await run_story_plan(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=context_pack_for, runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=gen_impl, run_tests=run, now=_clock())
+    assert [r.story_id for r in results] == ["US-1", "US-2"]
+    assert results[0].status == StoryCodegenStatus.failed
+    assert results[1].status == StoryCodegenStatus.passed
+    # US-2 actually ran after US-1 blew up
+    assert "US-2" in ran
+    assert get_story_record(session, "ws1", "US-1")["status"] == "failed"
+    assert get_story_record(session, "ws1", "US-2")["status"] == "passed"

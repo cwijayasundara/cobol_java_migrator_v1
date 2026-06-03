@@ -28,6 +28,7 @@ the injected runner's `.token_usage`/`.cost_usd`; wall time uses an injectable
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,7 +45,9 @@ from cobol_modernizer.codegen.story_plan import StoryCodegenItem, StoryCodegenSt
 from cobol_modernizer.codegen.story_storage import (
     get_story_record, record_story_status,
 )
-from cobol_modernizer.codegen.test_runner import StoryTestResult, StoryTestStatus
+from cobol_modernizer.codegen.test_runner import (
+    StoryTestResult, StoryTestStatus, run_targeted_tests,
+)
 from cobol_modernizer.controlplane.build import (
     _record_generated_test_refs, scan_generated_test_refs,
 )
@@ -115,17 +118,24 @@ def _existing_java(module_dir: Path) -> list[GeneratedFile]:
     return out
 
 
+_PUBLIC_CLASS = re.compile(r"public\s+(?:final\s+)?class\s+(\w+)")
+
+
 def _test_classes(files: list[GeneratedFile]) -> str:
-    """The comma-joined simple test-class names for a `-Dtest=` targeted run, derived
-    from the generated test files' paths (Maven accepts a comma list). Empty string
-    when there are no test files (the caller then has nothing to target)."""
-    names = []
+    """The comma-joined test-class names for a `-Dtest=` targeted run (Maven accepts a
+    comma list). The token is parsed from the test file CONTENT's public class name —
+    NOT the file stem — because `-Dtest=` matches the Java class, and a `FooTests.java`
+    holding `class FooTest` would otherwise target a non-existent class and read as
+    `no_tests_run` forever. Falls back to the file stem when no `public class` is found
+    (e.g. a package-private test class). Empty string when there are no test files."""
+    names: list[str] = []
     for f in files:
         if f.kind != "test":
             continue
-        stem = Path(f.path).stem
-        if stem and stem not in names:
-            names.append(stem)
+        m = _PUBLIC_CLASS.search(f.content)
+        name = m.group(1) if m else Path(f.path).stem
+        if name and name not in names:
+            names.append(name)
     return ",".join(names)
 
 
@@ -170,6 +180,35 @@ def _should_skip(session, *, workspace_id: str, item: StoryCodegenItem,
 
 
 # --------------------------------------------------------------------------- #
+# Repair                                                                      #
+# --------------------------------------------------------------------------- #
+#: Statuses the repair loop must NOT retry. `ok` is done; `toolchain_unavailable`
+#: (mvn absent) and `error` (timeout/OSError) are INFRA problems a regenerated impl
+#: cannot fix — retrying just burns the LLM budget.
+_NON_REPAIRABLE = frozenset({
+    StoryTestStatus.ok,
+    StoryTestStatus.toolchain_unavailable,
+    StoryTestStatus.error,
+})
+
+
+def _repair_feedback(result: StoryTestResult, touched_files: list[str]) -> dict:
+    """The failing gate + bounded log excerpt + the files the previous attempt wrote,
+    mirroring `repair_loop.py::run_repair_loop`'s feedback shape. A `no_tests_run`
+    gate gets an explicit note: the targeted `-Dtest=` class matched ZERO tests, so
+    the fix is the TEST class name, not the impl — otherwise a reviewer reading the
+    log is misled into thinking the production code is still red."""
+    log = result.log_excerpt
+    if result.status == StoryTestStatus.no_tests_run:
+        log = ("NOTE: the targeted test class matched zero tests — the generated "
+               "test class name likely does not match what was run; check the test "
+               "class name (regenerating the impl will not fix this).\n") + log
+    return {"failing_gate": result.status.value,
+            "log_excerpt": log,
+            "touched_files": touched_files}
+
+
+# --------------------------------------------------------------------------- #
 # Telemetry                                                                   #
 # --------------------------------------------------------------------------- #
 def _usage_snapshot(runner: Any) -> dict[str, int]:
@@ -203,7 +242,7 @@ async def run_story(
     project_index: list[str] | None = None,
     gen_tests: GenTests = generate_story_tests,
     gen_impl: GenImpl = generate_story_implementation,
-    run_tests: RunTests = None,  # type: ignore[assignment]
+    run_tests: RunTests = run_targeted_tests,
     now: Clock = time.monotonic,
     repair_max_attempts: int | None = None,
     persist: bool = True,
@@ -217,9 +256,6 @@ async def run_story(
     result is written via story_storage AND `generated_test_refs` is (re)recorded so
     the Verify story-behavior gate keeps reading it.
     """
-    from cobol_modernizer.codegen.test_runner import run_targeted_tests
-    if run_tests is None:
-        run_tests = run_targeted_tests
     if repair_max_attempts is None:
         repair_max_attempts = story_repair_max_attempts()
     project_index = project_index or []
@@ -237,49 +273,70 @@ async def run_story(
     usage_before = _usage_snapshot(runner)
     cost_before = float(getattr(runner, "cost_usd", 0.0) or 0.0)
 
-    # 2. Generate the FAILING tests, then write them into the scaffold.
-    tests_patch = await gen_tests(
-        runner=runner, item=item, context_pack=context_pack,
-        project_index=project_index, model=model)
-    test_files = list(tests_patch.files)
-    _write_files(module_dir, test_files)
-    target = _test_classes(test_files)
+    def _telemetry() -> tuple[float, dict[str, int], float]:
+        return (now() - started,
+                _usage_delta(usage_before, _usage_snapshot(runner)),
+                float(getattr(runner, "cost_usd", 0.0) or 0.0) - cost_before)
 
-    # 3. Targeted run #1 — the RED baseline. Red here is EXPECTED (compile gap /
-    #    failing / no_tests_run), not a story failure; we only record it.
-    red = run_tests(module_dir, target)
-    logger.info("story %s: red baseline status=%s", item.story_id, red.status.value)
+    try:
+        # 2. Generate the FAILING tests, then write them into the scaffold.
+        tests_patch = await gen_tests(
+            runner=runner, item=item, context_pack=context_pack,
+            project_index=project_index, model=model)
+        test_files = list(tests_patch.files)
+        _write_files(module_dir, test_files)
+        target = _test_classes(test_files)
 
-    # 4. Generate the implementation, write it, then re-run (expect GREEN).
-    impl_patch = await gen_impl(
-        runner=runner, item=item, context_pack=context_pack,
-        failing_tests=test_files, existing_java=_existing_java(module_dir),
-        model=model)
-    impl_files = list(impl_patch.files)
-    changed = _write_files(module_dir, impl_files)
-    attempts = 1
-    result = run_tests(module_dir, target)
+        # 3. Targeted run #1 — the RED baseline. Red here is EXPECTED (compile gap /
+        #    failing / no_tests_run), not a story failure; we only record it.
+        red = run_tests(module_dir, target)
+        logger.info("story %s: red baseline status=%s",
+                    item.story_id, red.status.value)
 
-    # 5. Bounded repair — while not green and within budget, re-generate the impl
-    #    from the failing log excerpt + the touched files (mirrors run_repair_loop's
-    #    feedback shape), re-write, re-run. toolchain_unavailable is NOT repairable
-    #    (re-running mvn will not help) so we break out.
-    while (result.status != StoryTestStatus.ok
-           and result.status != StoryTestStatus.toolchain_unavailable
-           and attempts < repair_max_attempts + 1):
-        logger.info("story %s: repair attempt %d (gate=%s)",
-                    item.story_id, attempts, result.status.value)
+        # 4. Generate the implementation, write it, then re-run (expect GREEN).
         impl_patch = await gen_impl(
             runner=runner, item=item, context_pack=context_pack,
             failing_tests=test_files, existing_java=_existing_java(module_dir),
-            model=model,
-            repair_feedback={"failing_gate": result.status.value,
-                             "log_excerpt": result.log_excerpt,
-                             "touched_files": changed})
+            model=model)
         impl_files = list(impl_patch.files)
         changed = _write_files(module_dir, impl_files)
-        attempts += 1
+        attempts = 1
         result = run_tests(module_dir, target)
+
+        # 5. Bounded repair — while not green and within budget, re-generate the impl
+        #    from the failing log excerpt + the touched files (mirrors
+        #    run_repair_loop's feedback shape), re-write, re-run. Some statuses are
+        #    NON-REPAIRABLE: a regenerated impl cannot fix a missing toolchain or an
+        #    infra error (timeout/OSError) — re-running would just burn the whole LLM
+        #    budget — so we break out.
+        while (result.status not in _NON_REPAIRABLE
+               and attempts < repair_max_attempts + 1):
+            logger.info("story %s: repair attempt %d (gate=%s)",
+                        item.story_id, attempts, result.status.value)
+            impl_patch = await gen_impl(
+                runner=runner, item=item, context_pack=context_pack,
+                failing_tests=test_files, existing_java=_existing_java(module_dir),
+                model=model,
+                repair_feedback=_repair_feedback(result, changed))
+            impl_files = list(impl_patch.files)
+            changed = _write_files(module_dir, impl_files)
+            attempts += 1
+            result = run_tests(module_dir, target)
+    except Exception as exc:  # noqa: BLE001 — a single bad story must not abort the
+        # plan or leave NO durable trace. Record a `failed` outcome (with the error in
+        # the rationale) and return; never re-raise. Half-applied files on the shared
+        # module_dir are tolerated — they are overwritten/cleaned by the next run.
+        logger.error("story %s: aborted with %s: %s",
+                     item.story_id, type(exc).__name__, exc, exc_info=True)
+        wall, token_usage, cost = _telemetry()
+        out = StoryRunResult(
+            story_id=item.story_id, status=StoryCodegenStatus.failed,
+            wall_time_s=wall, token_usage=token_usage, cost_usd=cost,
+            rationale=f"error: {exc}")
+        if persist:
+            _persist(session, workspace_id=workspace_id, item=item, out=out,
+                     model=model, context_hash=context_hash, module_dir=module_dir)
+        return out
 
     # 6. GATE — decide the recorded status from AC coverage + lineage + test result.
     ac_covered = scan_generated_test_refs(module_dir, item.acceptance_criteria_ids)
@@ -290,16 +347,20 @@ async def run_story(
 
     status = _decide_status(result=result, ac_ok=ac_ok, lineage_ok=lineage_ok)
 
-    wall = now() - started
+    wall, token_usage, cost = _telemetry()
+    rationale = "; ".join(r for r in (tests_patch.rationale, impl_patch.rationale)
+                          if r)
+    if result.status == StoryTestStatus.error:
+        # An infra error (mvn timeout/OSError), not a code defect — make that explicit
+        # in the durable record so a reviewer doesn't chase a phantom code bug.
+        note = f"infra error during test run: {result.log_excerpt[:200]}"
+        rationale = f"{note}; {rationale}" if rationale else note
     out = StoryRunResult(
         story_id=item.story_id, status=status, test_result=result,
         red_status=red.status, attempts=attempts,
         ac_covered=ac_covered, ac_missing=ac_missing, changed_files=changed,
-        wall_time_s=wall,
-        token_usage=_usage_delta(usage_before, _usage_snapshot(runner)),
-        cost_usd=float(getattr(runner, "cost_usd", 0.0) or 0.0) - cost_before,
-        rationale="; ".join(r for r in (tests_patch.rationale, impl_patch.rationale)
-                            if r))
+        wall_time_s=wall, token_usage=token_usage, cost_usd=cost,
+        rationale=rationale)
     logger.info("story %s: status=%s attempts=%d ac=%d/%d wall=%.2fs",
                 item.story_id, status.value, attempts, len(ac_covered),
                 len(item.acceptance_criteria_ids), wall)
@@ -313,8 +374,10 @@ async def run_story(
 def _decide_status(*, result: StoryTestResult, ac_ok: bool,
                    lineage_ok: bool) -> StoryCodegenStatus:
     """Map a finished story to its recorded status. AC-citation + lineage gate ALL
-    outcomes. Only when both hold does the test result decide passed (GREEN) vs
-    generated_unverified (toolchain absent) vs failed (still red)."""
+    outcomes. Only when both hold does the test result decide: GREEN -> passed;
+    toolchain absent -> generated_unverified; an infra `error` (timeout/OSError) ->
+    failed (a real failure, just not a code defect — see the rationale); anything
+    else still red -> failed."""
     if not (ac_ok and lineage_ok):
         return StoryCodegenStatus.failed
     if result.status == StoryTestStatus.ok:
@@ -371,7 +434,7 @@ async def run_story_plan(
     project_index: list[str] | None = None,
     gen_tests: GenTests = generate_story_tests,
     gen_impl: GenImpl = generate_story_implementation,
-    run_tests: RunTests = None,  # type: ignore[assignment]
+    run_tests: RunTests = run_targeted_tests,
     now: Clock = time.monotonic,
     repair_max_attempts: int | None = None,
 ) -> list[StoryRunResult]:
@@ -379,7 +442,12 @@ async def run_story_plan(
     `build_story_codegen_plan`). The caller supplies `context_pack_for` to resolve
     each item's already-built pack (it owns the slice-pack/scaffold; the runner does
     not). Each `run_story` records that story's `generated_test_refs` against the
-    shared module dir, so by the end the Verify gate sees every cited AC."""
+    shared module dir, so by the end the Verify gate sees every cited AC. A story that
+    raises is recorded `failed` and does NOT abort the plan — the loop continues.
+
+    NOTE: every story writes into the SAME `module_dir`; path-uniqueness of generated
+    files across stories is the CALLER/scaffold's responsibility — a later story
+    emitting an already-used path silently overwrites the earlier file."""
     results: list[StoryRunResult] = []
     for item in items:
         pack = context_pack_for(item)
