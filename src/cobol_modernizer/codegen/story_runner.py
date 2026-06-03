@@ -27,8 +27,10 @@ the injected runner's `.token_usage`/`.cost_usd`; wall time uses an injectable
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -452,6 +454,56 @@ def _summary_line(item: StoryCodegenItem, out: StoryRunResult) -> str:
     return f"{item.story_id} [{out.status.value}]"
 
 
+#: Default fan-out width within a dependency wave. One in-flight story holds an LLM
+#: test-gen + impl-gen (+ repairs) and a Maven run, so the concurrency cap bounds the
+#: peak LLM/Maven load. Tunable via ``BUILD_MAX_CONCURRENCY`` (default 4); clamped to
+#: >=1 so a bad env value can never deadlock the plan.
+_BUILD_MAX_CONCURRENCY_DEFAULT = 4
+
+
+def build_max_concurrency() -> int:
+    """The per-wave fan-out width from ``BUILD_MAX_CONCURRENCY`` (default 4, min 1)."""
+    raw = os.environ.get("BUILD_MAX_CONCURRENCY")
+    if raw is None:
+        return _BUILD_MAX_CONCURRENCY_DEFAULT
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return _BUILD_MAX_CONCURRENCY_DEFAULT
+
+
+def _dependency_waves(
+    items: list[StoryCodegenItem],
+) -> list[list[StoryCodegenItem]]:
+    """Group plan items into dependency WAVES for parallel fan-out, preserving the
+    plan's input order WITHIN each wave (the plan is already topologically sorted, so
+    this only partitions it):
+
+      - wave 0  = items with no *unmet* ``depends_on`` (deps not present in the plan
+                  are treated as already satisfied — they cannot be a wave member).
+      - wave k  = items whose deps are all emitted in waves < k.
+
+    A dep that points outside this plan's items is ignored (it cannot gate a wave).
+    Cycles cannot starve the output: if a pass makes no progress, the remaining items
+    are emitted as one final wave (input order) so every item runs exactly once."""
+    known = {it.story_id for it in items}
+    emitted: set[str] = set()
+    remaining = list(items)
+    waves: list[list[StoryCodegenItem]] = []
+    while remaining:
+        wave = [it for it in remaining
+                if all(d in emitted for d in it.depends_on if d in known)]
+        if not wave:
+            # Cycle / self-reference among the rest: emit them all as a final wave so
+            # the plan terminates and every story still runs once.
+            wave = list(remaining)
+        waves.append(wave)
+        wave_ids = {it.story_id for it in wave}
+        emitted |= wave_ids
+        remaining = [it for it in remaining if it.story_id not in wave_ids]
+    return waves
+
+
 def _call_context_pack_for(
     context_pack_for: Callable[..., StoryContextPack],
     item: StoryCodegenItem, completed_summaries: list[str],
@@ -480,6 +532,7 @@ async def run_story_plan(
     module_dir: Path,
     context_pack_for: Callable[..., StoryContextPack],
     runner: AgentRunner,
+    runner_factory: Callable[[], AgentRunner] | None = None,
     model: str = "sonnet",
     project_index: list[str] | None = None,
     gen_tests: GenTests = generate_story_tests,
@@ -487,35 +540,78 @@ async def run_story_plan(
     run_tests: RunTests = run_targeted_tests,
     now: Clock = time.monotonic,
     repair_max_attempts: int | None = None,
+    max_concurrency: int | None = None,
 ) -> list[StoryRunResult]:
-    """Run a plan's stories IN ORDER (the plan is already dependency-sorted by
-    `build_story_codegen_plan`). The caller supplies `context_pack_for` to resolve
-    each item's already-built pack (it owns the slice-pack/scaffold; the runner does
-    not). Each `run_story` records that story's `generated_test_refs` against the
-    shared module dir, so by the end the Verify gate sees every cited AC. A story that
-    raises is recorded `failed` and does NOT abort the plan — the loop continues.
+    """Run a plan's stories in DEPENDENCY WAVES with bounded parallel fan-out
+    (Fan-Out-and-Synthesize). The plan is already dependency-sorted by
+    `build_story_codegen_plan`; here we partition it into waves (`_dependency_waves`):
+    wave 0 = items with no unmet `depends_on`, wave k = items whose deps all landed in
+    earlier waves. Each wave's stories run concurrently via `asyncio.gather`, bounded by
+    a semaphore of width `max_concurrency` (default `BUILD_MAX_CONCURRENCY`, env default
+    4). This is SINGLE-PASS: every story runs exactly once — the repeat-until-done outer
+    loop, deferred status, and pooled budget are a separate concern handled elsewhere.
 
-    As it iterates, the loop accumulates a running list of completed-story summaries
-    (one terse line per finished story, ANY outcome) and threads it into the per-story
-    context: `context_pack_for(item, completed_summaries)` when the callback accepts a
+    The caller supplies `context_pack_for` to resolve each item's already-built pack (it
+    owns the slice-pack/scaffold; the runner does not). Each `run_story` records that
+    story's `generated_test_refs` against the shared module dir, so by the end the Verify
+    gate sees every cited AC. A story that raises is recorded `failed` and does NOT abort
+    the plan.
+
+    CONCURRENCY + telemetry: each concurrent story gets its OWN runner instance (from
+    `runner_factory`, defaulting to `type(runner)()`) so per-story token/cost telemetry
+    is not crosstalked across stories sharing one mutable `runner`. The `runner` argument
+    is retained for backward compatibility and as the factory default — it is NOT itself
+    threaded into concurrent stories.
+
+    COMPLETED SUMMARIES are computed from PRIOR WAVES ONLY: stories in the same wave do
+    NOT see each other's summaries (they run concurrently, so there is no ordering among
+    them); a wave-k story's pack carries every finished story from waves < k. As before,
+    `context_pack_for(item, completed_summaries)` is used when the callback accepts a
     second argument (legacy single-arg callbacks still work and just don't get them).
-    This is what makes the "Completed Dependencies" pack section actually populate.
     `completed_summaries` is intentionally NOT part of the story's `context_hash` (it's
     derived run context), so threading it does not destabilize resume.
 
+    The returned results + per-story persistence are in the plan's deterministic order
+    (waves preserve input order, and results are reassembled by story id), so downstream
+    consumers see the same ordering as the old sequential path.
+
     NOTE: every story writes into the SAME `module_dir`; path-uniqueness of generated
-    files across stories is the CALLER/scaffold's responsibility — a later story
-    emitting an already-used path silently overwrites the earlier file."""
-    results: list[StoryRunResult] = []
+    files across stories is the CALLER/scaffold's responsibility — two stories in the
+    same wave emitting an already-used path race on the file."""
+    if max_concurrency is None:
+        max_concurrency = build_max_concurrency()
+    if runner_factory is None:
+        # Per-story runners default to fresh instances of the same class as `runner`
+        # (no-arg constructor — matches SdkAgentRunner / the test FakeRunner).
+        runner_factory = type(runner)
+
+    waves = _dependency_waves(items)
+    sem = asyncio.Semaphore(max(1, max_concurrency))
+    by_id: dict[str, StoryRunResult] = {}
     completed_summaries: list[str] = []
-    for item in items:
-        pack = _call_context_pack_for(context_pack_for, item,
-                                      list(completed_summaries))
-        out = await run_story(
-            item, session=session, workspace_id=workspace_id,
-            module_dir=module_dir, context_pack=pack, runner=runner, model=model,
-            project_index=project_index, gen_tests=gen_tests, gen_impl=gen_impl,
-            run_tests=run_tests, now=now, repair_max_attempts=repair_max_attempts)
-        results.append(out)
-        completed_summaries.append(_summary_line(item, out))
-    return results
+
+    async def _run_one(item: StoryCodegenItem,
+                       prior_summaries: list[str]) -> StoryRunResult:
+        async with sem:
+            pack = _call_context_pack_for(context_pack_for, item, prior_summaries)
+            return await run_story(
+                item, session=session, workspace_id=workspace_id,
+                module_dir=module_dir, context_pack=pack, runner=runner_factory(),
+                model=model, project_index=project_index, gen_tests=gen_tests,
+                gen_impl=gen_impl, run_tests=run_tests, now=now,
+                repair_max_attempts=repair_max_attempts)
+
+    for wave in waves:
+        # Snapshot the prior-wave summaries: stories in THIS wave all see the same
+        # (frozen) list and never each other's outcomes.
+        prior = list(completed_summaries)
+        wave_results = await asyncio.gather(
+            *(_run_one(item, list(prior)) for item in wave))
+        for item, out in zip(wave, wave_results):
+            by_id[item.story_id] = out
+        # Append this wave's summaries (in wave/input order) for the next wave.
+        completed_summaries.extend(
+            _summary_line(item, by_id[item.story_id]) for item in wave)
+
+    # Reassemble in the plan's deterministic input order for downstream consumers.
+    return [by_id[item.story_id] for item in items]

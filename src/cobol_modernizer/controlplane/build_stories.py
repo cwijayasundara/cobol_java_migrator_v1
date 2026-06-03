@@ -276,10 +276,16 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
             brd_requirements=brd_reqs, completed_summaries=list(completed_summaries),
             source_pack=pack)
 
+    # Dependency-wave parallel fan-out: `run_story_plan` partitions `items` into
+    # dependency waves and runs each wave concurrently (bounded by BUILD_MAX_CONCURRENCY).
+    # Each concurrent story needs its OWN runner so per-story token/cost telemetry is not
+    # crosstalked — pass the SdkAgentRunner class as the per-story factory rather than a
+    # single shared instance.
     runner = SdkAgentRunner()
     results = asyncio.run(run_story_plan(
         items, session=session, workspace_id=workspace.id, module_dir=module_dir,
         context_pack_for=_context_pack_for, runner=runner,
+        runner_factory=SdkAgentRunner,
         project_index=_module_file_index(module_dir)))
     return {
         "repo_slug": slug, "module_dir": str(module_dir),

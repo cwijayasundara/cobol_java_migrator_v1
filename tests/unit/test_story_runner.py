@@ -4,6 +4,7 @@ returning StoryPatch, a scripted run_tests returning StoryTestResult sequences, 
 in-memory SQLite session, and a patched (incrementing) clock."""
 from __future__ import annotations
 
+import asyncio
 import itertools
 
 import pytest
@@ -563,11 +564,16 @@ async def test_run_story_plan_runs_in_order(session, tmp_path):
 @pytest.mark.asyncio
 async def test_run_story_plan_threads_completed_summaries(session, tmp_path):
     """BUG 2: `run_story_plan` accumulates already-built story summaries and threads
-    them into LATER stories' context (so the "Completed Dependencies" pack section is
+    them into LATER WAVES' context (so the "Completed Dependencies" pack section is
     actually populated). A two-arg `context_pack_for(item, completed_summaries)`
-    receives the running list: empty for the first story, the first story's summary for
-    the second."""
-    items = [_item("US-1"), _item("US-2")]
+    receives the prior-wave summaries: empty for wave 0, the wave-0 stories' summaries
+    for wave 1. US-2 depends on US-1, so US-1 is wave 0 and US-2 wave 1 — US-2 sees
+    US-1's summary."""
+    items = [_item("US-1"),
+             StoryCodegenItem(story_id="US-2", bounded_context="Posting",
+                              service_name="posting-service",
+                              acceptance_criteria_ids=["AC-1"],
+                              cobol_refs=["CBPOST1M"], depends_on=["US-1"])]
     seen: list[tuple[str, list[str]]] = []
 
     def context_pack_for(it, completed_summaries):
@@ -746,3 +752,222 @@ async def test_plan_continues_after_a_raising_story(session, tmp_path):
     assert "US-2" in ran
     assert get_story_record(session, "ws1", "US-1")["status"] == "failed"
     assert get_story_record(session, "ws1", "US-2")["status"] == "passed"
+
+
+# --------------------------------------------------------------------------- #
+# Dependency-wave parallel fan-out                                            #
+# --------------------------------------------------------------------------- #
+def _dep_item(story_id, *, depends_on=(), ac_ids=("AC-1",), cobol_refs=("CBPOST1M",)):
+    return StoryCodegenItem(
+        story_id=story_id, bounded_context="Posting", service_name="posting-service",
+        acceptance_criteria_ids=list(ac_ids), cobol_refs=list(cobol_refs),
+        depends_on=list(depends_on))
+
+
+class _ConcurrencyTracker:
+    """Records the order stories start/finish and the peak number of concurrently
+    in-flight stories, so a test can assert wave ordering + bounded concurrency. A
+    story counts as in-flight from its first gen call until its last run_tests."""
+
+    def __init__(self):
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.started: list[str] = []
+        self.finished: list[str] = []
+        self._active: set[str] = set()
+
+    async def enter(self, story_id):
+        if story_id not in self._active:
+            self._active.add(story_id)
+            self.started.append(story_id)
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        # Yield so co-scheduled stories in the same wave actually overlap.
+        await asyncio.sleep(0)
+
+    def leave(self, story_id):
+        if story_id in self._active:
+            self._active.discard(story_id)
+            self.finished.append(story_id)
+            self.in_flight -= 1
+
+
+def _tracked_gen_tests(tracker):
+    async def gen(**kwargs):
+        item = kwargs["item"]
+        await tracker.enter(item.story_id)
+        return _test_patch(story_id=item.story_id,
+                           ac_ids=tuple(item.acceptance_criteria_ids))
+    return gen
+
+
+def _tracked_gen_impl(tracker):
+    async def gen(**kwargs):
+        item = kwargs["item"]
+        await tracker.enter(item.story_id)
+        refs = tuple(item.cobol_refs) or ("CBPOST1M",)
+        return _impl_patch(story_id=item.story_id, cobol_refs=refs)
+    return gen
+
+
+def _tracked_run_tests(tracker, statuses_by_story=None):
+    # Each story runs red->green by default; leave() marks the story finished.
+    counts: dict[str, int] = {}
+
+    def run(module_dir, target, **k):
+        # Recover the story id from the targeted test class (PostUS-NTest).
+        story_id = target.replace("Post", "").replace("Test", "")
+        n = counts.get(story_id, 0)
+        counts[story_id] = n + 1
+        status = StoryTestStatus.tests_failed if n == 0 else StoryTestStatus.ok
+        if status == StoryTestStatus.ok:
+            tracker.leave(story_id)
+        return _result(status)
+
+    return run
+
+
+@pytest.mark.asyncio
+async def test_waves_run_in_dependency_order(session, tmp_path):
+    """A 3-wave plan A; B(dep A); C(dep B) must run wave-by-wave: B starts only after
+    A's wave finished, C only after B's. With per-wave gather, the start order is the
+    wave order."""
+    items = [_dep_item("US-1"), _dep_item("US-2", depends_on=["US-1"]),
+             _dep_item("US-3", depends_on=["US-2"])]
+    tracker = _ConcurrencyTracker()
+    packs = {it.story_id: _pack(it) for it in items}
+    results = await run_story_plan(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
+        gen_tests=_tracked_gen_tests(tracker), gen_impl=_tracked_gen_impl(tracker),
+        run_tests=_tracked_run_tests(tracker), now=_clock())
+    assert all(r.status == StoryCodegenStatus.passed for r in results)
+    # Deterministic downstream ordering preserved (results in plan order).
+    assert [r.story_id for r in results] == ["US-1", "US-2", "US-3"]
+    # A story starts only after its dependency finished.
+    assert tracker.finished.index("US-1") < tracker.started.index("US-2")
+    assert tracker.finished.index("US-2") < tracker.started.index("US-3")
+
+
+@pytest.mark.asyncio
+async def test_independent_wave0_stories_overlap(session, tmp_path):
+    """Two independent wave-0 stories must run CONCURRENTLY (peak in-flight >= 2) and
+    bounded by BUILD_MAX_CONCURRENCY."""
+    items = [_dep_item("US-1"), _dep_item("US-2")]
+    tracker = _ConcurrencyTracker()
+    packs = {it.story_id: _pack(it) for it in items}
+    results = await run_story_plan(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
+        gen_tests=_tracked_gen_tests(tracker), gen_impl=_tracked_gen_impl(tracker),
+        run_tests=_tracked_run_tests(tracker), now=_clock())
+    assert all(r.status == StoryCodegenStatus.passed for r in results)
+    assert tracker.max_in_flight >= 2  # the two wave-0 stories overlapped
+
+
+@pytest.mark.asyncio
+async def test_concurrency_bounded_by_semaphore(session, tmp_path, monkeypatch):
+    """A wave wider than BUILD_MAX_CONCURRENCY must never exceed it in flight."""
+    monkeypatch.setenv("BUILD_MAX_CONCURRENCY", "2")
+    items = [_dep_item(f"US-{i}") for i in range(1, 6)]  # 5 independent wave-0 stories
+    tracker = _ConcurrencyTracker()
+    packs = {it.story_id: _pack(it) for it in items}
+    results = await run_story_plan(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
+        gen_tests=_tracked_gen_tests(tracker), gen_impl=_tracked_gen_impl(tracker),
+        run_tests=_tracked_run_tests(tracker), now=_clock())
+    assert all(r.status == StoryCodegenStatus.passed for r in results)
+    assert tracker.max_in_flight <= 2
+    assert tracker.max_in_flight >= 2  # but it DID parallelize up to the cap
+
+
+@pytest.mark.asyncio
+async def test_completed_summaries_only_from_prior_waves(session, tmp_path):
+    """Within a wave, stories do NOT see each other's summaries; a wave-k story sees
+    the summaries of ALL stories in waves < k. With A,B in wave0 and C in wave1
+    (dep A) and D in wave1 (dep B): C and D each see {A,B} but not each other."""
+    items = [
+        _dep_item("US-A"), _dep_item("US-B"),
+        _dep_item("US-C", depends_on=["US-A"]),
+        _dep_item("US-D", depends_on=["US-B"]),
+    ]
+    seen: dict[str, list[str]] = {}
+
+    def context_pack_for(it, completed_summaries):
+        seen[it.story_id] = list(completed_summaries)
+        return _pack(it)
+
+    statuses = itertools.cycle([StoryTestStatus.tests_failed, StoryTestStatus.ok])
+
+    def run(module_dir, target, **k):
+        return _result(next(statuses))
+
+    results = await run_story_plan(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=context_pack_for, runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
+        run_tests=run, now=_clock())
+    assert all(r.status == StoryCodegenStatus.passed for r in results)
+    # Wave 0 stories see nothing.
+    assert seen["US-A"] == []
+    assert seen["US-B"] == []
+    # Wave 1 stories see BOTH wave-0 summaries, but NOT each other.
+    c_ids = " ".join(seen["US-C"])
+    d_ids = " ".join(seen["US-D"])
+    assert "US-A" in c_ids and "US-B" in c_ids
+    assert "US-C" not in c_ids and "US-D" not in c_ids
+    assert "US-A" in d_ids and "US-B" in d_ids
+    assert "US-C" not in d_ids and "US-D" not in d_ids
+
+
+@pytest.mark.asyncio
+async def test_per_story_runner_instances_under_concurrency(session, tmp_path):
+    """Each concurrent story gets its OWN runner instance (so per-story telemetry is
+    not crosstalked). A `runner_factory` is consulted once per story; the shared
+    `runner` passed in is NOT reused for the per-story work."""
+    items = [_dep_item("US-1"), _dep_item("US-2")]
+    made: list[FakeRunner] = []
+
+    def factory():
+        r = FakeRunner()
+        made.append(r)
+        return r
+
+    statuses = itertools.cycle([StoryTestStatus.tests_failed, StoryTestStatus.ok])
+
+    def run(module_dir, target, **k):
+        return _result(next(statuses))
+
+    results = await run_story_plan(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: _pack(it), runner=FakeRunner(),
+        runner_factory=factory, gen_tests=_make_gen_tests(),
+        gen_impl=_make_gen_impl(), run_tests=run, now=_clock())
+    assert all(r.status == StoryCodegenStatus.passed for r in results)
+    # One fresh runner per story.
+    assert len(made) == 2
+
+
+@pytest.mark.asyncio
+async def test_waves_persist_and_merge_like_sequential(session, tmp_path):
+    """The merged results + per-story persistence are unchanged vs the sequential path:
+    every story persisted, status map holds all ids, results in plan order."""
+    items = [_dep_item("US-1"), _dep_item("US-2", depends_on=["US-1"]),
+             _dep_item("US-3")]
+    packs = {it.story_id: _pack(it) for it in items}
+    statuses = itertools.cycle([StoryTestStatus.tests_failed, StoryTestStatus.ok])
+
+    def run(module_dir, target, **k):
+        return _result(next(statuses))
+
+    results = await run_story_plan(
+        items, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=_make_gen_impl(),
+        run_tests=run, now=_clock())
+    assert [r.story_id for r in results] == ["US-1", "US-2", "US-3"]
+    m = get_status_map(session, "ws1")
+    assert set(m) == {"US-1", "US-2", "US-3"}
+    for sid in ("US-1", "US-2", "US-3"):
+        assert get_story_record(session, "ws1", sid)["status"] == "passed"
