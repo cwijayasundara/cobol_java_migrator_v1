@@ -16,21 +16,27 @@ def test_dead_thread_running_job_is_superseded():
     the next `start` marks it failed (superseded) and runs a fresh job."""
     runner = JobRunner()
 
-    # First job: a real thread that we let finish, but we then forcibly pin its
-    # recorded status back to "running" to simulate a backend killed mid-job
-    # (status never flipped to done/failed).
+    # First job: a real thread that we let finish. We then forcibly pin its
+    # recorded status back to "running" AND re-register its (now-dead) worker
+    # thread, to simulate a worker that died without _finish flipping the status
+    # (e.g. a crash mid-job). The wedge: status "running" + a REGISTERED but
+    # no-longer-alive thread.
+    dead_thread = threading.Thread(target=lambda: None, name="dead", daemon=True)
+    dead_thread.start()
+    dead_thread.join(5)
+    assert not dead_thread.is_alive()
+
     runner.start("build", "ws1", lambda: "first")
-    # wait for the worker thread to actually exit
     deadline = time.time() + 5
     while time.time() < deadline:
         job = runner.get("build", "ws1")
         if job and job["status"] == "done":
             break
         time.sleep(0.01)
-    # Simulate the wedge: status is "running" but the thread is dead.
     with runner._lock:
         runner._jobs[("build", "ws1")]["status"] = "running"
         runner._jobs[("build", "ws1")]["finished_at"] = None
+        runner._threads[("build", "ws1")] = dead_thread
 
     ran = threading.Event()
 
@@ -146,6 +152,85 @@ def test_live_running_job_blocks_no_double_run(monkeypatch):
     job = runner.get("build", "ws3")
     assert job["status"] == "done"
     assert job["result"] == "live"
+
+
+def test_running_without_registered_thread_recent_is_not_stale(monkeypatch):
+    """Regression for the supersede race (the running-without-thread window).
+
+    `start()` marks a job `running` and registers its worker thread under the
+    SAME lock, so a live job is never observed running-without-thread. But as
+    defence in depth, _is_stale must NOT treat a *missing* thread as proof of
+    death for a recently-started job — otherwise a concurrent re-trigger landing
+    in any registration window would supersede a genuinely-live job and double-run
+    it. Here we construct that exact state (status running, NO registered thread,
+    recent started_at) and assert the next start() does NOT supersede it: it
+    returns the SAME running job and does NOT run the new fn.
+
+    This FAILS against the prior logic that returned stale whenever no live thread
+    was registered."""
+    monkeypatch.setenv("JOB_STALE_AFTER_S", "1800")
+    runner = JobRunner()
+
+    # Hand-build the running-without-thread state (no thread in _threads).
+    with runner._lock:
+        runner._jobs[("build", "ws-window")] = {
+            "status": "running", "started_at": time.time(),
+            "finished_at": None, "result": None, "error": None,
+        }
+    assert ("build", "ws-window") not in runner._threads
+
+    second_ran = threading.Event()
+
+    def _should_not_run():
+        second_ran.set()
+        return "double"
+
+    out = runner.start("build", "ws-window", _should_not_run)
+    assert not second_ran.wait(0.5), "live (recent) running job was superseded/double-run"
+    assert out["status"] == "running"
+    assert out["error"] is None
+
+
+def test_concurrent_starts_run_only_one_fn(monkeypatch):
+    """Smoke test: many near-simultaneous starts for one (kind, wid) run exactly
+    one fn (no double-run), with the live job never spuriously superseded."""
+    monkeypatch.setenv("JOB_STALE_AFTER_S", "1800")
+    runner = JobRunner()
+
+    block = threading.Event()
+    release = threading.Event()
+    runs = []
+    runs_lock = threading.Lock()
+
+    def _live():
+        with runs_lock:
+            runs.append(1)
+        block.wait(10)
+        return "live"
+
+    callers = []
+
+    def _caller():
+        release.wait(5)
+        runner.start("build", "ws-race", _live)
+
+    try:
+        for _ in range(32):
+            t = threading.Thread(target=_caller, daemon=True)
+            t.start()
+            callers.append(t)
+        release.set()
+        time.sleep(1.0)
+        with runs_lock:
+            assert len(runs) == 1, f"live job double-ran: {len(runs)} fns started"
+        with runner._lock:
+            assert runner._jobs[("build", "ws-race")]["status"] == "running"
+            thread = runner._threads.get(("build", "ws-race"))
+            assert thread is not None and thread.is_alive()
+    finally:
+        block.set()
+        for t in callers:
+            t.join(5)
 
 
 def test_default_stale_threshold_is_1800(monkeypatch):
