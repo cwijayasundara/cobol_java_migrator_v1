@@ -467,6 +467,17 @@ def _story_build_summary(*, session: Session, neo4j, workspace: Workspace,
         "files": files,
         "evidence_map": {},
         "stories": stories,
+        # Pass-with-deferred progress counts from the gate (folded onto the step result
+        # by `run_story_build`): how many stories genuinely built vs were deferred /
+        # still pending. Surfaced so the cockpit can show real progress on a build that
+        # passed WITH deferred stories.
+        "story_counts": {
+            "story_count": inner.get("story_count", len(stories)),
+            "pass_count": inner.get("pass_count"),
+            "deferred_count": inner.get("deferred_count"),
+            "skipped_count": inner.get("skipped_count"),
+            "pending": inner.get("pending"),
+        },
     }
 
 
