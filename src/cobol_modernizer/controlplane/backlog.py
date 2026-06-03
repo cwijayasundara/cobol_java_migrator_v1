@@ -17,7 +17,10 @@ from sqlalchemy.orm import Session
 
 from cobol_modernizer.agent.harness import SdkAgentRunner
 from cobol_modernizer.backlog.dependency import derive_story_dependencies
-from cobol_modernizer.backlog.generator import generate_backlog_payload, parse_backlog_payload
+from cobol_modernizer.backlog.generator import (
+    generate_backlog_payload,
+    parse_backlog_payload,
+)
 from cobol_modernizer.backlog.render import render_html
 from cobol_modernizer.backlog.storage import BacklogStorage
 from cobol_modernizer.brd.storage import BRDStorage
@@ -58,6 +61,25 @@ def _job_view(job: dict | None) -> dict:
     return {"status": job["status"], "result": job.get("result"),
             "error": job.get("error"), "started_at": job.get("started_at"),
             "finished_at": job.get("finished_at")}
+
+
+def _backlog_failure_cause(runner: Any) -> str:
+    """Build a concrete 502 cause from the runner's last-call diagnostics. The
+    harness swallows turn-cap / parse / api errors to {} (and run_batched/timeout
+    swallow timeouts), so an empty payload here means one of those — name it from
+    `runner.calls[-1]` when present, mirroring enrichment.base.run_batched_result."""
+    cause = "no output (LLM error, timeout, or turn cap) — see server logs"
+    calls = getattr(runner, "calls", None)
+    if calls:
+        last = calls[-1]
+        diag = []
+        if last.get("hit_turn_cap"):
+            diag.append("hit turn cap")
+        if last.get("api_error_status") is not None:
+            diag.append(f"api_error_status={last['api_error_status']}")
+        if diag:
+            cause = f"{cause} ({', '.join(diag)})"
+    return cause
 
 
 def _requirement_ids(sections: list[dict]) -> set[str]:
@@ -102,17 +124,20 @@ def run_backlog(*, session: Session, neo4j, workspace: Workspace,
               slug=slug)
 
     gen = generate or generate_backlog_payload
-    raw = asyncio.run(gen(runner=SdkAgentRunner(), model=os.environ.get("BACKLOG_MODEL", _DEFAULT_MODEL),
+    runner = SdkAgentRunner()
+    raw = asyncio.run(gen(runner=runner, model=os.environ.get("BACKLOG_MODEL", _DEFAULT_MODEL),
                           timeout_s=float(os.environ.get("BACKLOG_TIMEOUT_S", "300")),
                           max_turns=int(os.environ.get("BACKLOG_MAX_TURNS", "6")),
                           brd_sections=sections, known_refs=relevant,
                           known_requirement_ids=sorted(known_req_ids)))
     if not raw:
         # run_batched swallows an LLM error/timeout/turn-cap to {}. Fail the job loudly
-        # rather than persist an empty backlog and report success.
+        # rather than persist an empty backlog and report success. Surface the concrete
+        # cause from the runner's per-call diagnostics (turn cap / api_error_status) so
+        # the 502 names WHICH failure it was. (Task 5 will consume the typed
+        # EnrichmentResult directly via the orchestrator.)
         raise HTTPException(status_code=502,
-                            detail="backlog generation returned no output "
-                                   "(LLM error, timeout, or turn cap) — see server logs")
+                            detail=f"backlog generation failed: {_backlog_failure_cause(runner)}")
     backlog = parse_backlog_payload(raw, repo_slug=slug, known_refs=set(known_refs),
                                     known_requirement_ids=known_req_ids)
     try:

@@ -9,7 +9,10 @@ from cobol_modernizer.backlog.schema import (
     Epic,
     UserStory,
 )
-from cobol_modernizer.enrichment.base import run_batched
+from cobol_modernizer.enrichment.base import (
+    EnrichmentResult,
+    run_batched_result,
+)
 
 
 BACKLOG_SYSTEM = (
@@ -142,6 +145,20 @@ def build_backlog_prompt(*, brd_sections: list[dict], known_refs: list[str],
     )
 
 
+async def generate_backlog_result(*, runner, model: str, timeout_s: float,
+                                  brd_sections: list[dict], known_refs: list[str],
+                                  known_requirement_ids: list[str],
+                                  max_turns: int = 6) -> EnrichmentResult:
+    """Typed-result variant of `generate_backlog_payload`: returns the
+    `EnrichmentResult` so a GATING caller can surface the concrete failure cause
+    (timeout / turn cap / api error) instead of a generic 'no output'."""
+    prompt = build_backlog_prompt(brd_sections=brd_sections, known_refs=known_refs,
+                                  known_requirement_ids=known_requirement_ids)
+    return await run_batched_result(runner=runner, system=BACKLOG_SYSTEM, prompt=prompt,
+                                    schema=BACKLOG_SCHEMA, model=model, timeout_s=timeout_s,
+                                    label="backlog-generate", max_turns=max_turns)
+
+
 async def generate_backlog_payload(*, runner, model: str, timeout_s: float,
                                    brd_sections: list[dict], known_refs: list[str],
                                    known_requirement_ids: list[str],
@@ -150,8 +167,8 @@ async def generate_backlog_payload(*, runner, model: str, timeout_s: float,
     # consumes a turn under claude-agent-sdk 0.2.87, and a real backlog needs a few
     # reasoning turns before it; 2 risks hitting the turn cap and returning {}.
     # Override via BACKLOG_MAX_TURNS.
-    prompt = build_backlog_prompt(brd_sections=brd_sections, known_refs=known_refs,
-                                  known_requirement_ids=known_requirement_ids)
-    return await run_batched(runner=runner, system=BACKLOG_SYSTEM, prompt=prompt,
-                             schema=BACKLOG_SCHEMA, model=model, timeout_s=timeout_s,
-                             label="backlog-generate", max_turns=max_turns)
+    result = await generate_backlog_result(
+        runner=runner, model=model, timeout_s=timeout_s, brd_sections=brd_sections,
+        known_refs=known_refs, known_requirement_ids=known_requirement_ids,
+        max_turns=max_turns)
+    return result.payload
