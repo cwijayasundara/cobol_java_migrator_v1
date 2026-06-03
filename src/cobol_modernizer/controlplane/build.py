@@ -7,6 +7,12 @@ SpotBugs/FindSecBugs, Error Prone, Checkstyle), writes the generated files into
 it, and marks the `build` stage passed. Needs ANTHROPIC_API_KEY and a parsed
 graph; run Blueprint first (the BRD is the codegen brief).
 
+Routing is governed by `CODEGEN_MODE` (default `story`): `POST /build` runs the
+story-sliced engine via `build_stories.run_story_build` (scaffold-from-design +
+per-story TDD loop), mapping its result to a `BuildResult`-compatible summary;
+`legacy_slice` keeps the original one-shot writer-slice path described above as a
+debug/fallback escape hatch.
+
 Compiling + running the quality gates (`mvn verify`) is a separate, slower,
 host-dependent step (needs Maven + a JDK and a reconciled Spring Boot/Java pair),
 so the endpoint produces the source artifact + scaffold, not a compiled jar. The
@@ -27,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from cobol_modernizer.brd.storage import BRDStorage
 from cobol_modernizer.codegen.scaffold import scaffold_module
+from cobol_modernizer.codegen.scaffold_from_design import module_name_for
 from cobol_modernizer.codegen.schema import GeneratedProject
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
@@ -89,17 +96,33 @@ def scan_generated_test_refs(project_dir, acceptance_criteria_ids: list[str]) ->
 def _record_generated_test_refs(session: Session, *, workspace_id: str, project_dir,
                                 acceptance_criteria_ids: list[str]) -> None:
     """Persist which acceptance-criterion ids the generated tests cite, as a
-    versioned Artifact the Verify stage's story-behavior gate reads."""
+    versioned Artifact the Verify stage's story-behavior gate reads.
+
+    The new version is CUMULATIVE: the newly-scanned refs are UNIONed with the prior
+    latest version's `acceptance_criteria`, so the latest row is always the accumulated
+    set across every story built so far. The story path calls this ONCE PER STORY
+    (`story_runner._persist`) scoped to that story's AC ids; without the merge, each
+    new version would hold ONLY the last story's ACs, and the Verify story-behavior
+    gate — which reads the single latest version and checks it against ALL stories' ACs
+    — would report "missing generated tests" for every story but the last and fail a
+    perfectly-built run. The merge is also harmless to the legacy `run_build` path: on a
+    fresh build prior is empty so union == today's scan; a re-run merges forward
+    idempotently. Single-story `POST /build/stories/{id}` builds accumulate likewise."""
     refs = scan_generated_test_refs(project_dir, acceptance_criteria_ids)
     prev = session.execute(
         select(Artifact).where(Artifact.workspace_id == workspace_id,
                                Artifact.kind == "generated_test_refs")
     ).scalars().all()
     version = max((a.version for a in prev), default=0) + 1
+    prior_refs: list[str] = []
+    if prev:
+        latest = max(prev, key=lambda a: a.version)
+        prior_refs = (latest.evidence_map or {}).get("acceptance_criteria", []) or []
+    merged = sorted(set(refs) | set(prior_refs))
     session.add(Artifact(workspace_id=workspace_id, kind="generated_test_refs",
                          version=version, object_uri="inline://generated_test_refs",
                          content_hash="sha256:refs",
-                         evidence_map={"acceptance_criteria": refs}))
+                         evidence_map={"acceptance_criteria": merged}))
     session.flush()
 
 
@@ -366,11 +389,105 @@ def _precheck(neo4j, workspace: Workspace, source_root: Path) -> dict:
     return latest
 
 
+def _codegen_mode() -> str:
+    """Which engine `POST /build` routes through. DEFAULT `story`: the story-sliced
+    codegen loop (scaffold-from-design + per-story TDD). `legacy_slice`: the original
+    one-shot `_generate_slice_graph` + `generate_slice` path (debug/fallback escape
+    hatch). Any unrecognized value falls back to the story default."""
+    mode = os.environ.get("CODEGEN_MODE", "story").strip().lower()
+    return mode if mode in {"story", "legacy_slice"} else "story"
+
+
+def build_precheck(neo4j, workspace: Workspace, source_root: Path) -> dict:
+    """Mode-aware precheck for the public `POST /build`. `legacy_slice` needs only a
+    repo dir + BRD (so a repo with just a Blueprint can still use the escape hatch);
+    `story` additionally needs the backlog/domain/technical specs (the story engine's
+    prerequisites), giving a clear 409 naming the first missing one. Returns the latest
+    BRD (legacy) or the BRD after a successful story-spec check."""
+    latest = _precheck(neo4j, workspace, source_root)
+    if _codegen_mode() == "story":
+        from cobol_modernizer.controlplane import build_stories
+        build_stories._load_specs(neo4j, workspace.repo_slug)
+    return latest
+
+
+def _scan_module_files(root: Path) -> list[dict[str, Any]]:
+    """Enumerate the Java source files written under a scaffolded module, classified
+    `test` (filename contains `test`, matching `scan_generated_test_refs`) vs `main`,
+    as `{path, kind, evidence}` with a module-relative path. Evidence is left empty —
+    the per-story lineage lives in the persisted story status map, not here — so the
+    legacy slice UI's file list still renders. Deterministic (sorted by path)."""
+    if not root.is_dir():
+        return []
+    files: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*.java")):
+        kind = "test" if "test" in path.name.lower() else "main"
+        files.append({"path": str(path.relative_to(root)), "kind": kind,
+                      "evidence": []})
+    return files
+
+
+def _story_build_summary(*, session: Session, neo4j, workspace: Workspace,
+                         source_root: Path, output_root: Path,
+                         build: Callable[..., dict] | None = None) -> dict[str, Any]:
+    """Run the story engine for the whole workspace and map its result to a summary
+    COMPATIBLE with the legacy `BuildResult`/UI shape. `run_story_build` scaffolds the
+    module from the technical design, runs ALL ready stories' TDD loops, records each
+    story's `generated_test_refs`, gates, and marks the `build` stage passed — so all
+    the legacy side-effects already happen inside it.
+
+    The story run produces per-story results + ONE scaffolded module (not a single
+    slice), so the file_count/tests/mains are aggregated by scanning the module on
+    disk. `slice_id` is the synthetic `"stories"` (the UI only displays it via the
+    type; it renders `module`/`base_package`/`tests`/`mains`/`scaffold_path`/`files`),
+    and a `stories` summary (the per-story status list) is added for richer UIs.
+    `evidence_map` defaults to `{}` (per-story lineage lives in the story status map)."""
+    from cobol_modernizer.controlplane import build_stories
+
+    outcome = build_stories.run_story_build(
+        session=session, neo4j=neo4j, workspace=workspace,
+        source_root=source_root, output_root=output_root, story_id=None,
+        build=build)  # type: ignore[arg-type]
+
+    slug = workspace.repo_slug
+    inner = outcome.get("result") or {}
+    module_dir = inner.get("module_dir")
+    root = Path(module_dir) if module_dir else (output_root / module_name_for(slug))
+    files = _scan_module_files(root)
+    stories = inner.get("results") or []
+    return {
+        "repo_slug": slug,
+        "slice_id": "stories",
+        "module": module_name_for(slug),
+        "base_package": _base_package(slug),
+        "scaffold_path": str(root),
+        "file_count": len(files),
+        "tests": sum(1 for f in files if f["kind"] == "test"),
+        "mains": sum(1 for f in files if f["kind"] == "main"),
+        "files": files,
+        "evidence_map": {},
+        "stories": stories,
+    }
+
+
 def run_build(*, session: Session, neo4j, workspace: Workspace,
               source_root: Path, output_root: Path,
-              generate: Callable[..., GeneratedProject] | None = None) -> dict[str, Any]:
-    """Generate a slice + scaffold a Maven module + write the files. `generate`
-    defaults to the real graph codegen (resolved here so tests can inject a stub)."""
+              generate: Callable[..., GeneratedProject] | None = None,
+              build: Callable[..., dict] | None = None) -> dict[str, Any]:
+    """Generate code for a workspace and return a `BuildResult`-shaped summary.
+
+    Dispatches on `CODEGEN_MODE` (default `story`): the story engine (scaffold-from-
+    design + per-story TDD loop, via `build_stories.run_story_build`) — `build=` is the
+    injectable heavy story-run step. `legacy_slice` keeps the original one-shot path
+    (`_generate_slice_graph` + `generate_slice`) EXACTLY as-is for debug/fallback;
+    `generate=` injects its codegen stub. Both modes mark the `build` stage passed and
+    record per-story/slice `generated_test_refs`, and both return the same top-level
+    keys the cockpit's `BuildResult` reads."""
+    if _codegen_mode() == "story":
+        return _story_build_summary(session=session, neo4j=neo4j,
+                                    workspace=workspace, source_root=source_root,
+                                    output_root=output_root, build=build)
+
     slug = workspace.repo_slug
     repo_dir = source_root / slug
     latest = _precheck(neo4j, workspace, source_root)
@@ -421,14 +538,16 @@ def _job_view(job: dict) -> dict:
 def build_workspace(wid: str, session: Session = Depends(get_session),
                     neo4j=Depends(get_neo4j)) -> dict:
     """Kick off the (multi-minute) codegen run as a background job and return 202;
-    the UI polls GET .../build. Validates fast first (key / repo dir / BRD present).
-    A TDD violation surfaces as a 'failed' job (error in the GET status)."""
+    the UI polls GET .../build. Validates fast first (key / repo dir / BRD present),
+    and in story mode (the `CODEGEN_MODE` default) also that the backlog/domain/
+    technical specs exist. A TDD violation surfaces as a 'failed' job (error in the
+    GET status)."""
     ws = _workspace(session, wid)
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(status_code=503,
                             detail="ANTHROPIC_API_KEY not set — Build needs an LLM.")
     try:
-        _precheck(neo4j, ws, _source_root())
+        build_precheck(neo4j, ws, _source_root())
     except _NEO4J_ERRORS as exc:
         raise HTTPException(status_code=503, detail=f"graph store unavailable: {exc}")
 
