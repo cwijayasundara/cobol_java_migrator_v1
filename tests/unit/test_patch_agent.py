@@ -227,6 +227,31 @@ async def test_generate_story_implementation_grounded_only_no_invention():
     assert "invent" in STORY_IMPL_SYSTEM.lower()
 
 
+async def test_generate_story_implementation_folds_in_repair_feedback():
+    """On a repair pass the failing gate + build-log excerpt + touched files are
+    threaded into the impl prompt (mirrors repair_loop's feedback shape)."""
+    runner = FakeRunner(_MIXED)
+    await generate_story_implementation(
+        runner=runner, item=_item(), context_pack=_pack(),
+        failing_tests=[], existing_java=[], model="m", max_turns=2, timeout_s=5.0,
+        repair_feedback={"failing_gate": "tests-failed",
+                         "log_excerpt": "expected <true> but was <false>",
+                         "touched_files": ["src/main/java/com/x/Account.java"]})
+    prompt = runner.calls[0]["prompt"]
+    assert "tests-failed" in prompt
+    assert "expected <true> but was <false>" in prompt
+    assert "src/main/java/com/x/Account.java" in prompt
+
+
+async def test_generate_story_implementation_no_repair_section_on_first_pass():
+    """Without repair feedback the prompt carries no repair section (first pass)."""
+    runner = FakeRunner(_MIXED)
+    await generate_story_implementation(
+        runner=runner, item=_item(), context_pack=_pack(),
+        failing_tests=[], existing_java=[], model="m", max_turns=2, timeout_s=5.0)
+    assert "Previous attempt failed gate" not in runner.calls[0]["prompt"]
+
+
 async def test_generate_story_implementation_empty_output_raises():
     runner = FakeRunner({})
     with pytest.raises(ValueError, match="no output|turn cap"):

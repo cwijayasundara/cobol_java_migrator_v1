@@ -257,12 +257,35 @@ def build_tests_prompt(*, item: StoryCodegenItem, context_pack: StoryContextPack
     )
 
 
+def _repair_section(repair_feedback: dict | None) -> str:
+    """Render the RED->GREEN repair feedback for a re-generation pass: the failing
+    gate + bounded build-log excerpt + the files the previous attempt touched. Mirrors
+    `repair_loop.py::run_repair_loop`'s feedback shape (failing gate + log excerpt),
+    extended with the touched-file list so the model knows what to patch. Empty string
+    on the first (non-repair) pass."""
+    if not repair_feedback:
+        return ""
+    gate = repair_feedback.get("failing_gate", "unknown")
+    log = repair_feedback.get("log_excerpt", "") or ""
+    touched = repair_feedback.get("touched_files") or []
+    lines = [f"## Previous attempt failed gate: {gate}",
+             f"## Build log\n```\n{log}\n```"]
+    if touched:
+        lines.append("## Files your last attempt wrote (patch these)\n"
+                     + "\n".join(f"- {p}" for p in touched))
+    return "\n".join(lines) + "\nFix the root cause; do not weaken tests.\n"
+
+
 def build_impl_prompt(*, item: StoryCodegenItem, context_pack: StoryContextPack,
                       failing_tests: list[GeneratedFile],
-                      existing_java: list[GeneratedFile]) -> str:
-    """Pure prompt assembly for the implementation pass."""
+                      existing_java: list[GeneratedFile],
+                      repair_feedback: dict | None = None) -> str:
+    """Pure prompt assembly for the implementation pass. On a repair pass,
+    `repair_feedback` (failing gate + log excerpt + touched files) is prepended so the
+    re-generation targets the actual failure."""
     return (
         f"{context_pack.render()}\n\n"
+        f"{_repair_section(repair_feedback)}"
         f"{_inline_files_section('## Failing tests to satisfy', failing_tests)}"
         f"{_inline_files_section('## Existing Java (reuse / patch these)', existing_java)}"
         "Emit ONLY the production files (kind='main') that make the failing tests "
@@ -297,16 +320,19 @@ async def generate_story_implementation(
     context_pack: StoryContextPack, failing_tests: list[GeneratedFile],
     existing_java: list[GeneratedFile], model: str,
     max_turns: int | None = None, timeout_s: float | None = None,
+    repair_feedback: dict | None = None,
 ) -> StoryPatch:
     """Generate the MINIMAL production code that satisfies one story's failing tests.
     Returns a `StoryPatch` whose `files` are ONLY kind='main', plus the model's
     `rationale`. Raises ValueError on an empty runner payload or a timeout. The
-    bounded, per-story analogue of `generate_slice`'s production pass."""
+    bounded, per-story analogue of `generate_slice`'s production pass. On a repair
+    re-generation, `repair_feedback` (failing gate + build-log excerpt + the touched
+    files) is folded into the prompt, mirroring `repair_loop.py`."""
     max_turns = story_max_turns() if max_turns is None else max_turns
     timeout_s = story_timeout_s() if timeout_s is None else timeout_s
     prompt = build_impl_prompt(
         item=item, context_pack=context_pack, failing_tests=failing_tests,
-        existing_java=existing_java)
+        existing_java=existing_java, repair_feedback=repair_feedback)
     raw = await _run_story_call(
         runner=runner, system=STORY_IMPL_SYSTEM, prompt=prompt, model=model,
         max_turns=max_turns, label=f"story-impl:{item.story_id}", timeout_s=timeout_s)
