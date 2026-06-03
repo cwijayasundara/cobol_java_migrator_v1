@@ -267,34 +267,45 @@ def build_stories_prompt(*, epic: dict, brd_sections_for_epic: list[dict],
 
 async def generate_epics(*, runner, model: str, timeout_s: float, max_turns: int,
                          brd_sections: list[dict], relevant_refs: list[str],
-                         known_requirement_ids: list[str]) -> EnrichmentResult:
+                         known_requirement_ids: list[str],
+                         attempts: int = 1, escalate: bool = True) -> EnrichmentResult:
     """MAP unit 1: a single bounded structured call that emits the EPIC layer only.
     `relevant_refs` is already the lossless relevant set (computed upstream); it is
-    inlined as-is — NOT the whole graph, and never truncated. Returns the typed
-    result so a gating caller can surface the concrete failure cause."""
+    inlined as-is — NOT the whole graph, and never truncated. `attempts`/`escalate`
+    are threaded into the shared `run_batched_result` primitive so a timed-out /
+    turn-capped epics unit is retried with an escalated budget rather than dying on
+    one timeout. Returns the typed result so a gating caller can surface the concrete
+    failure cause."""
     prompt = build_epics_prompt(brd_sections=brd_sections, relevant_refs=relevant_refs,
                                 known_requirement_ids=known_requirement_ids)
     return await run_batched_result(
         runner=runner, system=EPICS_SYSTEM, prompt=prompt, schema=EPICS_SCHEMA,
-        model=model, timeout_s=timeout_s, label="backlog-epics", max_turns=max_turns)
+        model=model, timeout_s=timeout_s, label="backlog-epics", max_turns=max_turns,
+        attempts=attempts, escalate=escalate)
 
 
 async def generate_stories_for_epic(*, runner, model: str, timeout_s: float,
                                     max_turns: int, epic: dict,
                                     brd_sections_for_epic: list[dict],
                                     relevant_refs: list[str],
-                                    known_requirement_ids: list[str]) -> EnrichmentResult:
+                                    known_requirement_ids: list[str],
+                                    attempts: int = 1,
+                                    escalate: bool = True) -> EnrichmentResult:
     """MAP unit 2: a single bounded structured call that emits user stories +
     acceptance criteria for ONE epic. The prompt is scoped to this epic alone (no
     other epics' content) and inlines this epic's FULL relevant refs — `relevant_refs`
     is computed by the CALLER (Task 5) as relevant_refs(brd_sections_for_epic,
-    known_refs) and inlined here without truncation. Returns the typed result."""
+    known_refs) and inlined here without truncation. `attempts`/`escalate` are threaded
+    into the shared `run_batched_result` primitive so a timed-out / turn-capped story
+    unit is retried with an escalated budget — a unit no longer dies on one timeout.
+    Returns the typed result."""
     prompt = build_stories_prompt(
         epic=epic, brd_sections_for_epic=brd_sections_for_epic,
         relevant_refs=relevant_refs, known_requirement_ids=known_requirement_ids)
     return await run_batched_result(
         runner=runner, system=STORIES_SYSTEM, prompt=prompt, schema=STORIES_SCHEMA,
-        model=model, timeout_s=timeout_s, label="backlog-stories", max_turns=max_turns)
+        model=model, timeout_s=timeout_s, label="backlog-stories", max_turns=max_turns,
+        attempts=attempts, escalate=escalate)
 
 
 # --- Orchestrator: size router -> fan-out -> merge -> completeness loop -----
@@ -398,7 +409,8 @@ async def _generate_stories_round(*, runner, model: str, brd_sections: list[dict
                                   brd_relevant: list[str],
                                   units: list[tuple[dict, set[str]]],
                                   story_timeout_s: float, story_max_turns: int,
-                                  semaphore: asyncio.Semaphore) -> list[dict]:
+                                  semaphore: asyncio.Semaphore,
+                                  unit_attempts: int = 1) -> list[dict]:
     """Fan out one round of per-epic stories calls under `semaphore` (bounds parallel
     IN-FLIGHT calls, NOT story count). Each unit is (epic, req_ids_to_cover): the epic
     plus the subset of its requirements this round should produce stories for. The
@@ -420,7 +432,8 @@ async def _generate_stories_round(*, runner, model: str, brd_sections: list[dict
                 runner=runner, model=model, timeout_s=story_timeout_s,
                 max_turns=story_max_turns, epic=epic,
                 brd_sections_for_epic=sections_for_epic, relevant_refs=refs,
-                known_requirement_ids=known_requirement_ids)
+                known_requirement_ids=known_requirement_ids,
+                attempts=unit_attempts, escalate=True)
         if not res.ok:
             logger.warning("backlog: stories call for epic %s failed (%s) — no stories "
                            "from this epic this round", epic.get("id"), res.cause)
@@ -455,10 +468,17 @@ async def generate_backlog_result(*, runner, model: str, timeout_s: float,
          yields no epics),
       2. fan out per-epic stories (bounded concurrency, partial failure tolerated),
       3. merge into a parse-compatible {epics, stories},
-      4. Loop-Until-Done: top up any uncovered BRD requirement until covered, no
-         round makes progress, or BACKLOG_MAX_ROUNDS is hit.
+      4. Loop-Until-Done (UNCAPPED): top up any uncovered BRD requirement until full
+         coverage OR BACKLOG_NO_PROGRESS_ROUNDS (default 2) CONSECUTIVE no-progress
+         rounds. BACKLOG_MAX_ROUNDS (default 100) is a high SAFETY backstop only — NOT
+         the normal stop — so a slow-but-progressing repo keeps looping past the old
+         hard cap of 3 instead of dying mid-coverage at the 300s cliff.
+    Per-unit retry: each epics / per-epic-stories MAP call threads
+    `attempts=BACKLOG_UNIT_ATTEMPTS` (default 2, escalate=True) into the shared
+    primitive, so a unit that times out / hits its turn cap is re-issued with an
+    escalated budget rather than dying on one timeout.
     Never caps/truncates; never drops a requirement to finish (only the loop's
-    no-progress/max-rounds terminus drops a genuinely uncoverable one)."""
+    no-progress/safety-bound terminus drops a genuinely uncoverable one)."""
     brd_evidence_map = brd_evidence_map or {}
     # Whole-BRD relevant: the BRD-grounded refs, or ALL known_refs if the evidence_map
     # is empty/legacy. NEVER empty -> the epics call and the per-epic fallback never
@@ -475,14 +495,22 @@ async def generate_backlog_result(*, runner, model: str, timeout_s: float,
     story_timeout_s = _env_float("BACKLOG_STORY_TIMEOUT_S", 120.0)
     story_max_turns = _env_int("BACKLOG_STORY_MAX_TURNS", 6)
     max_concurrency = max(1, _env_int("BACKLOG_MAX_CONCURRENCY", 4))
-    max_rounds = max(1, _env_int("BACKLOG_MAX_ROUNDS", 3))
+    # The completeness loop is UNCAPPED in practice: its PRIMARY exit is full coverage
+    # OR BACKLOG_NO_PROGRESS_ROUNDS consecutive no-progress rounds. BACKLOG_MAX_ROUNDS
+    # is a large SAFETY backstop (default 100), not the normal stop — so a
+    # slow-but-progressing repo keeps looping past the old hard cap of 3.
+    max_rounds = max(1, _env_int("BACKLOG_MAX_ROUNDS", 100))
+    no_progress_limit = max(1, _env_int("BACKLOG_NO_PROGRESS_ROUNDS", 2))
+    # Per-unit retry-with-escalation: a unit no longer dies on one timeout/turn-cap.
+    unit_attempts = max(1, _env_int("BACKLOG_UNIT_ATTEMPTS", 2))
     semaphore = asyncio.Semaphore(max_concurrency)
 
     # 1. EPIC layer (whole-BRD evidence-map relevant refs) — fail loud on failure / empty.
     epics_res = await generate_epics(
         runner=runner, model=model, timeout_s=epic_timeout_s, max_turns=max_turns,
         brd_sections=brd_sections, relevant_refs=brd_relevant,
-        known_requirement_ids=known_requirement_ids)
+        known_requirement_ids=known_requirement_ids,
+        attempts=unit_attempts, escalate=True)
     epics = [e for e in epics_res.payload.get("epics", []) if isinstance(e, dict)]
     if not epics_res.ok or not epics:
         cause = epics_res.cause or "no epics"
@@ -497,7 +525,8 @@ async def generate_backlog_result(*, runner, model: str, timeout_s: float,
         known_requirement_ids=known_requirement_ids,
         brd_evidence_map=brd_evidence_map, brd_relevant=brd_relevant,
         units=first_units, story_timeout_s=story_timeout_s,
-        story_max_turns=story_max_turns, semaphore=semaphore)
+        story_max_turns=story_max_turns, semaphore=semaphore,
+        unit_attempts=unit_attempts)
 
     # Fail loud if NO epic produced a story.
     if not all_stories:
@@ -505,12 +534,17 @@ async def generate_backlog_result(*, runner, model: str, timeout_s: float,
                                 cause="stories generation failed: no stories produced "
                                       "for any epic")
 
-    # 3+4. Loop-Until-Done completeness guard.
+    # 3+4. Loop-Until-Done completeness guard (UNCAPPED).
+    # PRIMARY exit: full coverage OR `no_progress_limit` CONSECUTIVE no-progress
+    # top-up rounds (a progress round resets the streak). `max_rounds` is a high
+    # SAFETY backstop bounding the TOTAL top-up rounds so a degenerate fixture that
+    # always reports progress still terminates — it is not the normal stop.
     all_req_ids = set(known_requirement_ids) or set(
         _requirement_ids_of_sections(brd_sections))
     epics_by_id = {str(e.get("id", "")): e for e in epics}
-    round_no = 1
-    while round_no < max_rounds:
+    topup_round = 0  # number of top-up rounds run (safety bound counter)
+    no_progress_streak = 0  # consecutive top-up rounds that covered nothing new
+    while topup_round < max_rounds:
         covered = _covered_requirements(all_stories)
         uncovered = all_req_ids - covered
         if not uncovered:
@@ -547,15 +581,23 @@ async def generate_backlog_result(*, runner, model: str, timeout_s: float,
             known_requirement_ids=known_requirement_ids,
             brd_evidence_map=brd_evidence_map, brd_relevant=brd_relevant,
             units=list(units.values()), story_timeout_s=story_timeout_s,
-            story_max_turns=story_max_turns, semaphore=semaphore)
+            story_max_turns=story_max_turns, semaphore=semaphore,
+            unit_attempts=unit_attempts)
+        topup_round += 1
         newly_covered = _covered_requirements(new_stories) & uncovered
-        logger.info("backlog: completeness round %d — %d uncovered before, "
-                    "%d newly covered", round_no + 1, len(uncovered), len(newly_covered))
         all_stories.extend(new_stories)
-        if not newly_covered:
-            # No progress this round — stop (the rest is genuinely uncoverable).
+        if newly_covered:
+            no_progress_streak = 0  # progress — reset the no-progress streak
+        else:
+            no_progress_streak += 1
+        logger.info("backlog: completeness top-up round %d — %d uncovered before, "
+                    "%d newly covered (no-progress streak %d/%d)", topup_round,
+                    len(uncovered), len(newly_covered), no_progress_streak,
+                    no_progress_limit)
+        if no_progress_streak >= no_progress_limit:
+            # `no_progress_limit` consecutive no-progress rounds — the rest is
+            # genuinely uncoverable; stop (PRIMARY exit, not the safety backstop).
             break
-        round_no += 1
 
     merged = {"epics": epics, "stories": all_stories}
     return EnrichmentResult(payload=merged, ok=True, cause=None)

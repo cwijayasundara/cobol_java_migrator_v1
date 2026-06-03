@@ -321,6 +321,41 @@ def test_backlog_loads_brd_evidence_map_and_inlines_nonzero_refs(monkeypatch):
         jobs.runner.inline = False
 
 
+def test_backlog_not_bounded_by_outer_timeout_wall(monkeypatch):
+    """No outer BACKLOG_TIMEOUT_S=300 asyncio wall may kill the whole orchestrator
+    mid-coverage: even with a TINY BACKLOG_TIMEOUT_S, a generator that takes longer
+    than that wall (the multi-round loop runs for a while) must still complete — the
+    per-unit budgets bound it, not a single wall around the entire loop."""
+    import asyncio as _asyncio
+
+    from cobol_modernizer.controlplane import backlog as bl
+
+    monkeypatch.setenv("BACKLOG_TIMEOUT_S", "0.05")  # tiny — must NOT cap the loop
+
+    seen: dict = {}
+
+    async def _slow_gen(**kw):
+        seen["timeout_s"] = kw.get("timeout_s")
+        # Take materially longer than the (tiny) BACKLOG_TIMEOUT_S wall would allow.
+        await _asyncio.sleep(0.2)
+        return _fake_payload()
+
+    monkeypatch.setattr(bl, "generate_backlog_result", _slow_gen)
+    client, _ = _client(monkeypatch)
+    try:
+        r = client.post("/api/workspaces/ws-1/backlog")
+        assert r.status_code in (200, 202)
+        done = client.get("/api/workspaces/ws-1/backlog").json()
+        # Completed (not killed by an outer wall) despite running > BACKLOG_TIMEOUT_S.
+        assert done["status"] == "done"
+        assert done["result"]["stories"] == 1
+        # The tiny BACKLOG_TIMEOUT_S is still passed down as the per-unit budget.
+        assert seen["timeout_s"] == 0.05
+    finally:
+        app.dependency_overrides.clear()
+        jobs.runner.inline = False
+
+
 def test_backlog_post_surfaces_generation_failure(monkeypatch):
     from cobol_modernizer.controlplane import backlog as bl
 
