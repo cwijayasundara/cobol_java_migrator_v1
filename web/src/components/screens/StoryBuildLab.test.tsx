@@ -30,7 +30,7 @@ function registerStoryHandlers(opts?: {
           {
             story_id: "S3", bounded_context: "Reporting", service_name: "reporting-service",
             acceptance_criteria_ids: ["AC4"], cobol_refs: ["CBRPT01.MAIN"],
-            depends_on: ["S2"], status: "pending",
+            depends_on: ["S2"], status: "deferred",
           },
         ],
       })),
@@ -52,8 +52,25 @@ function registerStoryHandlers(opts?: {
             ac_covered: ["AC3"], ac_missing: [],
             rationale: "Generated but not test-verified.",
           },
+          S3: {
+            status: "deferred", wall_time_s: 55.0, model: "claude-sonnet-4-6",
+            cost_usd: 0.20, attempts: 3,
+            changed_files: [], test_result: "still red after 3 attempts",
+            ac_covered: [], ac_missing: ["AC4"],
+            rationale: "Exhausted the retry budget; deferred so it cannot wedge the build.",
+          },
         },
-        job: { status: "idle", result: null, error: null, started_at: null, finished_at: null },
+        job: {
+          status: "done",
+          result: {
+            repo_slug: "carddemo-mini", story_id: null, story_count: 3,
+            result: {
+              story_count: 3, pass_count: 2, skipped_count: 0,
+              deferred_count: 1, pending: 1,
+            },
+          },
+          error: null, started_at: 1, finished_at: 2,
+        },
       })),
     http.post("/api/workspaces/:id/build/stories", () => {
       opts?.onBuildAll?.();
@@ -134,7 +151,48 @@ describe("StoryBuildLab", () => {
 
     await waitFor(() => expect(screen.getByText("S1")).toBeInTheDocument());
     await userEvent.click(screen.getByRole("button", { name: /build next ready story/i }));
-    // S3 is the next "pending" ready story (S1 passed, S2 generated-unverified).
+    // S3 is the next ready story to (re)build — it is `deferred` (exhausted its budget)
+    // with its dep S2 satisfied, so it is retryable (S1 passed, S2 generated-unverified).
     await waitFor(() => expect(builtStory).toBe("S3"));
+  });
+
+  it("renders the deferred status distinctly from passed/generated-unverified/pending", async () => {
+    registerStoryHandlers();
+    render(<StoryBuildLab workspaceId="ws-1" />);
+
+    await waitFor(() => expect(screen.getByText("S3")).toBeInTheDocument());
+
+    // The `deferred` status label is rendered with its own wording (its own style row).
+    expect(screen.getAllByText(/deferred/i).length).toBeGreaterThan(0);
+    // Distinct from the other statuses, which also still render.
+    expect(screen.getAllByText(/passed/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/generated-unverified/i).length).toBeGreaterThan(0);
+  });
+
+  it("groups/labels stories by dependency wave", async () => {
+    registerStoryHandlers();
+    render(<StoryBuildLab workspaceId="ws-1" />);
+
+    await waitFor(() => expect(screen.getByText("S1")).toBeInTheDocument());
+
+    // S1 (no deps) = wave 0; S2 (after S1) = wave 1; S3 (after S2) = wave 2.
+    // Each wave is labelled — at least three wave labels appear.
+    expect(screen.getByText(/wave 0/i)).toBeInTheDocument();
+    expect(screen.getByText(/wave 1/i)).toBeInTheDocument();
+    expect(screen.getByText(/wave 2/i)).toBeInTheDocument();
+  });
+
+  it("renders the build progress counts (built / deferred / pending of total)", async () => {
+    registerStoryHandlers();
+    render(<StoryBuildLab workspaceId="ws-1" />);
+
+    await waitFor(() => expect(screen.getByText("S1")).toBeInTheDocument());
+
+    // Summary line from the job result counts: built 2, deferred 1, pending 1 of 3.
+    await waitFor(() =>
+      expect(screen.getByText(/built\s*2/i)).toBeInTheDocument());
+    expect(screen.getByText(/deferred\s*1/i)).toBeInTheDocument();
+    expect(screen.getByText(/pending\s*1/i)).toBeInTheDocument();
+    expect(screen.getByText(/of\s*3/i)).toBeInTheDocument();
   });
 });
