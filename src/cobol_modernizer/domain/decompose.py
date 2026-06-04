@@ -4,6 +4,7 @@ extraction order, then runs deterministic gates with a bounded repair loop."""
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Callable
 
@@ -15,7 +16,7 @@ from cobol_modernizer.domain.schema import (
 from cobol_modernizer.domain.topology import (
     assign_extraction_ranks, deployment_for, extract_score,
 )
-from cobol_modernizer.enrichment.base import ground_refs, run_batched
+from cobol_modernizer.enrichment.base import ground_refs, run_batched_result
 from cobol_modernizer.seam.signals import raw_signals_for_program
 
 # BRD requirement ids (FR-1, NFR-2, SM-3, A-2, C-1 …) are legitimate citation targets
@@ -131,6 +132,13 @@ def build_decomposition_prompt(*, brd_text: str, graph_summary: dict,
     return prompt
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
 async def decompose(client: Any, repo: str, *, brd_text: str, runner: Any, model: str,
                     timeout_s: float, signals_fn: SignalsFn = raw_signals_for_program,
                     max_repairs: int = 2, backlog_json: str = "") -> DecompositionMap:
@@ -139,15 +147,22 @@ async def decompose(client: Any, repo: str, *, brd_text: str, runner: Any, model
     summary = graph_coupling_summary(client, repo)
     base_prompt = build_decomposition_prompt(brd_text=brd_text, graph_summary=summary,
                                              backlog_json=backlog_json)
+    max_turns = max(1, _env_int("DOMAIN_DECOMPOSE_MAX_TURNS", 6))
+    attempts = max(1, _env_int("DOMAIN_DECOMPOSE_ATTEMPTS", 2))
     violations: list[str] = []
     for attempt in range(max_repairs + 1):
         prompt = base_prompt
         if violations:
             prompt += ("\n\n## Fix these violations from your previous answer\n- "
                        + "\n- ".join(violations))
-        raw = await run_batched(runner=runner, system=DECOMPOSE_SYSTEM, prompt=prompt,
-                                schema=DECOMP_SCHEMA, model=model, timeout_s=timeout_s,
-                                label="domain-decompose")
+        result = await run_batched_result(
+            runner=runner, system=DECOMPOSE_SYSTEM, prompt=prompt,
+            schema=DECOMP_SCHEMA, model=model, timeout_s=timeout_s,
+            label="domain-decompose", max_turns=max_turns,
+            attempts=attempts, escalate=True)
+        if not result.ok:
+            raise ValueError(f"domain decomposition agent failed: {result.cause}")
+        raw = result.payload
         dm = _parse(raw, repo, known)
         _apply_topology(client, repo, dm, signals_fn)
         violations = run_phase1_gates(dm.contexts, writers, known)

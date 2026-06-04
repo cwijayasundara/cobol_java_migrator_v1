@@ -22,6 +22,39 @@ def _design() -> TechnicalDesign:
     return TechnicalDesign(
         repo_slug="acme/card-demo",
         version=3,
+        database_design=[
+            {
+                "service": "Card Posting",
+                "schema": "posting",
+                "migration_location": "src/main/resources/db/migration/posting",
+                "tables": [{
+                    "legacy_resource": "Account Ledger",
+                    "table": "account_ledger",
+                    "columns": [
+                        {"name": "id", "type": "BIGINT", "nullable": False,
+                         "primary_key": True},
+                        {"name": "legacy_record_key", "type": "VARCHAR(128)",
+                         "nullable": False, "unique": True},
+                        {"name": "legacy_payload", "type": "JSON", "nullable": False},
+                        {"name": "updated_at", "type": "TIMESTAMP WITH TIME ZONE",
+                         "nullable": False},
+                    ],
+                }],
+            },
+            {
+                "service": "Statement",
+                "schema": "statement",
+                "tables": [{
+                    "legacy_resource": "Statement Record",
+                    "table": "statement_record",
+                    "columns": [
+                        {"name": "id", "type": "BIGINT", "nullable": False,
+                         "primary_key": True},
+                        {"name": "legacy_payload", "type": "JSON", "nullable": False},
+                    ],
+                }],
+            },
+        ],
         services=[
             TechnicalService(
                 name="Card Posting",
@@ -130,6 +163,7 @@ def test_design_to_shells_controller_per_api_contract():
     assert "@RestController" in joined
     assert "@PostMapping" in joined and "@GetMapping" in joined
     assert "/transactions" in joined
+    assert "public PostTransactionResponse handle(@RequestBody PostTransactionRequest request)" in joined
 
 
 def test_design_to_shells_raises_on_colliding_contract_names():
@@ -149,8 +183,7 @@ def test_design_to_shells_raises_on_colliding_contract_names():
         design_to_shells(design)
 
 
-def test_design_to_shells_raises_on_collision_across_services():
-    # Same controller name in two different services -> second service's story vanishes.
+def test_design_to_shells_allows_same_controller_name_in_different_service_packages():
     design = TechnicalDesign(
         repo_slug="acme/card-demo",
         services=[
@@ -161,11 +194,12 @@ def test_design_to_shells_raises_on_collision_across_services():
             TechnicalService(name="Two", bounded_context="b", deployment="module",
                              story_ids=["S-2"],
                              api_contracts=[ApiContract(name="Process", method="POST",
-                                                        path="/two")]),
+                path="/two")]),
         ],
     )
-    with pytest.raises(ValueError, match="ProcessController"):
-        design_to_shells(design)
+    paths = {s.path for s in design_to_shells(design)}
+    assert "src/main/java/com/cobolmodernizer/carddemo/one/api/ProcessController.java" in paths
+    assert "src/main/java/com/cobolmodernizer/carddemo/two/api/ProcessController.java" in paths
 
 
 def test_design_to_shells_service_per_technical_service():
@@ -187,15 +221,30 @@ def test_design_to_shells_repository_and_entity_per_resource():
     assert "StatementRecordRepository.java" in names
     entity = next(s for s in shells if s.path.endswith("/AccountLedger.java"))
     assert "@Entity" in entity.content
+    assert '@Table(name = "account_ledger")' in entity.content
+    assert 'private String legacy_payload;' in entity.content
+    assert 'private OffsetDateTime updated_at;' in entity.content
     repo = next(s for s in shells if s.path.endswith("AccountLedgerRepository.java"))
     assert "JpaRepository" in repo.content
     assert "@Repository" in repo.content
 
 
+def test_design_to_shells_emits_dtos_and_flyway_migrations_from_table_schema():
+    shells = design_to_shells(_design())
+    paths = {s.path for s in shells}
+    assert "src/main/java/com/cobolmodernizer/carddemo/cardposting/api/PostTransactionRequest.java" in paths
+    assert "src/main/java/com/cobolmodernizer/carddemo/cardposting/api/PostTransactionResponse.java" in paths
+    assert "src/main/resources/db/migration/posting/V001__create_account_ledger.sql" in paths
+    migration = next(s for s in shells if s.path.endswith("V001__create_account_ledger.sql"))
+    assert "CREATE SCHEMA IF NOT EXISTS posting;" in migration.content
+    assert "legacy_record_key VARCHAR(128) NOT NULL" in migration.content
+    assert "UNIQUE (legacy_record_key)" in migration.content
+
+
 def test_design_to_shells_carry_story_service_markers():
     shells = design_to_shells(_design())
     # Every generated class (not the Application) links to a service via a TODO marker.
-    derived = [s for s in shells if not s.path.endswith("Application.java")]
+    derived = [s for s in shells if s.path.endswith(".java") and not s.path.endswith("Application.java")]
     for s in derived:
         assert "// TODO(story:" in s.content
         assert "service:" in s.content
@@ -204,7 +253,8 @@ def test_design_to_shells_carry_story_service_markers():
 def test_design_to_shells_packages_derived_from_slug():
     shells = design_to_shells(_design())
     for s in shells:
-        assert "package com.cobolmodernizer.carddemo" in s.content
+        if s.path.endswith(".java"):
+            assert "package com.cobolmodernizer.carddemo" in s.content
 
 
 def test_shells_have_balanced_todo_bodies():
@@ -212,22 +262,19 @@ def test_shells_have_balanced_todo_bodies():
     joined = "\n".join(s.content for s in shells)
     assert "UnsupportedOperationException" in joined
     # Controllers / services should have method bodies (balanced braces, no stub gaps).
-    for s in shells:
+    for s in [x for x in shells if x.path.endswith(".java")]:
         assert s.content.count("{") == s.content.count("}")
         assert s.content.rstrip().endswith("}")
 
 
-def test_controllers_reference_no_undefined_dto_types():
-    # The design names request/response models (PostTransactionRequest/Response) that
-    # are NOT generated. They must NOT leak into the source as a return/param type or the
-    # shell fails to compile with 'cannot find symbol'. Controller methods return Object.
+def test_controllers_reference_generated_dto_types():
     shells = design_to_shells(_design())
     joined = "\n".join(s.content for s in shells)
-    assert "PostTransactionRequest" not in joined
-    assert "PostTransactionResponse" not in joined
+    assert "public record PostTransactionRequest" in joined
+    assert "public record PostTransactionResponse" in joined
     controllers = [s for s in shells if s.path.endswith("Controller.java")]
-    for s in controllers:
-        assert "public Object handle()" in s.content
+    assert any("PostTransactionResponse handle(@RequestBody PostTransactionRequest request)" in s.content
+               for s in controllers)
 
 
 # ---- disk writer -------------------------------------------------------------
@@ -242,6 +289,7 @@ def test_scaffold_from_design_writes_pom_and_shells(tmp_path):
     # or the generated controllers/entities/repositories would not compile.
     assert "spring-boot-starter-web" in pom
     assert "spring-boot-starter-data-jpa" in pom
+    assert "flyway-core" in pom
     # config + source roots from scaffold_module
     assert (root / "config/checkstyle.xml").exists()
     # at least one application class on disk
@@ -251,6 +299,20 @@ def test_scaffold_from_design_writes_pom_and_shells(tmp_path):
     assert len(controllers) == 3
     repos = list(root.rglob("*Repository.java"))
     assert len(repos) == 2
+    migrations = list(root.rglob("V001__create_*.sql"))
+    assert len(migrations) == 2
+
+
+def test_scaffold_from_design_cleans_existing_module_before_writing(tmp_path):
+    root = scaffold_from_design(tmp_path, _design())
+    stale = root / "src/main/java/com/cobolmodernizer/carddemo/Stale.java"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("class Stale {}", encoding="utf-8")
+
+    root2 = scaffold_from_design(tmp_path, _design())
+
+    assert root2 == root
+    assert not stale.exists()
 
 
 def test_scaffold_from_design_is_deterministic_on_disk(tmp_path):

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import PurePosixPath
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -283,13 +284,39 @@ def _inline_files_section(title: str, files: list[GeneratedFile]) -> str:
     return "\n".join(blocks) + "\n"
 
 
+def _allowed_files_section(allowed_paths: list[str] | None) -> str:
+    if not allowed_paths:
+        return ""
+    listing = "\n".join(f"- {p}" for p in allowed_paths)
+    return (
+        "## Allowed production files for this story\n"
+        f"{listing}\n"
+        "Patch ONLY these production files. Do not create new production files, "
+        "move files, rename packages, or re-scaffold the project.\n"
+    )
+
+
+def _allowed_test_files_section(allowed_paths: list[str] | None) -> str:
+    if not allowed_paths:
+        return ""
+    listing = "\n".join(f"- {p}" for p in allowed_paths)
+    return (
+        "## Allowed test files for this story\n"
+        f"{listing}\n"
+        "Emit tests ONLY in these files. Do not create extra test files or move "
+        "tests into another package.\n"
+    )
+
+
 def build_tests_prompt(*, item: StoryCodegenItem, context_pack: StoryContextPack,
-                       project_index: list[str]) -> str:
+                       project_index: list[str],
+                       allowed_paths: list[str] | None = None) -> str:
     """Pure prompt assembly for the tests pass (separated so it's unit-testable)."""
     return (
         f"{context_pack.render()}\n\n"
         f"{_ac_ids_section(item)}"
         f"{_project_index_section(project_index)}"
+        f"{_allowed_test_files_section(allowed_paths)}"
         "Emit ONLY the failing JUnit5 test files (kind='test') for this story."
     )
 
@@ -316,6 +343,7 @@ def _repair_section(repair_feedback: dict | None) -> str:
 def build_impl_prompt(*, item: StoryCodegenItem, context_pack: StoryContextPack,
                       failing_tests: list[GeneratedFile],
                       existing_java: list[GeneratedFile],
+                      allowed_paths: list[str] | None = None,
                       repair_feedback: dict | None = None) -> str:
     """Pure prompt assembly for the implementation pass. On a repair pass,
     `repair_feedback` (failing gate + log excerpt + touched files) is prepended so the
@@ -323,6 +351,7 @@ def build_impl_prompt(*, item: StoryCodegenItem, context_pack: StoryContextPack,
     return (
         f"{context_pack.render()}\n\n"
         f"{_repair_section(repair_feedback)}"
+        f"{_allowed_files_section(allowed_paths)}"
         f"{_inline_files_section('## Failing tests to satisfy', failing_tests)}"
         f"{_inline_files_section('## Existing Java (reuse / patch these)', existing_java)}"
         "Emit ONLY the production files (kind='main') that make the failing tests "
@@ -330,9 +359,58 @@ def build_impl_prompt(*, item: StoryCodegenItem, context_pack: StoryContextPack,
     )
 
 
+def _enforce_allowed_paths(files: list[GeneratedFile],
+                           allowed_paths: list[str] | None) -> None:
+    _enforce_safe_paths(files, label="story implementation")
+    if not allowed_paths:
+        return
+    allowed = {_normalize_generated_path(p) for p in allowed_paths}
+    offenders = sorted({
+        f.path for f in files if _normalize_generated_path(f.path) not in allowed
+    })
+    if offenders:
+        raise ValueError(
+            "story implementation wrote files outside the allowed production scope: "
+            + ", ".join(offenders))
+
+
+def _enforce_allowed_test_paths(files: list[GeneratedFile],
+                                allowed_paths: list[str] | None) -> None:
+    _enforce_safe_paths(files, label="story tests")
+    if not allowed_paths:
+        return
+    allowed = {_normalize_generated_path(p) for p in allowed_paths}
+    offenders = sorted({
+        f.path for f in files if _normalize_generated_path(f.path) not in allowed
+    })
+    if offenders:
+        raise ValueError(
+            "story tests wrote files outside the allowed test scope: "
+            + ", ".join(offenders))
+
+
+def _normalize_generated_path(path: str) -> str:
+    clean = (path or "").replace("\\", "/").strip()
+    p = PurePosixPath(clean)
+    if (
+        not clean
+        or p.is_absolute()
+        or any(part in {"", ".", ".."} for part in p.parts)
+        or ":" in p.parts[0]
+    ):
+        raise ValueError(f"unsafe generated path: {path!r}")
+    return str(p)
+
+
+def _enforce_safe_paths(files: list[GeneratedFile], *, label: str) -> None:
+    for f in files:
+        _normalize_generated_path(f.path)
+
+
 async def generate_story_tests(
     *, runner: AgentRunner, item: StoryCodegenItem,
     context_pack: StoryContextPack, project_index: list[str], model: str,
+    allowed_paths: list[str] | None = None,
     max_turns: int | None = None, timeout_s: float | None = None,
     attempts: int | None = None, escalate: bool | None = None,
 ) -> StoryPatch:
@@ -347,14 +425,17 @@ async def generate_story_tests(
     attempts = story_codegen_attempts() if attempts is None else attempts
     escalate = story_codegen_escalate() if escalate is None else escalate
     prompt = build_tests_prompt(
-        item=item, context_pack=context_pack, project_index=project_index)
+        item=item, context_pack=context_pack, project_index=project_index,
+        allowed_paths=allowed_paths)
     raw = await _run_story_call(
         runner=runner, system=STORY_TESTS_SYSTEM, prompt=prompt, model=model,
         max_turns=max_turns, label=f"story-tests:{item.story_id}", timeout_s=timeout_s,
         attempts=attempts, escalate=escalate)
     _require_files(raw, label=f"story-tests:{item.story_id}", max_turns=max_turns)
+    files = _files_from(raw, only="test")
+    _enforce_allowed_test_paths(files, allowed_paths)
     return StoryPatch(
-        files=_files_from(raw, only="test"),
+        files=files,
         rationale=_rationale_from(raw, only="test"))
 
 
@@ -362,6 +443,7 @@ async def generate_story_implementation(
     *, runner: AgentRunner, item: StoryCodegenItem,
     context_pack: StoryContextPack, failing_tests: list[GeneratedFile],
     existing_java: list[GeneratedFile], model: str,
+    allowed_paths: list[str] | None = None,
     max_turns: int | None = None, timeout_s: float | None = None,
     attempts: int | None = None, escalate: bool | None = None,
     repair_feedback: dict | None = None,
@@ -377,14 +459,19 @@ async def generate_story_implementation(
     timeout_s = story_timeout_s() if timeout_s is None else timeout_s
     attempts = story_codegen_attempts() if attempts is None else attempts
     escalate = story_codegen_escalate() if escalate is None else escalate
+    if allowed_paths is None and existing_java:
+        allowed_paths = [f.path for f in existing_java]
     prompt = build_impl_prompt(
         item=item, context_pack=context_pack, failing_tests=failing_tests,
-        existing_java=existing_java, repair_feedback=repair_feedback)
+        existing_java=existing_java, allowed_paths=allowed_paths,
+        repair_feedback=repair_feedback)
     raw = await _run_story_call(
         runner=runner, system=STORY_IMPL_SYSTEM, prompt=prompt, model=model,
         max_turns=max_turns, label=f"story-impl:{item.story_id}", timeout_s=timeout_s,
         attempts=attempts, escalate=escalate)
     _require_files(raw, label=f"story-impl:{item.story_id}", max_turns=max_turns)
+    files = _files_from(raw, only="main")
+    _enforce_allowed_paths(files, allowed_paths)
     return StoryPatch(
-        files=_files_from(raw, only="main"),
+        files=files,
         rationale=_rationale_from(raw, only="main"))

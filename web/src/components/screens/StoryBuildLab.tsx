@@ -90,6 +90,12 @@ function extractCounts(result: StoryBuildCounts & { result?: StoryBuildCounts } 
   return inner;
 }
 
+function testResultLabel(result: StoryStatusRecord["test_result"]): string | null {
+  if (!result) return null;
+  if (typeof result === "string") return result;
+  return result.status ?? null;
+}
+
 export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
   const [plan, setPlan] = useState<StoryCodegenPlan | null>(null);
   const [statuses, setStatuses] = useState<StoryStatusResponse["stories"]>({});
@@ -117,18 +123,23 @@ export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  // Build-all: existing job-polling pattern. We poll the story-status endpoint and
-  // map to its embedded job-view; each tick also re-pulls the plan + telemetry so
-  // the table updates live, then a final refresh when the job settles.
+  // Build-all: poll only the lightweight story-status endpoint while the job runs.
+  // The story plan is static for this screen, so re-fetch it only when the job
+  // settles; otherwise the backend logs get cluttered by duplicate plan polls.
   const buildAll = useJob(
     () => api.startStoryBuild(workspaceId),
     async () => {
       const s = await api.getStoryStatuses(workspaceId);
       setStatuses(s.stories ?? {});
       setCounts(extractCounts(s.job?.result));
-      void refresh();
+      if (s.job.status !== "running") {
+        void refresh();
+      }
       return { status: s.job.status, result: s.job.result, error: s.job.error };
     },
+    5000,
+    20000,
+    1.6,
   );
 
   // Dependency waves derived from the plan DAG (wave 0 = no deps; wave k = deps in
@@ -246,6 +257,8 @@ export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
           {counts && (
             <div className="flex flex-wrap items-center gap-3 rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs">
               <span className="text-emerald-400">built {counts.pass_count ?? 0}</span>
+              <span className="text-sky-300">rerun {counts.rebuilt_count ?? counts.pass_count ?? 0}</span>
+              <span className="text-zinc-400">cache hits {counts.cache_hit_count ?? counts.skipped_count ?? 0}</span>
               <span className="text-amber-300">deferred {counts.deferred_count ?? 0}</span>
               <span className="text-zinc-400">pending {counts.pending ?? 0}</span>
               <span className="text-zinc-500">of {counts.story_count ?? plan.items.length} total</span>
@@ -265,6 +278,7 @@ export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
             {rows.map(({ item, rec, status }) => {
               const st = statusStyle(status);
               const { Icon } = st;
+              const testStatus = testResultLabel(rec.test_result);
               return (
                 <li key={item.story_id} className="flex flex-col gap-1 border-b border-zinc-900 py-2">
                   <div className="flex flex-wrap items-baseline gap-3 text-sm">
@@ -276,6 +290,11 @@ export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
                       <Icon className={`w-3.5 h-3.5 ${st.pulse ? "animate-spin" : ""}`} />
                       {st.label}
                     </span>
+                    {status.toLowerCase() === "running" && (rec.phase_label || rec.phase) && (
+                      <span className="text-xs text-indigo-300">
+                        {rec.phase_label ?? rec.phase}
+                      </span>
+                    )}
                     {item.depends_on.length > 0 && (
                       <span className="text-xs text-zinc-500">after {item.depends_on.join(", ")}</span>
                     )}
@@ -302,10 +321,32 @@ export function StoryBuildLab({ workspaceId }: { workspaceId: string }) {
                     </div>
                   )}
 
-                  {rec.test_result && (
+                  {rec.resume && (
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className={rec.resume.cache_hit ? "text-sky-300" : "text-zinc-500"}>
+                        {rec.resume.cache_hit ? "cache hit" : "rebuilt"}
+                      </span>
+                      {rec.resume.reason && (
+                        <span className="text-zinc-600">{rec.resume.reason}</span>
+                      )}
+                    </div>
+                  )}
+
+                  {rec.quality_gate && (
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className={rec.quality_gate.passed ? "text-emerald-400" : "text-red-400"}>
+                        quality {rec.quality_gate.passed ? "passed" : "failed"}
+                      </span>
+                      {rec.quality_gate.score != null && (
+                        <span className="text-zinc-600">score {rec.quality_gate.score}</span>
+                      )}
+                    </div>
+                  )}
+
+                  {testStatus && (
                     <div className="flex items-center gap-1.5 text-xs">
                       <FlaskConical className={`w-3.5 h-3.5 shrink-0 ${st.text}`} />
-                      <span className="text-zinc-400">{rec.test_result}</span>
+                      <span className="text-zinc-400">{testStatus}</span>
                     </div>
                   )}
 

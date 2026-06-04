@@ -12,10 +12,40 @@ def render_html(design: TechnicalDesign) -> str:
         "<!doctype html><html><head><meta charset='utf-8'>",
         "<style>body{font-family:system-ui,sans-serif;margin:2rem;color:#18181b}"
         "h1{font-size:1.4rem}.svc{border:1px solid #e4e4e7;border-radius:8px;padding:1rem;margin:.75rem 0}"
+        "pre{background:#f4f4f5;border:1px solid #e4e4e7;border-radius:6px;padding:1rem;overflow:auto}"
+        "code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem}"
         "table{border-collapse:collapse;margin:.5rem 0}td,th{border:1px solid #e4e4e7;padding:.25rem .5rem;font-size:.85rem}"
         "</style></head><body>",
         f"<h1>Technical Design — {escape(design.repo_slug)} (v{design.version})</h1>",
     ]
+    if design.target_platform:
+        parts.append("<h2>Target Platform</h2><table>")
+        for key, value in design.target_platform.items():
+            parts.append(f"<tr><th>{escape(key)}</th><td>{escape(str(value))}</td></tr>")
+        parts.append("</table>")
+    if design.mermaid_component_diagram:
+        parts.append("<h2>Component Diagram</h2>")
+        parts.append(f"<pre><code class='language-mermaid'>{escape(design.mermaid_component_diagram)}</code></pre>")
+    if design.package_structure:
+        parts.append("<h2>Spring Boot Package Structure</h2>")
+        parts.append("<pre><code>" + escape("\n".join(design.package_structure)) + "</code></pre>")
+    if design.database_design:
+        parts.append("<h2>Database Design</h2>")
+        for db in design.database_design:
+            service = escape(str(db.get("service", "")))
+            schema = escape(str(db.get("schema", "")))
+            parts.append(f"<h3>{service} <small>{schema}</small></h3>")
+            parts.append("<table><tr><th>Legacy resource</th><th>Table</th><th>Entity</th><th>Repository</th><th>Access</th></tr>")
+            for table in db.get("tables", []) if isinstance(db.get("tables"), list) else []:
+                if not isinstance(table, dict):
+                    continue
+                parts.append(
+                    f"<tr><td>{escape(str(table.get('legacy_resource', '')))}</td>"
+                    f"<td>{escape(str(table.get('table', '')))}</td>"
+                    f"<td>{escape(str(table.get('entity', '')))}</td>"
+                    f"<td>{escape(str(table.get('repository', '')))}</td>"
+                    f"<td>{escape(str(table.get('access_pattern', '')))}</td></tr>")
+            parts.append("</table>")
     for svc in design.services:
         parts.append("<div class='svc'>")
         parts.append(f"<h2>{escape(svc.name)} <small>[{escape(svc.bounded_context)} · {escape(svc.deployment)}]</small></h2>")

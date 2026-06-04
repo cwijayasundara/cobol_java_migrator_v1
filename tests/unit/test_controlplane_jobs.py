@@ -236,3 +236,15 @@ def test_concurrent_starts_run_only_one_fn(monkeypatch):
 def test_default_stale_threshold_is_1800(monkeypatch):
     monkeypatch.delenv("JOB_STALE_AFTER_S", raising=False)
     assert jobs_mod._stale_after_s() == 1800.0
+
+
+def test_job_can_finish_incomplete_without_error():
+    runner = JobRunner()
+    runner.inline = True
+
+    out = runner.start("technical_design", "ws-incomplete",
+                       lambda: {"_job_status": "incomplete", "reason": "fallback"})
+
+    assert out["status"] == "incomplete"
+    assert out["error"] is None
+    assert out["result"]["reason"] == "fallback"

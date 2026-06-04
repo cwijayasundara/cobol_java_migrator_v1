@@ -112,6 +112,28 @@ _MIXED = {
 }
 
 
+_UNSAFE_TEST_PATH = {
+    "files": [
+        {
+            "path": "../evil/BadTest.java",
+            "kind": "test",
+            "content": "class BadTest {}",
+        }
+    ]
+}
+
+
+_UNSAFE_IMPL_PATH = {
+    "files": [
+        {
+            "path": "/tmp/Bad.java",
+            "kind": "main",
+            "content": "class Bad {}",
+        }
+    ]
+}
+
+
 # -- schema shape -----------------------------------------------------------
 
 def test_patch_schema_is_files_only_no_shell():
@@ -170,6 +192,35 @@ async def test_generate_story_tests_passes_project_index():
         project_index=["pom.xml", "src/main/java/com/x/Account.java"],
         model="m", max_turns=2, timeout_s=5.0)
     assert "Account.java" in runner.calls[0]["prompt"]
+
+
+async def test_generate_story_tests_includes_allowed_test_scope():
+    runner = FakeRunner(_MIXED)
+    await generate_story_tests(
+        runner=runner, item=_item(), context_pack=_pack(),
+        project_index=[], model="m", max_turns=2, timeout_s=5.0,
+        allowed_paths=["src/test/java/com/x/PostingServiceTest.java"])
+    prompt = runner.calls[0]["prompt"]
+    assert "Allowed test files for this story" in prompt
+    assert "Emit tests ONLY in these files" in prompt
+    assert "src/test/java/com/x/PostingServiceTest.java" in prompt
+
+
+async def test_generate_story_tests_rejects_files_outside_allowed_scope():
+    runner = FakeRunner(_MIXED)
+    with pytest.raises(ValueError, match="outside the allowed test scope"):
+        await generate_story_tests(
+            runner=runner, item=_item(), context_pack=_pack(),
+            project_index=[], model="m", max_turns=2, timeout_s=5.0,
+            allowed_paths=["src/test/java/com/x/AllowedTest.java"])
+
+
+async def test_generate_story_tests_rejects_unsafe_paths_even_without_allowed_scope():
+    runner = FakeRunner(_UNSAFE_TEST_PATH)
+    with pytest.raises(ValueError, match="unsafe generated path"):
+        await generate_story_tests(
+            runner=runner, item=_item(), context_pack=_pack(),
+            project_index=[], model="m", max_turns=2, timeout_s=5.0)
 
 
 async def test_generate_story_tests_runs_tool_free():
@@ -253,14 +304,49 @@ async def test_generate_story_implementation_inlines_failing_tests():
 async def test_generate_story_implementation_inlines_existing_java():
     runner = FakeRunner(_MIXED)
     existing = [GeneratedFile(
-        path="src/main/java/com/x/Account.java", kind="main",
-        content="class Account { long balance; }", evidence=[])]
+        path="src/main/java/com/x/PostingService.java", kind="main",
+        content="class PostingService { long balance; }", evidence=[])]
     await generate_story_implementation(
         runner=runner, item=_item(), context_pack=_pack(),
         failing_tests=[], existing_java=existing, model="m", max_turns=2,
         timeout_s=5.0)
     prompt = runner.calls[0]["prompt"]
-    assert "class Account { long balance; }" in prompt
+    assert "class PostingService { long balance; }" in prompt
+
+
+async def test_generate_story_implementation_includes_allowed_file_scope():
+    runner = FakeRunner(_MIXED)
+    existing = [GeneratedFile(
+        path="src/main/java/com/x/PostingService.java", kind="main",
+        content="class PostingService {}", evidence=[])]
+    await generate_story_implementation(
+        runner=runner, item=_item(), context_pack=_pack(),
+        failing_tests=[], existing_java=existing,
+        allowed_paths=["src/main/java/com/x/PostingService.java"],
+        model="m", max_turns=2, timeout_s=5.0)
+    prompt = runner.calls[0]["prompt"]
+    assert "Allowed production files for this story" in prompt
+    assert "Patch ONLY these production files" in prompt
+    assert "src/main/java/com/x/PostingService.java" in prompt
+
+
+async def test_generate_story_implementation_rejects_files_outside_allowed_scope():
+    runner = FakeRunner(_MIXED)
+    with pytest.raises(ValueError, match="outside the allowed production scope"):
+        await generate_story_implementation(
+            runner=runner, item=_item(), context_pack=_pack(),
+            failing_tests=[], existing_java=[],
+            allowed_paths=["src/main/java/com/x/Allowed.java"],
+            model="m", max_turns=2, timeout_s=5.0)
+
+
+async def test_generate_story_implementation_rejects_unsafe_paths_even_without_allowed_scope():
+    runner = FakeRunner(_UNSAFE_IMPL_PATH)
+    with pytest.raises(ValueError, match="unsafe generated path"):
+        await generate_story_implementation(
+            runner=runner, item=_item(), context_pack=_pack(),
+            failing_tests=[], existing_java=[], model="m", max_turns=2,
+            timeout_s=5.0)
 
 
 async def test_generate_story_implementation_grounded_only_no_invention():

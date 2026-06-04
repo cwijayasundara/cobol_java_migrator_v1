@@ -16,6 +16,7 @@ quality gates, then writes the shells on top. Same TechnicalDesign -> same files
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -100,6 +101,58 @@ def _java_path(pkg: str, class_name: str) -> str:
     return f"src/main/java/{pkg_dir}/{class_name}.java"
 
 
+def _resource_slug(raw: str) -> str:
+    return _PKG_SAFE.sub("_", raw.lower()).strip("_") or "resource"
+
+
+def _service_root_package(base_pkg: str, service: TechnicalService) -> str:
+    leaf = service.name[:-8] if service.name.endswith("-service") else service.name
+    return f"{base_pkg}.{_PKG_SAFE.sub('', leaf.lower()) or 'service'}"
+
+
+def _request_type(contract: ApiContract) -> str:
+    return java_identifier(contract.request_model or f"{contract.name}Request")
+
+
+def _response_type(contract: ApiContract) -> str:
+    return java_identifier(contract.response_model or f"{contract.name}Response")
+
+
+def _java_column_type(sql_type: str) -> str:
+    t = sql_type.upper()
+    if "BIGINT" in t:
+        return "Long"
+    if "INT" in t:
+        return "Integer"
+    if "DECIMAL" in t or "NUMERIC" in t:
+        return "java.math.BigDecimal"
+    if "TIMESTAMP" in t:
+        return "java.time.OffsetDateTime"
+    if "DATE" in t:
+        return "java.time.LocalDate"
+    if "BOOL" in t:
+        return "Boolean"
+    return "String"
+
+
+def _db_table_for(design: TechnicalDesign, service: TechnicalService,
+                  persistence: PersistenceDesign) -> dict:
+    for db in design.database_design:
+        if not isinstance(db, dict) or db.get("service") != service.name:
+            continue
+        for table in db.get("tables", []) if isinstance(db.get("tables"), list) else []:
+            if isinstance(table, dict) and table.get("legacy_resource") == persistence.resource:
+                return table
+    return {}
+
+
+def _db_schema_for(design: TechnicalDesign, service: TechnicalService) -> dict:
+    for db in design.database_design:
+        if isinstance(db, dict) and db.get("service") == service.name:
+            return db
+    return {}
+
+
 def _application_shell(pkg: str, app_class: str) -> ShellFile:
     content = f"""package {pkg};
 
@@ -116,36 +169,49 @@ public class {app_class} {{
     return ShellFile(path=_java_path(pkg, app_class), content=content)
 
 
+def _dto_shell(pkg: str, service: TechnicalService, class_name: str) -> ShellFile:
+    content = f"""package {pkg};
+
+{_marker(service)}
+public record {class_name}() {{
+}}
+"""
+    return ShellFile(path=_java_path(pkg, class_name), content=content)
+
+
 def _controller_shell(pkg: str, service: TechnicalService,
                       contract: ApiContract) -> ShellFile:
     class_name = java_identifier(contract.name) + "Controller"
     mapping = _http_mapping(contract.method)
     path = contract.path or "/"
-    # Return `Object` — NOT the contract's request/response_model. Those DTO names are
-    # design intent, not generated types; referencing them would be `cannot find symbol`
-    # at compile time and break the "shells compile" guarantee. Real DTOs are a later
-    # story's job. The contract name/method/path mapping is still encoded.
+    request_type = _request_type(contract)
+    response_type = _response_type(contract)
+    body_arg = "" if contract.method.upper() == "GET" else f"@RequestBody {request_type} request"
+    response_expr = f"new {response_type}()"
     # Import only the mapping annotation actually used, so the checkstyle UnusedImports
     # gate stays green. RequestMapping is the @{mapping} for unrecognized methods, so
     # avoid importing it twice.
     mapping_import = (
         "" if mapping == "RequestMapping"
         else f"import org.springframework.web.bind.annotation.{mapping};\n")
+    request_body_import = (
+        "import org.springframework.web.bind.annotation.RequestBody;\n"
+        if body_arg else "")
     content = f"""package {pkg};
 
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 {mapping_import}
+{request_body_import}
 {_marker(service)}
 @RestController
 @RequestMapping("{path}")
 public class {class_name} {{
 
     @{mapping}
-    public Object handle() {{
+    public {response_type} handle({body_arg}) {{
         // TODO: implement API contract '{contract.name}' ({contract.method} {path})
-        throw new UnsupportedOperationException(
-            "TODO: story {_story_ids(service)} — {contract.name}");
+        return {response_expr};
     }}
 }}
 """
@@ -173,27 +239,55 @@ public class {class_name} {{
 
 
 def _entity_shell(pkg: str, service: TechnicalService,
-                  persistence: PersistenceDesign) -> ShellFile:
+                  persistence: PersistenceDesign, table: dict) -> ShellFile:
     class_name = java_identifier(persistence.resource)
+    table_name = str(table.get("table") or _resource_slug(persistence.resource))
+    columns = table.get("columns") if isinstance(table.get("columns"), list) else []
+    if not columns:
+        columns = [{"name": "id", "type": "BIGINT", "primary_key": True, "nullable": False}]
+
+    imports = ["import jakarta.persistence.Column;", "import jakarta.persistence.Entity;",
+               "import jakarta.persistence.Id;", "import jakarta.persistence.Table;"]
+    fields: list[str] = []
+    accessors: list[str] = []
+    for column in columns:
+        if not isinstance(column, dict) or not column.get("name"):
+            continue
+        name = str(column["name"])
+        field = _PKG_SAFE.sub("_", name.lower()).strip("_") or "value"
+        java_type = _java_column_type(str(column.get("type", "VARCHAR")))
+        col_bits = [f'name = "{name}"']
+        if column.get("nullable") is False:
+            col_bits.append("nullable = false")
+        if column.get("unique"):
+            col_bits.append("unique = true")
+        if java_type.startswith("java."):
+            imports.append(f"import {java_type};")
+            java_type = java_type.rsplit(".", 1)[1]
+        annotation = "@Id" if column.get("primary_key") else f"@Column({', '.join(col_bits)})"
+        fields.append(f"    {annotation}\n    private {java_type} {field};")
+        method = java_identifier(field)
+        accessors.append(f"""
+    public {java_type} get{method}() {{
+        return this.{field};
+    }}
+
+    public void set{method}({java_type} {field}) {{
+        this.{field} = {field};
+    }}
+""")
+    import_block = "\n".join(sorted(set(imports)))
     content = f"""package {pkg};
 
-import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
+{import_block}
 
 {_marker(service)}
 @Entity
+@Table(name = "{table_name}")
 public class {class_name} {{
 
-    @Id
-    private Long id;
-
-    public Long getId() {{
-        return this.id;
-    }}
-
-    public void setId(Long id) {{
-        this.id = id;
-    }}
+{chr(10).join(fields)}
+{''.join(accessors)}
 }}
 """
     return ShellFile(path=_java_path(pkg, class_name), content=content)
@@ -217,6 +311,40 @@ public interface {class_name} extends JpaRepository<{entity}, Long> {{
     return ShellFile(path=_java_path(pkg, class_name), content=content)
 
 
+def _migration_shell(design: TechnicalDesign, service: TechnicalService,
+                     persistence: PersistenceDesign, table: dict) -> ShellFile | None:
+    db = _db_schema_for(design, service)
+    schema = str(db.get("schema") or _resource_slug(service.name))
+    location = str(db.get("migration_location") or f"src/main/resources/db/migration/{schema}")
+    table_name = str(table.get("table") or _resource_slug(persistence.resource))
+    columns = table.get("columns") if isinstance(table.get("columns"), list) else []
+    if not columns:
+        return None
+    lines = [f"CREATE SCHEMA IF NOT EXISTS {schema};", "",
+             f"CREATE TABLE IF NOT EXISTS {schema}.{table_name} ("]
+    col_defs: list[str] = []
+    constraints: list[str] = []
+    for column in columns:
+        if not isinstance(column, dict) or not column.get("name"):
+            continue
+        name = str(column["name"])
+        sql_type = str(column.get("type") or "VARCHAR(255)")
+        bits = [f"  {name} {sql_type}"]
+        if column.get("primary_key"):
+            bits.append("PRIMARY KEY")
+        if column.get("nullable") is False:
+            bits.append("NOT NULL")
+        if column.get("unique") and not column.get("primary_key"):
+            constraints.append(f"  UNIQUE ({name})")
+        col_defs.append(" ".join(bits))
+    lines.append(",\n".join(col_defs + constraints))
+    lines.append(");")
+    content = "\n".join(lines) + "\n"
+    return ShellFile(
+        path=f"{location.rstrip('/')}/V001__create_{table_name}.sql",
+        content=content)
+
+
 def design_to_shells(design: TechnicalDesign) -> list[ShellFile]:
     """Pure: a TechnicalDesign -> the deterministic set of Java shell files (relative
     path + content). No disk I/O. Emits a `@SpringBootApplication` entrypoint plus, per
@@ -235,12 +363,22 @@ def design_to_shells(design: TechnicalDesign) -> list[ShellFile]:
 
     shells: list[ShellFile] = [_application_shell(pkg, app_class)]
     for service in design.services:
+        root_pkg = _service_root_package(pkg, service)
+        api_pkg = f"{root_pkg}.api"
+        app_pkg = f"{root_pkg}.application"
+        persistence_pkg = f"{root_pkg}.infrastructure.persistence"
         for contract in service.api_contracts:
-            shells.append(_controller_shell(pkg, service, contract))
-        shells.append(_service_shell(pkg, service))
+            shells.append(_dto_shell(api_pkg, service, _request_type(contract)))
+            shells.append(_dto_shell(api_pkg, service, _response_type(contract)))
+            shells.append(_controller_shell(api_pkg, service, contract))
+        shells.append(_service_shell(app_pkg, service))
         for persistence in service.persistence:
-            shells.append(_entity_shell(pkg, service, persistence))
-            shells.append(_repository_shell(pkg, service, persistence))
+            table = _db_table_for(design, service, persistence)
+            shells.append(_entity_shell(persistence_pkg, service, persistence, table))
+            shells.append(_repository_shell(persistence_pkg, service, persistence))
+            migration = _migration_shell(design, service, persistence, table)
+            if migration is not None:
+                shells.append(migration)
 
     by_path: dict[str, ShellFile] = {}
     collisions: list[str] = []
@@ -264,6 +402,9 @@ def scaffold_from_design(parent: Path, design: TechnicalDesign) -> Path:
     Returns the module root. Deterministic: same TechnicalDesign -> same files."""
     base_package = base_package_for(design.repo_slug)
     module = module_name_for(design.repo_slug)
+    root = Path(parent) / module
+    if root.exists():
+        shutil.rmtree(root)
     root = scaffold_module(Path(parent), module=module, base_package=base_package)
     for shell in design_to_shells(design):
         dest = root / shell.path

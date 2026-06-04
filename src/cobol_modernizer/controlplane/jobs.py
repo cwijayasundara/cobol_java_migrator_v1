@@ -64,7 +64,12 @@ class JobRunner:
             owner = None if self.inline else threading.current_thread()
             try:
                 result = fn()
-                self._finish(kind, wid, "done", owner=owner, result=result)
+                status = "done"
+                if isinstance(result, dict):
+                    requested = result.get("_job_status")
+                    if requested in {"done", "incomplete", "partial"}:
+                        status = requested
+                self._finish(kind, wid, status, owner=owner, result=result)
                 logger.info("%s job done for %s in %.1fs", kind, wid, time.monotonic() - t0)
             except Exception as exc:  # noqa: BLE001 — record every failure
                 self._finish(kind, wid, "failed", owner=owner,

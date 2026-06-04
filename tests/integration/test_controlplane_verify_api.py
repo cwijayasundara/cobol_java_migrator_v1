@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
-from cobol_modernizer.persistence.tables import Base, Workspace, JourneyStage, Artifact, Gate
+from cobol_modernizer.persistence.tables import Base, Workspace, JourneyStage, Artifact, Gate, WorkUnit
 from cobol_modernizer.api import app
 from cobol_modernizer.controlplane.deps import get_session, get_neo4j
 
@@ -217,6 +217,15 @@ def _equiv_checks(eng):
         ).scalars().all()
 
 
+def _work_units(eng, stage="verify"):
+    with Session(eng) as s:
+        return s.execute(
+            select(WorkUnit).where(WorkUnit.workspace_id == "ws-1",
+                                   WorkUnit.stage == stage)
+            .order_by(WorkUnit.created_at, WorkUnit.id)
+        ).scalars().all()
+
+
 def _gate(eng, gate_key: str):
     with Session(eng) as s:
         return s.execute(
@@ -268,6 +277,11 @@ def test_fanout_all_pass_workspace_passes_and_gate_upserted():
         assert body["verdict"] == "pass"
         assert all(p["ok"] for p in body["per_story_verdicts"])
         assert _stage(eng) == "passed"
+        units = _work_units(eng)
+        assert {(u.unit_type, u.unit_key, u.status) for u in units} == {
+            ("story-equivalence", "S1", "succeeded"),
+            ("story-equivalence", "S2", "succeeded"),
+        }
         eq_gate = _gate(eng, "equivalence")
         assert eq_gate is not None and eq_gate.status == "passed"
         sb_gate = _gate(eng, "story_behavior")
@@ -306,6 +320,12 @@ def test_fanout_soft_timeout_returns_partial_not_crash(monkeypatch):
         checks = _equiv_checks(eng)
         assert len(checks) == 1
         assert checks[0].evidence_map["verdict"] == "fail"
+        units = _work_units(eng)
+        assert len(units) == 1
+        assert units[0].unit_type == "story-equivalence"
+        assert units[0].status == "failed"
+        assert units[0].payload["partial"] is True
+        assert units[0].error_cause == "timeout"
         assert _stage(eng) == "failed"
     finally:
         app.dependency_overrides.clear()

@@ -7,7 +7,7 @@ from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
 from cobol_modernizer.persistence.tables import (
-    Base, Workspace, JourneyStage, Gate, Budget, AgentRun, Artifact,
+    AgentRun, Artifact, Base, Budget, Gate, JourneyStage, WorkUnit, Workspace,
 )
 from cobol_modernizer.controlplane.deps import get_session
 
@@ -51,6 +51,32 @@ def cp_client():
                           content_hash="sha256:abc",
                           evidence_map={"REQ-001": ["CBACT01C", "CBACT01C.1000-MAIN"]},
                           created_at=TS))
+        seed.add(WorkUnit(id="wu-domain-decompose", workspace_id="ws-1",
+                          agent_run_id="run-1", repo_slug="aws-mf-carddemo",
+                          stage="domain-design", unit_type="decomposition",
+                          unit_key="decompose", input_hash="hash-domain-1",
+                          status="succeeded", attempt=1, model="claude-sonnet-4-6",
+                          timeout_s=300, max_turns=6,
+                          token_usage={"input": 100, "output": 50},
+                          cost_usd=Decimal("0.01"), payload={"contexts": []},
+                          parent_unit_ids=[], created_at=TS))
+        seed.add(WorkUnit(id="wu-domain-aggregate", workspace_id="ws-1",
+                          agent_run_id="run-1", repo_slug="aws-mf-carddemo",
+                          stage="domain-design", unit_type="tactical-aggregate",
+                          unit_key="Accounts", input_hash="hash-domain-2",
+                          status="running", attempt=2, model="claude-sonnet-4-6",
+                          timeout_s=300, max_turns=4,
+                          token_usage={}, cost_usd=Decimal("0"),
+                          payload={}, parent_unit_ids=[], created_at=TS))
+        seed.add(WorkUnit(id="wu-tech-service", workspace_id="ws-1",
+                          agent_run_id="run-1", repo_slug="aws-mf-carddemo",
+                          stage="technical-design", unit_type="service",
+                          unit_key="accounts-service", input_hash="hash-tech-1",
+                          status="failed", attempt=1, model="claude-sonnet-4-6",
+                          timeout_s=300, max_turns=6,
+                          token_usage={}, cost_usd=Decimal("0"),
+                          payload={}, error_cause="timeout",
+                          parent_unit_ids=[], created_at=TS))
         seed.commit()
 
     from cobol_modernizer.api import app

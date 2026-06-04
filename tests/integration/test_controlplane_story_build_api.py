@@ -15,10 +15,12 @@ from sqlalchemy.pool import StaticPool
 
 from cobol_modernizer.api import app
 from cobol_modernizer.codegen import story_storage
+from cobol_modernizer.codegen.story_plan import StoryCodegenItem
 from cobol_modernizer.controlplane import build_stories as bs
 from cobol_modernizer.controlplane import jobs
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.persistence.tables import Base, JourneyStage, Workspace
+from cobol_modernizer.technical_design.schema import TechnicalDesign
 
 
 # --------------------------------------------------------------------------- #
@@ -46,6 +48,25 @@ _SERVICES = [{"name": "PostingService", "bounded_context": "Posting",
               "api_contracts": [{"name": "PostTxn", "method": "POST", "path": "/post"}],
               "persistence": [{"resource": "Account", "access_pattern": "repository"}],
               "evidence_refs": ["CBPOST1M"]}]
+
+
+def test_package_lines_fallback_is_generic_when_technical_package_structure_missing():
+    technical = TechnicalDesign(
+        repo_slug="banking-suite/core-ledger",
+        services=[],
+        package_structure=[],
+    )
+    item = StoryCodegenItem(
+        story_id="US-1", bounded_context="Posting",
+        service_name="functionalrequirements-service",
+        acceptance_criteria_ids=["AC-1"], cobol_refs=["PROG1"])
+
+    assert bs._package_lines_for_item(technical, item) == [
+        "com.cobolmodernizer.coreledger.functionalrequirements.api",
+        "com.cobolmodernizer.coreledger.functionalrequirements.application",
+        "com.cobolmodernizer.coreledger.functionalrequirements.domain",
+        "com.cobolmodernizer.coreledger.functionalrequirements.infrastructure",
+    ]
 
 
 class _FakeNeo4j:
@@ -407,6 +428,26 @@ def test_all_deferred_fails_gate_nothing_genuinely_built(monkeypatch, tmp_path):
         app.dependency_overrides.clear()
 
 
+def test_targeted_story_deferred_finishes_job_with_counts(monkeypatch, tmp_path):
+    # A single-story retry can end deferred while the operator iterates. The job should
+    # finish with counts instead of surfacing as a failed/background-stuck job.
+    c, eng, tp, stub = _setup(
+        monkeypatch, tmp_path,
+        status_for={"US-1": "deferred", "US-2": "passed"})
+    try:
+        resp = c.post("/api/workspaces/ws-1/build/stories/US-1")
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["status"] == "done", body
+        result = body["result"]["result"]
+        assert result["story_id"] == "US-1"
+        assert result["pass_count"] == 0
+        assert result["deferred_count"] == 1
+        assert result["pending"] == 1
+    finally:
+        app.dependency_overrides.clear()
+
+
 # --------------------------------------------------------------------------- #
 # Restart-fresh — a second POST regenerates ALL stories (no cross-run resume)  #
 # --------------------------------------------------------------------------- #
@@ -505,6 +546,24 @@ def test_get_stories_returns_status_map_and_job(monkeypatch, tmp_path):
         body = resp.json()
         assert body["stories"]["US-1"]["status"] == "passed"
         assert body["job"]["status"] == "idle"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_stories_does_not_show_stale_running_when_no_job(monkeypatch, tmp_path):
+    c, eng, tp, stub = _setup(monkeypatch, tmp_path)
+    try:
+        with Session(eng) as s:
+            story_storage.record_story_status(
+                s, workspace_id="ws-1", story_id="US-1",
+                payload={"status": "running", "phase": "implementation"})
+            s.commit()
+
+        body = c.get("/api/workspaces/ws-1/build/stories").json()
+
+        assert body["job"]["status"] == "idle"
+        assert body["stories"]["US-1"]["status"] == "pending"
+        assert body["stories"]["US-1"]["phase"] == "stale-running"
     finally:
         app.dependency_overrides.clear()
 

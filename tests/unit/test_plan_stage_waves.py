@@ -17,7 +17,8 @@ def test_run_plan_includes_delivery_waves(monkeypatch):
     class _WS:
         repo_slug = "demo"
     monkeypatch.setattr(analysis, "_workspace", lambda s, w: _WS())
-    monkeypatch.setattr(analysis, "_mark_passed", lambda *a, **k: None)
+    monkeypatch.setattr(analysis, "_mark_stage_status", lambda *a, **k: None)
+    monkeypatch.setattr(analysis, "upsert_gate", lambda *a, **k: None)
 
     class _Sess:
         def flush(self):

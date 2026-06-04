@@ -44,7 +44,7 @@ export interface AgentRun {
   error: string | null;
 }
 
-export type EvidenceMap = Record<string, string[]>; // requirement_id -> [graph ids / source refs]
+export type EvidenceMap = Record<string, unknown>; // requirement_id -> lineage refs or artifact metadata
 
 export interface Artifact {
   id: string;

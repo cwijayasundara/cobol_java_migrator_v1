@@ -208,7 +208,46 @@ export const handlers = [
   http.get("/api/workspaces/:id/technical-design", () =>
     HttpResponse.json({
       status: "done", error: null,
-      result: { repo_slug: "carddemo-mini", version: 1, services: 3 },
+      result: {
+        repo_slug: "carddemo-mini",
+        version: 1,
+        services: 3,
+        generation_mode: "deterministic",
+        quality_passed: true,
+        target_platform: {
+          framework: "Spring Boot",
+          spring_boot_version: "4.0.6",
+          java_version: "25",
+          base_package: "com.cobolmodernizer.carddemomini",
+        },
+        mermaid_component_diagram: "flowchart LR\n  client[External clients]\n  client --> posting_service_api",
+        package_structure: [
+          "com.cobolmodernizer.carddemomini",
+          "com.cobolmodernizer.carddemomini.posting",
+          "com.cobolmodernizer.carddemomini.posting.api",
+          "com.cobolmodernizer.carddemomini.posting.application",
+          "com.cobolmodernizer.carddemomini.posting.domain",
+          "com.cobolmodernizer.carddemomini.posting.infrastructure.persistence",
+        ],
+        database_design: [{
+          service: "posting-service",
+          schema: "posting",
+          migration_tool: "Flyway",
+          migration_location: "src/main/resources/db/migration/posting",
+          tables: [{
+            legacy_resource: "ACCTFILE",
+            table: "acctfile",
+            entity: "Acctfile",
+            repository: "AcctfileRepository",
+            access_pattern: "legacy-mimic",
+            columns: [
+              { name: "id", type: "BIGINT", nullable: false, primary_key: true },
+              { name: "legacy_record_key", type: "VARCHAR(128)", nullable: false, unique: true },
+              { name: "legacy_payload", type: "JSON", nullable: false },
+            ],
+          }],
+        }],
+      },
     })),
   http.get("/api/workspaces/:id/technical-design/html", () =>
     new HttpResponse("<html><body>Technical Design v1</body></html>",

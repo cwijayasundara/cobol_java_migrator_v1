@@ -36,6 +36,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+import hashlib
 
 from fastapi import APIRouter, Depends, HTTPException
 from neo4j.exceptions import DriverError, Neo4jError
@@ -50,6 +51,7 @@ from cobol_modernizer.controlplane.verify_storage import (
     record_equivalence_check, record_verify_report,
 )
 from cobol_modernizer.equivalence.lab import EquivalenceLab
+from cobol_modernizer.persistence.repo import PgRepo
 from cobol_modernizer.persistence.tables import Workspace
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,52 @@ def _source_root() -> Path:
 
 def _output_root() -> Path:
     return Path(os.environ.get("CODEGEN_OUTPUT_DIR", "codegen_output"))
+
+
+def _repair_hash(*, req: VerifyRequest, story_id: str, phase: str,
+                 attempt: int = 0, defect: dict | None = None) -> str:
+    payload = {
+        "story_id": story_id,
+        "phase": phase,
+        "attempt": attempt,
+        "program": req.program,
+        "record": req.record,
+        "record_key": req.record_key,
+        "candidate_records": req.candidate_records,
+        "golden_records": req.golden_records,
+        "tolerance_yaml": req.tolerance_yaml,
+        "dialect": req.dialect,
+        "defect": defect or {},
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _equivalence_payload(sub: dict[str, Any], *, story_id: str,
+                         phase: str, attempt: int) -> dict[str, Any]:
+    return {
+        "story_id": story_id,
+        "phase": phase,
+        "attempt": attempt,
+        "verdict": sub.get("verdict"),
+        "ok": sub.get("ok"),
+        "defect_count": sub.get("defect_count", 0),
+        "records_compared": sub.get("records_compared", 0),
+        "open_questions": sub.get("open_questions", []),
+    }
+
+
+def _mark_equivalence_unit(ledger: PgRepo, unit, sub: dict[str, Any],
+                           *, story_id: str, phase: str, attempt: int) -> None:
+    payload = _equivalence_payload(
+        sub, story_id=story_id, phase=phase, attempt=attempt)
+    if sub.get("ok"):
+        ledger.mark_work_unit_succeeded(unit.id, payload=payload)
+    else:
+        ledger.mark_work_unit_failed(
+            unit.id,
+            error_cause="equivalence failed",
+            payload=payload)
 
 
 # --------------------------------------------------------------------------- #
@@ -136,6 +184,7 @@ def _repair_story_java(*, session: Session, neo4j, workspace: Workspace,
     from cobol_modernizer.agent.deps import GraphDeps
     from cobol_modernizer.agent.harness import SdkAgentRunner
     from cobol_modernizer.brd.storage import BRDStorage
+    from cobol_modernizer.codegen.behavior_model import build_behavior_model
     from cobol_modernizer.codegen.patch_agent import generate_story_implementation
     from cobol_modernizer.codegen.scaffold_from_design import scaffold_from_design
     from cobol_modernizer.codegen.story_context import build_story_context
@@ -171,9 +220,13 @@ def _repair_story_java(*, session: Session, neo4j, workspace: Workspace,
             {"cobol_ref": r} for r in item.cobol_refs]}]}},
         max_units=int(os.environ.get("CODEGEN_PACK_MAX_UNITS", "200")),
         max_chars=int(os.environ.get("CODEGEN_PACK_MAX_CHARS", "60000")))
+    behavior_model = build_behavior_model(item, pack)
     context_pack = build_story_context(
         item, story=story, service=service, aggregate=aggregate,
-        brd_requirements=brd_reqs, completed_summaries=[], source_pack=pack)
+        brd_requirements=brd_reqs, completed_summaries=[], source_pack=pack,
+        behavior_model=behavior_model,
+        package_lines=build_stories._package_lines_for_item(technical, item),
+        database_lines=build_stories._database_lines_for_item(technical, item))
 
     feedback = _repair_feedback_for(defect, attempt=attempt)
     runner = SdkAgentRunner()
@@ -201,10 +254,24 @@ def run_verify_repair(*, session: Session, neo4j, workspace: Workspace,
     lab = _make_lab(neo4j, repo_slug=workspace.repo_slug, req=req)
     lab.register_golden(workspace_id=workspace.id, slice_name=story_id,
                         record=req.record, records=req.golden_records)
+    ledger = PgRepo(session)
+    agent_run = ledger.start_run(
+        workspace_id=workspace.id, stage_id=None, role="verify-repair",
+        model="deterministic-equivalence+story-codegen", started_by="system")
+    session.flush()
 
     # Confirm the defect with a fresh equivalence run (seam resolves at call time).
+    confirm_unit = ledger.create_work_unit(
+        workspace_id=workspace.id, repo_slug=workspace.repo_slug, stage="verify",
+        unit_type="verify-repair-equivalence", unit_key=f"{story_id}:confirm",
+        input_hash=_repair_hash(req=req, story_id=story_id, phase="confirm"),
+        agent_run_id=agent_run.id, model="deterministic-equivalence")
+    ledger.mark_work_unit_running(
+        confirm_unit.id, model="deterministic-equivalence")
     sub = _run_story_equivalence(lab, workspace_id=workspace.id,
                                  slice_name=story_id, req=req)
+    _mark_equivalence_unit(
+        ledger, confirm_unit, sub, story_id=story_id, phase="confirm", attempt=0)
     attempts = 0
     max_attempts = _max_repair_attempts()
 
@@ -214,13 +281,44 @@ def run_verify_repair(*, session: Session, neo4j, workspace: Workspace,
         defect = (sub.get("defects") or [None])[0]
         logger.info("verify-repair: story %s repair attempt %d (defect=%s)",
                     story_id, attempts, (defect or {}).get("field"))
-        _repair_story_java(
-            session=session, neo4j=neo4j, workspace=workspace,
-            source_root=_source_root(), output_root=_output_root(),
-            story_id=story_id, defect=defect,
-            candidate_records=req.candidate_records, attempt=attempts)
+        repair_unit = ledger.create_work_unit(
+            workspace_id=workspace.id, repo_slug=workspace.repo_slug,
+            stage="verify", unit_type="verify-repair-codegen",
+            unit_key=f"{story_id}:attempt-{attempts}",
+            input_hash=_repair_hash(
+                req=req, story_id=story_id, phase="repair-codegen",
+                attempt=attempts, defect=defect),
+            agent_run_id=agent_run.id, model="story-codegen")
+        ledger.mark_work_unit_running(repair_unit.id, model="story-codegen")
+        try:
+            changed_files = _repair_story_java(
+                session=session, neo4j=neo4j, workspace=workspace,
+                source_root=_source_root(), output_root=_output_root(),
+                story_id=story_id, defect=defect,
+                candidate_records=req.candidate_records, attempt=attempts)
+        except Exception as exc:
+            ledger.mark_work_unit_failed(
+                repair_unit.id, error_cause=f"{type(exc).__name__}: {exc}")
+            raise
+        ledger.mark_work_unit_succeeded(
+            repair_unit.id,
+            payload={"story_id": story_id, "attempt": attempts,
+                     "changed_files": list(changed_files)})
+        recheck_unit = ledger.create_work_unit(
+            workspace_id=workspace.id, repo_slug=workspace.repo_slug,
+            stage="verify", unit_type="verify-repair-equivalence",
+            unit_key=f"{story_id}:attempt-{attempts}",
+            input_hash=_repair_hash(
+                req=req, story_id=story_id, phase="repair-equivalence",
+                attempt=attempts),
+            agent_run_id=agent_run.id, model="deterministic-equivalence")
+        ledger.mark_work_unit_running(
+            recheck_unit.id, model="deterministic-equivalence")
         sub = _run_story_equivalence(lab, workspace_id=workspace.id,
                                      slice_name=story_id, req=req)
+        _mark_equivalence_unit(
+            ledger, recheck_unit, sub, story_id=story_id,
+            phase="repair-equivalence", attempt=attempts)
 
     resolved = bool(sub["ok"])
 

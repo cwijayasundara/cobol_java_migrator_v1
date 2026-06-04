@@ -17,7 +17,8 @@ from cobol_modernizer.codegen.patch_agent import StoryPatch
 from cobol_modernizer.codegen.story_plan import StoryCodegenItem, StoryCodegenStatus
 from cobol_modernizer.codegen.budget import BuildBudget, StoryBudget
 from cobol_modernizer.codegen.story_runner import (
-    build_max_concurrency, run_story, run_story_plan, run_story_plan_until_done,
+    _llm_tests_enabled, _write_files, build_max_concurrency, run_story, run_story_plan,
+    run_story_plan_until_done,
 )
 from cobol_modernizer.codegen.story_storage import (
     STORY_CODEGEN_STATUS_KIND, get_status_map, get_story_record,
@@ -25,6 +26,7 @@ from cobol_modernizer.codegen.story_storage import (
 from cobol_modernizer.codegen.test_runner import StoryTestResult, StoryTestStatus
 from cobol_modernizer.backlog.schema import AcceptanceCriterion, UserStory
 from cobol_modernizer.persistence.tables import Artifact, Base, Workspace
+from cobol_modernizer.persistence.repo import PgRepo
 
 
 # --------------------------------------------------------------------------- #
@@ -55,6 +57,17 @@ def session():
     s.close()
 
 
+@pytest.fixture(autouse=True)
+def _legacy_test_generation_for_existing_runner_tests(monkeypatch):
+    """Most historical runner tests assert the injected gen_tests lifecycle seam.
+
+    Production now defaults STORY_LLM_TESTS off; individual tests that verify the new
+    optimized default explicitly delete this env var.
+    """
+    monkeypatch.setenv("STORY_LLM_TESTS", "1")
+    monkeypatch.setenv("STORY_LLM_IMPL", "1")
+
+
 def _clock():
     """A deterministic monotonic clock: each call advances by 1.0s."""
     return itertools.count(start=0.0, step=1.0).__next__
@@ -75,6 +88,57 @@ def _pack(item):
     return build_story_context(
         item, story=story, service=None, aggregate=None, brd_requirements=[],
         completed_summaries=[], source_pack="COBOL HERE")
+
+
+def _pack_with_packages(item):
+    story = UserStory(
+        id=item.story_id, epic_id="E-1", actor="user",
+        title="Post a transaction", narrative="As a user...", context="Posting",
+        acceptance_criteria=[AcceptanceCriterion(id=a, statement=f"crit {a}")
+                             for a in item.acceptance_criteria_ids])
+    return build_story_context(
+        item, story=story, service=None, aggregate=None, brd_requirements=[],
+        completed_summaries=[], source_pack="COBOL HERE",
+        package_lines=[
+            "com.cobolmodernizer.carddemomini.posting.api",
+            "com.cobolmodernizer.carddemomini.posting.application",
+        ])
+
+
+def _pack_with_behavior(item):
+    story = UserStory(
+        id=item.story_id, epic_id="E-1", actor="user",
+        title="Post a transaction", narrative="As a user...", context="Posting",
+        acceptance_criteria=[AcceptanceCriterion(id=a, statement=f"crit {a}")
+                             for a in item.acceptance_criteria_ids])
+    return build_story_context(
+        item, story=story, service=None, aggregate=None, brd_requirements=[],
+        completed_summaries=[], source_pack="COBOL HERE",
+        behavior_model={"io_operations": ["WRITE TRANSACT-REC"]})
+
+
+def _pack_with_packages_and_behavior(item):
+    story = UserStory(
+        id=item.story_id, epic_id="E-1", actor="user",
+        title="Post a transaction", narrative="As a user...", context="Posting",
+        acceptance_criteria=[AcceptanceCriterion(id=a, statement=f"crit {a}")
+                             for a in item.acceptance_criteria_ids])
+    return build_story_context(
+        item, story=story, service=None, aggregate=None, brd_requirements=[],
+        completed_summaries=[], source_pack="COBOL HERE",
+        package_lines=[
+            "com.cobolmodernizer.carddemomini.posting.api",
+            "com.cobolmodernizer.carddemomini.posting.application",
+        ],
+        behavior_model={
+            "conditions": ["IF WS-AMOUNT > WS-CREDIT-LIMIT"],
+            "field_moves": ['"Y" -> WS-DECLINED-FLAG'],
+            "calculations": ["WS-BALANCE = WS-BALANCE + WS-AMOUNT"],
+            "io_operations": ["WRITE TRANSACT-REC"],
+            "status_rules": ["INVALID KEY MOVE NF TO WS-STATUS"],
+            "cics_operations": ["EXEC CICS SEND MAP('TRNMAP') END-EXEC"],
+            "calls": ["ABEND-HANDLER"],
+        })
 
 
 def _test_patch(story_id="US-1", ac_ids=("AC-1",)):
@@ -126,6 +190,17 @@ def _make_gen_tests(patch=None, recorder=None):
         if patch is not None:
             return patch
         item = kwargs["item"]
+        allowed = kwargs.get("allowed_paths") or []
+        if allowed:
+            body = (
+                f"// {item.story_id} "
+                + " ".join(item.acceptance_criteria_ids)
+                + f"\nclass {allowed[0].rsplit('/', 1)[-1].removesuffix('.java')} {{}}")
+            return StoryPatch(
+                files=[GeneratedFile(
+                    path=allowed[0], kind="test", content=body,
+                    evidence=[item.story_id, *item.acceptance_criteria_ids])],
+                rationale="tests for posting")
         return _test_patch(story_id=item.story_id,
                            ac_ids=tuple(item.acceptance_criteria_ids))
     return gen
@@ -139,6 +214,15 @@ def _make_gen_impl(patch=None, recorder=None):
             return patch
         item = kwargs["item"]
         refs = tuple(item.cobol_refs) or ("CBPOST1M",)
+        allowed = kwargs.get("allowed_paths") or []
+        if allowed:
+            body = (f"// story {item.story_id} grounded in {refs[0]}\n"
+                    "class ScopedStoryImpl {}")
+            return StoryPatch(
+                files=[GeneratedFile(
+                    path=allowed[0], kind="main", content=body,
+                    evidence=[item.story_id, refs[0]])],
+                rationale="impl for posting")
         return _impl_patch(story_id=item.story_id, cobol_refs=refs)
     return gen
 
@@ -178,6 +262,248 @@ async def test_targeted_test_class_derived_from_test_files(session, tmp_path):
     assert run.calls[0]["target"] == "PostUS-1Test"
 
 
+@pytest.mark.asyncio
+async def test_impl_pass_receives_only_story_package_java_and_allowed_paths(session, tmp_path):
+    item = _item()
+    allowed = tmp_path / "src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java"
+    other = tmp_path / "src/main/java/com/cobolmodernizer/carddemomini/statement/application/StatementService.java"
+    allowed.parent.mkdir(parents=True)
+    other.parent.mkdir(parents=True)
+    allowed.write_text("class PostingService {}", encoding="utf-8")
+    other.write_text("class StatementService {}", encoding="utf-8")
+    impl_calls = []
+
+    async def gen_impl(**kwargs):
+        impl_calls.append(kwargs)
+        return StoryPatch(
+            files=[GeneratedFile(
+                path="src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java",
+                kind="main",
+                content=f"// story {item.story_id} grounded in {item.cobol_refs[0]}\nclass PostingService {{}}",
+                evidence=[item.story_id, item.cobol_refs[0]])],
+            rationale="patched allowed service")
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=_pack_with_packages(item), runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=gen_impl, run_tests=run,
+        now=_clock())
+    assert out.status == StoryCodegenStatus.passed
+    existing_paths = [f.path for f in impl_calls[0]["existing_java"]]
+    assert existing_paths == [
+        "src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java"]
+    assert impl_calls[0]["allowed_paths"] == existing_paths
+
+
+@pytest.mark.asyncio
+async def test_tests_pass_receives_story_scoped_allowed_test_path(session, tmp_path, monkeypatch):
+    monkeypatch.setenv("STORY_LLM_TESTS", "1")
+    item = _item(story_id="US-42")
+    scaffold = tmp_path / "src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java"
+    scaffold.parent.mkdir(parents=True)
+    scaffold.write_text("class PostingService {}", encoding="utf-8")
+    calls = []
+
+    async def gen_tests(**kwargs):
+        calls.append(kwargs)
+        return StoryPatch(
+            files=[GeneratedFile(
+                path=kwargs["allowed_paths"][0], kind="test",
+                content=f"// {item.story_id} AC-1\nclass US42AcceptanceTest {{}}",
+                evidence=[item.story_id, "AC-1"])],
+            rationale="scoped tests")
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=_pack_with_packages(item), runner=FakeRunner(),
+        gen_tests=gen_tests, gen_impl=_make_gen_impl(), run_tests=run,
+        now=_clock())
+    assert out.status == StoryCodegenStatus.passed
+    assert calls[0]["allowed_paths"] == [
+        "src/test/java/com/cobolmodernizer/carddemomini/posting/api/US42AcceptanceTest.java"]
+
+
+@pytest.mark.asyncio
+async def test_deterministic_baseline_test_written_before_llm_tests(session, tmp_path, monkeypatch):
+    monkeypatch.setenv("STORY_LLM_TESTS", "1")
+    item = _item(story_id="US-42", ac_ids=("AC-1", "AC-2"))
+    scaffold = tmp_path / "src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java"
+    scaffold.parent.mkdir(parents=True)
+    scaffold.write_text("class PostingService {}", encoding="utf-8")
+    observed = {}
+
+    async def gen_tests(**kwargs):
+        baseline = (
+            tmp_path
+            / "src/test/java/com/cobolmodernizer/carddemomini/posting/api/US42AcceptanceTest.java"
+        )
+        observed["exists_before_llm"] = baseline.exists()
+        observed["content"] = baseline.read_text(encoding="utf-8") if baseline.exists() else ""
+        return StoryPatch(
+            files=[GeneratedFile(
+                path=kwargs["allowed_paths"][0], kind="test",
+                content=(
+                    f"// {item.story_id} AC-1 AC-2\n"
+                    "class US42AcceptanceTest {}"),
+                evidence=[item.story_id, "AC-1", "AC-2"])],
+            rationale="scoped tests")
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=_pack_with_packages(item), runner=FakeRunner(),
+        gen_tests=gen_tests, gen_impl=_make_gen_impl(), run_tests=run,
+        now=_clock())
+    assert out.status == StoryCodegenStatus.passed
+    assert observed["exists_before_llm"] is True
+    assert "story US-42" in observed["content"]
+    assert "AC-1 AC-2" in observed["content"]
+
+
+@pytest.mark.asyncio
+async def test_deterministic_baseline_test_includes_behavior_model_signals(session, tmp_path, monkeypatch):
+    monkeypatch.setenv("STORY_LLM_TESTS", "1")
+    item = _item(story_id="US-42", ac_ids=("AC-1", "AC-2"))
+    scaffold = tmp_path / "src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java"
+    scaffold.parent.mkdir(parents=True)
+    scaffold.write_text("class PostingService {}", encoding="utf-8")
+    observed = {}
+
+    async def gen_tests(**kwargs):
+        baseline = (
+            tmp_path
+            / "src/test/java/com/cobolmodernizer/carddemomini/posting/api/US42AcceptanceTest.java"
+        )
+        observed["content"] = baseline.read_text(encoding="utf-8")
+        return StoryPatch(
+            files=[GeneratedFile(
+                path=kwargs["allowed_paths"][0], kind="test",
+                content=f"// {item.story_id} AC-1 AC-2\nclass US42AcceptanceTest {{}}",
+                evidence=[item.story_id, "AC-1", "AC-2"])],
+            rationale="scoped tests")
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=_pack_with_packages_and_behavior(item), runner=FakeRunner(),
+        gen_tests=gen_tests, gen_impl=_make_gen_impl(), run_tests=run,
+        now=_clock())
+
+    assert out.status == StoryCodegenStatus.passed
+    assert "cobolBehaviorModelSignalsAreTraceable" in observed["content"]
+    assert "IF WS-AMOUNT > WS-CREDIT-LIMIT" in observed["content"]
+    assert '\\"Y\\" -> WS-DECLINED-FLAG' in observed["content"]
+    assert "WRITE TRANSACT-REC" in observed["content"]
+    assert out.quality_gate["checks"]["behavior_signals_represented"] is True
+
+
+@pytest.mark.asyncio
+async def test_package_scoped_build_skips_llm_test_generation_by_default(session, tmp_path, monkeypatch):
+    monkeypatch.delenv("STORY_LLM_TESTS", raising=False)
+    item = _item(story_id="US-42", ac_ids=("AC-1", "AC-2"))
+    scaffold = tmp_path / "src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java"
+    scaffold.parent.mkdir(parents=True)
+    scaffold.write_text("class PostingService {}", encoding="utf-8")
+
+    async def gen_tests(**kwargs):
+        raise AssertionError("package-scoped build should use deterministic tests by default")
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=_pack_with_packages(item), runner=FakeRunner(),
+        gen_tests=gen_tests, gen_impl=_make_gen_impl(), run_tests=run,
+        now=_clock())
+
+    assert out.status == StoryCodegenStatus.passed
+    assert "deterministic acceptance tests used" in out.rationale
+    assert (tmp_path / "src/test/java/com/cobolmodernizer/carddemomini/posting/api/US42AcceptanceTest.java").exists()
+
+
+@pytest.mark.asyncio
+async def test_llm_test_timeout_falls_back_to_deterministic_tests(session, tmp_path, monkeypatch):
+    monkeypatch.setenv("STORY_LLM_TESTS", "1")
+    item = _item(story_id="US-42")
+    scaffold = tmp_path / "src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java"
+    scaffold.parent.mkdir(parents=True)
+    scaffold.write_text("class PostingService {}", encoding="utf-8")
+
+    async def gen_tests(**kwargs):
+        raise ValueError("timeout after 180s")
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=_pack_with_packages(item), runner=FakeRunner(),
+        gen_tests=gen_tests, gen_impl=_make_gen_impl(), run_tests=run,
+        now=_clock())
+
+    assert out.status == StoryCodegenStatus.passed
+    assert "LLM test generation failed" in out.rationale
+    rec = get_story_record(session, "ws1", item.story_id)
+    assert rec["status"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_impl_timeout_applies_deterministic_trace_fallback(session, tmp_path, monkeypatch):
+    monkeypatch.delenv("STORY_LLM_TESTS", raising=False)
+    item = _item(story_id="US-42")
+    scaffold = tmp_path / "src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java"
+    scaffold.parent.mkdir(parents=True)
+    scaffold.write_text("class PostingService {}", encoding="utf-8")
+
+    async def gen_impl(**kwargs):
+        raise ValueError("timeout after 180s")
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=_pack_with_packages(item), runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=gen_impl, run_tests=run,
+        now=_clock())
+
+    assert out.status == StoryCodegenStatus.passed
+    assert "deterministic trace fallback" in out.rationale
+    content = scaffold.read_text(encoding="utf-8")
+    assert "Story codegen trace: US-42" in content
+    assert "CBPOST1M" in content
+
+
+def test_write_files_rejects_paths_that_escape_module(tmp_path):
+    with pytest.raises(ValueError, match="unsafe generated path"):
+        _write_files(tmp_path, [GeneratedFile(
+            path="../outside.java", kind="main", content="class Outside {}")])
+    assert not (tmp_path.parent / "outside.java").exists()
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_story_tests_outside_allowed_scope(session, tmp_path, monkeypatch):
+    monkeypatch.setenv("STORY_LLM_TESTS", "1")
+    item = _item(story_id="US-42")
+
+    async def gen_tests(**kwargs):
+        return StoryPatch(
+            files=[GeneratedFile(
+                path="src/test/java/com/example/WrongTest.java",
+                kind="test",
+                content=f"// {item.story_id} AC-1\nclass WrongTest {{}}",
+                evidence=[item.story_id, "AC-1"])],
+            rationale="wrong scope")
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=_pack_with_packages(item), runner=FakeRunner(),
+        gen_tests=gen_tests, gen_impl=_make_gen_impl(), run_tests=run,
+        now=_clock())
+
+    assert out.status == StoryCodegenStatus.failed
+    assert "outside the allowed story scope" in out.rationale
+    assert not (tmp_path / "src/test/java/com/example/WrongTest.java").exists()
+
+
 # --------------------------------------------------------------------------- #
 # Fix 1: a 'running' status is emitted the instant a story starts              #
 # --------------------------------------------------------------------------- #
@@ -203,6 +529,8 @@ async def test_running_status_emitted_at_start(session, tmp_path):
                           gen_impl=_make_gen_impl(), run_tests=run, now=_clock())
     assert observed["rec"] is not None
     assert observed["rec"]["status"] == "running"
+    assert observed["rec"]["phase"] == "llm-tests"
+    assert observed["rec"]["phase_label"] == "Generating richer LLM acceptance tests"
     # The terminal status overwrites 'running' — no stale record remains.
     assert out.status == StoryCodegenStatus.passed
     assert get_story_record(session, "ws1", item.story_id)["status"] == "passed"
@@ -229,16 +557,82 @@ async def test_running_status_not_written_when_persist_false(session, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Fix 4: default build concurrency lowered 4 -> 2                              #
+# Default build concurrency is sequential while progress uses the job session   #
 # --------------------------------------------------------------------------- #
-def test_build_max_concurrency_default_is_two(monkeypatch):
+def test_build_max_concurrency_default_is_one(monkeypatch):
     monkeypatch.delenv("BUILD_MAX_CONCURRENCY", raising=False)
-    assert build_max_concurrency() == 2
+    assert build_max_concurrency() == 1
 
 
 def test_build_max_concurrency_env_override(monkeypatch):
     monkeypatch.setenv("BUILD_MAX_CONCURRENCY", "5")
     assert build_max_concurrency() == 5
+
+
+def test_llm_story_tests_are_opt_in_even_without_package_scope(monkeypatch):
+    item = _item()
+    monkeypatch.delenv("STORY_LLM_TESTS", raising=False)
+    monkeypatch.delenv("STORY_LLM_IMPL", raising=False)
+    assert _llm_tests_enabled(_pack(item)) is False
+    assert _llm_tests_enabled(_pack_with_packages(item)) is False
+
+    monkeypatch.setenv("STORY_LLM_TESTS", "1")
+    assert _llm_tests_enabled(_pack(item)) is True
+    assert _llm_tests_enabled(_pack_with_packages(item)) is True
+
+
+@pytest.mark.asyncio
+async def test_llm_impl_is_opt_in_and_deterministic_by_default(session, tmp_path, monkeypatch):
+    monkeypatch.delenv("STORY_LLM_TESTS", raising=False)
+    monkeypatch.delenv("STORY_LLM_IMPL", raising=False)
+    item = _item(story_id="US-42")
+    scaffold = tmp_path / "src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java"
+    scaffold.parent.mkdir(parents=True)
+    scaffold.write_text("class PostingService {}", encoding="utf-8")
+
+    async def gen_impl(**kwargs):
+        raise AssertionError("LLM implementation should be opt-in")
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=_pack_with_packages(item), runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=gen_impl, run_tests=run,
+        now=_clock())
+
+    assert out.status == StoryCodegenStatus.passed
+    assert "deterministic trace fallback" in out.rationale
+
+
+@pytest.mark.asyncio
+async def test_compile_failed_does_not_repair_when_llm_impl_disabled(session, tmp_path, monkeypatch):
+    monkeypatch.delenv("STORY_LLM_TESTS", raising=False)
+    monkeypatch.delenv("STORY_LLM_IMPL", raising=False)
+    item = _item(story_id="US-42")
+    scaffold = tmp_path / "src/main/java/com/cobolmodernizer/carddemomini/posting/application/PostingService.java"
+    scaffold.parent.mkdir(parents=True)
+    scaffold.write_text("class PostingService {}", encoding="utf-8")
+    impl_calls = 0
+
+    async def gen_impl(**kwargs):
+        nonlocal impl_calls
+        impl_calls += 1
+        raise AssertionError("LLM implementation should be disabled")
+
+    run = _scripted(
+        StoryTestStatus.compile_failed,
+        StoryTestStatus.compile_failed,
+        StoryTestStatus.compile_failed,
+    )
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=_pack_with_packages(item), runner=FakeRunner(),
+        gen_tests=_make_gen_tests(), gen_impl=gen_impl, run_tests=run,
+        repair_max_attempts=3, now=_clock())
+
+    assert impl_calls == 0
+    assert out.status == StoryCodegenStatus.failed
+    assert out.attempts == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -393,6 +787,37 @@ async def test_missing_lineage_failed_even_when_green(session, tmp_path):
     assert out.status == StoryCodegenStatus.failed
 
 
+@pytest.mark.asyncio
+async def test_quality_gate_payload_persisted_for_passing_story(session, tmp_path):
+    item = _item()
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(item, session=session, workspace_id="ws1",
+                          module_dir=tmp_path, context_pack=_pack(item),
+                          runner=FakeRunner(), gen_tests=_make_gen_tests(),
+                          gen_impl=_make_gen_impl(), run_tests=run, now=_clock())
+
+    assert out.status == StoryCodegenStatus.passed
+    assert out.quality_gate["passed"] is True
+    assert out.quality_gate["checks"]["acceptance_criteria_covered"] is True
+    rec = get_story_record(session, "ws1", item.story_id)
+    assert rec["quality_gate"]["passed"] is True
+    assert rec["quality_gate"]["score"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_quality_gate_fails_when_behavior_model_not_represented(session, tmp_path):
+    item = _item()
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    out = await run_story(item, session=session, workspace_id="ws1",
+                          module_dir=tmp_path, context_pack=_pack_with_behavior(item),
+                          runner=FakeRunner(), gen_tests=_make_gen_tests(),
+                          gen_impl=_make_gen_impl(), run_tests=run, now=_clock())
+
+    assert out.status == StoryCodegenStatus.failed
+    assert out.quality_gate["checks"]["behavior_signals_represented"] is False
+    assert "quality gate failed" in out.rationale
+
+
 # --------------------------------------------------------------------------- #
 # BASIC resume                                                               #
 # --------------------------------------------------------------------------- #
@@ -420,6 +845,12 @@ async def test_resume_skips_passed_story_with_same_hash(session, tmp_path):
                            run_tests=_boom, now=_clock())
     assert out2.status == StoryCodegenStatus.skipped
     assert out2.skipped is True
+    assert out2.resume["cache_hit"] is True
+    assert "unchanged context_hash" in out2.resume["reason"]
+    rec = get_story_record(session, "ws1", item.story_id)
+    assert rec["status"] == "skipped"
+    assert rec["resume"]["cache_hit"] is True
+    assert rec["resume"]["context_hash"] == pack.context_hash
 
 
 @pytest.mark.asyncio
@@ -444,6 +875,10 @@ async def test_resume_reruns_on_changed_hash(session, tmp_path):
                           runner=FakeRunner(), gen_tests=_make_gen_tests(),
                           gen_impl=_make_gen_impl(), run_tests=run2, now=_clock())
     assert out.status == StoryCodegenStatus.passed
+    assert out.resume["cache_hit"] is False
+    assert "context_hash changed" in out.resume["reason"]
+    rec = get_story_record(session, "ws1", item2.story_id)
+    assert rec["resume"]["cache_hit"] is False
 
 
 @pytest.mark.asyncio
@@ -492,9 +927,9 @@ async def test_persisted_artifact_payload_and_version(session, tmp_path):
     arts = session.execute(
         select(Artifact).where(Artifact.kind == STORY_CODEGEN_STATUS_KIND)
     ).scalars().all()
-    # Two versions per story now: the 'running' status at start (Fix 1) + the
-    # terminal status at the end. The latest version is the terminal one.
-    assert max(a.version for a in arts) == 2
+    # The story now writes phase-level running status plus the terminal status. The
+    # latest version is still the terminal one consumed by status readers.
+    assert max(a.version for a in arts) == 7
     assert arts[0].object_uri == "inline://story_codegen_status"
     assert arts[0].content_hash.startswith("sha256:")
 
@@ -518,8 +953,8 @@ async def test_second_story_increments_version_and_merges_map(session, tmp_path)
     arts = session.execute(
         select(Artifact).where(Artifact.kind == STORY_CODEGEN_STATUS_KIND)
     ).scalars().all()
-    # Each story writes twice now (running + terminal, Fix 1): 2 stories -> v4.
-    assert max(art.version for art in arts) == 4
+    # Each story writes phase-level running status plus terminal status.
+    assert max(art.version for art in arts) == 14
 
 
 @pytest.mark.asyncio
@@ -599,6 +1034,78 @@ async def test_telemetry_deltas_captured(session, tmp_path):
     assert out.cost_usd == pytest.approx(0.03)
     # clock advances by 1.0 per call: started -> finished spans >0
     assert out.wall_time_s > 0
+
+
+# --------------------------------------------------------------------------- #
+# Work-unit ledger                                                           #
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_run_story_records_build_work_unit(session, tmp_path):
+    item = _item()
+    repo = PgRepo(session)
+    runner = FakeRunner()
+
+    async def gen_tests(**k):
+        runner.token_usage["input"] += 100
+        return _test_patch()
+
+    async def gen_impl(**k):
+        runner.token_usage["output"] += 50
+        runner.cost_usd += 0.02
+        return _impl_patch()
+
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.ok)
+    pack = _pack(item)
+    out = await run_story(
+        item, session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack=pack, runner=runner, gen_tests=gen_tests, gen_impl=gen_impl,
+        run_tests=run, now=_clock(), ledger=repo, repo_slug="carddemo-mini",
+        agent_run_id=None)
+
+    assert out.status == StoryCodegenStatus.passed
+    units = repo.list_work_units(workspace_id="ws1", stage="build")
+    assert [u.unit_type for u in units] == [
+        "story-codegen",
+        "story-tests",
+        "story-red-test",
+        "story-implementation",
+        "story-green-test",
+    ]
+    by_type = {u.unit_type: u for u in units}
+    rollup = by_type["story-codegen"]
+    assert rollup.unit_key == "US-1"
+    assert rollup.input_hash == pack.context_hash
+    assert rollup.status == "succeeded"
+    assert rollup.payload["status"] == "passed"
+    assert rollup.token_usage["input"] == 100
+    assert rollup.token_usage["output"] == 50
+    assert float(rollup.cost_usd) == pytest.approx(0.02)
+    assert by_type["story-tests"].parent_unit_ids == [rollup.id]
+    assert by_type["story-tests"].payload["files"][0]["kind"] == "test"
+    assert by_type["story-red-test"].payload["result"]["status"] == "tests-failed"
+    assert by_type["story-implementation"].payload["files"][0]["kind"] == "main"
+    assert by_type["story-green-test"].payload["result"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_deferred_story_marks_work_unit_deferred(session, tmp_path):
+    item = _item()
+    repo = PgRepo(session)
+    run = _scripted(StoryTestStatus.tests_failed, StoryTestStatus.tests_failed)
+    results = await run_story_plan_until_done(
+        [item], session=session, workspace_id="ws1", module_dir=tmp_path,
+        context_pack_for=lambda it: _pack(it), runner=FakeRunner(),
+        runner_factory=FakeRunner, gen_tests=_make_gen_tests(),
+        gen_impl=_make_gen_impl(), run_tests=run, now=_clock(),
+        repair_max_attempts=0, max_story_attempts=1, ledger=repo,
+        repo_slug="carddemo-mini")
+
+    assert results[0].status == StoryCodegenStatus.deferred
+    units = repo.list_work_units(workspace_id="ws1", stage="build")
+    by_type = {u.unit_type: u for u in units}
+    assert by_type["story-codegen"].status == "deferred"
+    assert by_type["story-codegen"].payload["status"] == "deferred"
+    assert by_type["story-green-test"].payload["result"]["status"] == "tests-failed"
 
 
 # --------------------------------------------------------------------------- #
@@ -908,7 +1415,7 @@ async def test_waves_run_in_dependency_order(session, tmp_path):
         items, session=session, workspace_id="ws1", module_dir=tmp_path,
         context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
         gen_tests=_tracked_gen_tests(tracker), gen_impl=_tracked_gen_impl(tracker),
-        run_tests=_tracked_run_tests(tracker), now=_clock())
+        run_tests=_tracked_run_tests(tracker), now=_clock(), max_concurrency=2)
     assert all(r.status == StoryCodegenStatus.passed for r in results)
     # Deterministic downstream ordering preserved (results in plan order).
     assert [r.story_id for r in results] == ["US-1", "US-2", "US-3"]
@@ -928,7 +1435,7 @@ async def test_independent_wave0_stories_overlap(session, tmp_path):
         items, session=session, workspace_id="ws1", module_dir=tmp_path,
         context_pack_for=lambda it: packs[it.story_id], runner=FakeRunner(),
         gen_tests=_tracked_gen_tests(tracker), gen_impl=_tracked_gen_impl(tracker),
-        run_tests=_tracked_run_tests(tracker), now=_clock())
+        run_tests=_tracked_run_tests(tracker), now=_clock(), max_concurrency=2)
     assert all(r.status == StoryCodegenStatus.passed for r in results)
     assert tracker.max_in_flight >= 2  # the two wave-0 stories overlapped
 

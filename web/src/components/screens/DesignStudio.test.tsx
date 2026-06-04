@@ -31,12 +31,15 @@ describe("DesignStudio", () => {
     await waitFor(() => expect(button).toBeDisabled());
   });
 
-  it("renders an iframe pointing to the technical design html url when done", async () => {
+  it("renders the component diagram, package tree, and database design when done", async () => {
     render(<DesignStudio workspaceId="ws-1" />);
-    await waitFor(() => {
-      const frame = screen.getByTitle(/Technical Design v/i) as HTMLIFrameElement;
-      expect(frame.src).toContain("/api/workspaces/ws-1/technical-design/html");
-    });
+    await waitFor(() => expect(screen.getByText(/Spring Boot microservices component diagram/i)).toBeInTheDocument());
+    expect(screen.getAllByText("posting").length).toBeGreaterThan(0);
+    expect(screen.getByText("api")).toBeInTheDocument();
+    expect(screen.getByText("ACCTFILE")).toBeInTheDocument();
+    expect(screen.getByText("acctfile")).toBeInTheDocument();
+    expect(screen.getByText(/Table schema/i)).toBeInTheDocument();
+    expect(screen.getByText("legacy_payload")).toBeInTheDocument();
   });
 
   it("shows an error banner when the job fails", async () => {

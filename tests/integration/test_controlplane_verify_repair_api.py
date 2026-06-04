@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
-from cobol_modernizer.persistence.tables import Base, Workspace, JourneyStage, Artifact
+from cobol_modernizer.persistence.tables import Base, Workspace, JourneyStage, Artifact, WorkUnit
 from cobol_modernizer.api import app
 from cobol_modernizer.controlplane import verify_repair as vr
 from cobol_modernizer.controlplane.deps import get_session, get_neo4j
@@ -73,6 +73,15 @@ def _equiv_checks(eng):
             select(Artifact).where(Artifact.workspace_id == "ws-1",
                                    Artifact.kind == "equivalence_check")
             .order_by(Artifact.version)
+        ).scalars().all()
+
+
+def _work_units(eng):
+    with Session(eng) as s:
+        return s.execute(
+            select(WorkUnit).where(WorkUnit.workspace_id == "ws-1",
+                                   WorkUnit.stage == "verify")
+            .order_by(WorkUnit.created_at, WorkUnit.id)
         ).scalars().all()
 
 
@@ -148,6 +157,13 @@ def test_repair_defect_then_green(monkeypatch):
         # A fresh verify_report is persisted reflecting the repair outcome.
         reports = _verify_reports(eng)
         assert reports[-1].evidence_map["verdict"] == "pass"
+        units = _work_units(eng)
+        assert [(u.unit_type, u.unit_key, u.status) for u in units] == [
+            ("verify-repair-equivalence", "S1:confirm", "failed"),
+            ("verify-repair-codegen", "S1:attempt-1", "succeeded"),
+            ("verify-repair-equivalence", "S1:attempt-1", "succeeded"),
+        ]
+        assert units[1].payload["changed_files"] == ["src/main/java/Posting.java"]
         assert _stage(eng) == "passed"
     finally:
         app.dependency_overrides.clear()
@@ -174,6 +190,10 @@ def test_repair_noop_when_already_green(monkeypatch):
         assert body["resolved"] is True
         assert body["attempts"] == 0
         assert repaired["calls"] == 0  # never touched the patch agent
+        units = _work_units(eng)
+        assert [(u.unit_type, u.unit_key, u.status) for u in units] == [
+            ("verify-repair-equivalence", "S1:confirm", "succeeded"),
+        ]
     finally:
         app.dependency_overrides.clear()
 
@@ -209,6 +229,14 @@ def test_repair_exhausts_attempts_stays_failed(monkeypatch):
         checks = _equiv_checks(eng)
         s1 = [ck for ck in checks if ck.evidence_map.get("story_id") == "S1"][-1]
         assert s1.evidence_map["verdict"] == "fail"
+        units = _work_units(eng)
+        assert [(u.unit_type, u.unit_key, u.status) for u in units] == [
+            ("verify-repair-equivalence", "S1:confirm", "failed"),
+            ("verify-repair-codegen", "S1:attempt-1", "succeeded"),
+            ("verify-repair-equivalence", "S1:attempt-1", "failed"),
+            ("verify-repair-codegen", "S1:attempt-2", "succeeded"),
+            ("verify-repair-equivalence", "S1:attempt-2", "failed"),
+        ]
         assert _stage(eng) == "failed"
     finally:
         app.dependency_overrides.clear()

@@ -26,7 +26,11 @@ def _signals(client, *, repo, program):
 
 
 class _Runner:
+    def __init__(self):
+        self.calls = []
+
     async def run_structured(self, **kw):
+        self.calls.append(kw)
         return {"contexts": [
             {"name": "Acct", "business_capability": "accounts", "member_programs": ["P1"],
              "owned_resources": ["R1"], "depends_on": [], "cited_refs": ["P1"]},
@@ -86,3 +90,30 @@ async def test_decompose_raises_on_unrepairable_gate_violation():
     with pytest.raises(ValueError, match="domain decomposition failed gates"):
         await decompose(_StubClient(), "repo", brd_text="BRD", runner=_BadRunner(),
                         model="m", timeout_s=5, signals_fn=_signals, max_repairs=1)
+
+
+@pytest.mark.asyncio
+async def test_decompose_fails_loud_on_empty_agent_output(monkeypatch):
+    monkeypatch.setenv("DOMAIN_DECOMPOSE_ATTEMPTS", "1")
+    class _EmptyRunner:
+        calls = []
+        async def run_structured(self, **kw):
+            self.calls.append(kw)
+            return {}
+
+    runner = _EmptyRunner()
+    with pytest.raises(ValueError, match="domain decomposition agent failed"):
+        await decompose(_StubClient(), "repo", brd_text="BRD", runner=runner,
+                        model="m", timeout_s=5, signals_fn=_signals)
+    assert runner.calls[0]["max_turns"] == 6
+
+
+@pytest.mark.asyncio
+async def test_decompose_uses_env_turn_and_attempt_budget(monkeypatch):
+    monkeypatch.setenv("DOMAIN_DECOMPOSE_MAX_TURNS", "8")
+    monkeypatch.setenv("DOMAIN_DECOMPOSE_ATTEMPTS", "1")
+    runner = _Runner()
+    await decompose(_StubClient(), "repo", brd_text="BRD",
+                    runner=runner, model="m", timeout_s=5,
+                    signals_fn=_signals)
+    assert runner.calls[0]["max_turns"] == 8

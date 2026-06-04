@@ -42,5 +42,9 @@ class TechnicalService(BaseModel):
 class TechnicalDesign(BaseModel):
     repo_slug: str
     version: int = 0
+    target_platform: dict[str, str] = Field(default_factory=dict)
+    package_structure: list[str] = Field(default_factory=list)
+    database_design: list[dict[str, object]] = Field(default_factory=list)
+    mermaid_component_diagram: str = ""
     services: list[TechnicalService] = Field(default_factory=list)
     evidence_map: dict[str, list[str]] = Field(default_factory=dict)

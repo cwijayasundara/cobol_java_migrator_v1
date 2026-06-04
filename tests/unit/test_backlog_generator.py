@@ -11,6 +11,7 @@ from cobol_modernizer.backlog.generator import (
     STORIES_SYSTEM,
     _sections_for_requirements,
     build_backlog_prompt,
+    generate_deterministic_backlog,
     generate_backlog_payload,
     generate_backlog_result,
     generate_epics,
@@ -134,6 +135,34 @@ def test_sections_for_requirements_keeps_only_matching_sections():
     # The kept section retains only the in-scope requirement(s).
     kept_ids = [r["id"] for r in subset[0]["requirements"]]
     assert kept_ids == ["FR-1"]
+
+
+def test_generate_deterministic_backlog_covers_requirements_without_llm():
+    payload = generate_deterministic_backlog(
+        brd_sections=[{
+            "title": "Posting",
+            "requirements": [
+                {"id": "FR-1", "text": "valid transactions update balances"},
+                {"id": "FR-2", "text": "declined transactions are rejected"},
+            ],
+        }],
+        known_refs=["CBPOST1M", "CBPOST1M.2100-POST"],
+        known_requirement_ids=["FR-1", "FR-2"],
+        brd_evidence_map={
+            "FR-1": ["CBPOST1M.2100-POST"],
+            "FR-2": ["CBPOST1M"],
+        },
+    )
+
+    backlog = parse_backlog_payload(
+        payload, repo_slug="r",
+        known_refs={"CBPOST1M", "CBPOST1M.2100-POST"},
+        known_requirement_ids={"FR-1", "FR-2"})
+    assert len(backlog.epics) == 1
+    assert {s.id for s in backlog.stories} == {"US-FR-1", "US-FR-2"}
+    covered = {rid for story in backlog.stories for rid in story.brd_requirement_ids}
+    assert covered == {"FR-1", "FR-2"}
+    assert backlog.stories[0].acceptance_criteria[0].evidence_refs
 
 
 # ---------------------------------------------------------------------------

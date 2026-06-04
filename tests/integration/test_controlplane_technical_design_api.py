@@ -47,8 +47,10 @@ class FakeNeo4j:
 def _payload(**_kw):
     import asyncio
     return asyncio.sleep(0, result=EnrichmentResult(payload={"services": [
-        {"name": "posting-service", "bounded_context": "Posting", "deployment": "module",
+        {"name": "posting-service", "bounded_context": "Posting", "deployment": "microservice",
          "story_ids": ["US-1"], "evidence_refs": ["CBPOST1M"],
+         "api_contracts": [{"name": "post-transaction", "method": "POST",
+                            "path": "/api/posting/post-transaction"}],
          "persistence": [{"resource": "ACCTFILE", "access_pattern": "legacy-mimic"}]}]},
         ok=True, cause=None))
 
@@ -85,10 +87,15 @@ def test_technical_design_post_persists_and_gates(monkeypatch):
         done = client.get("/api/workspaces/ws-1/technical-design").json()
         assert done["status"] == "done"
         assert done["result"]["services"] == 1
+        assert done["result"]["quality_passed"] is True
+        assert done["result"]["target_platform"]["spring_boot_version"].startswith("4.")
+        assert "flowchart LR" in done["result"]["mermaid_component_diagram"]
+        assert done["result"]["database_design"][0]["tables"][0]["table"] == "acctfile"
         with Session(eng) as s:
             gates = {g.gate_key for g in
                      s.execute(select(Gate).where(Gate.workspace_id == "ws-1")).scalars().all()}
             assert "design_data_ownership" in gates
+            assert "technical_design_quality" in gates
     finally:
         app.dependency_overrides.clear()
         jobs.runner.inline = False
@@ -111,14 +118,20 @@ def test_technical_design_empty_payload_uses_deterministic_fallback(monkeypatch)
     try:
         client.post("/api/workspaces/ws-1/technical-design")
         done = client.get("/api/workspaces/ws-1/technical-design").json()
-        assert done["status"] == "done"
+        assert done["status"] == "incomplete"
         assert done["result"]["services"] == 1
+        assert done["result"]["stage_status"] == "incomplete"
         assert done["result"]["generation_mode"] == "deterministic_fallback"
         # The typed cause from the orchestrator is surfaced (not swallowed).
         assert "no output" in (done["result"]["generation_cause"] or "")
         with Session(eng) as s:
             saved = s.execute(select(Gate).where(Gate.workspace_id == "ws-1")).scalars().all()
-            assert {g.gate_key for g in saved} == {"design_data_ownership"}
+            by_key = {g.gate_key: g.status for g in saved}
+            assert by_key == {
+                "design_generation_complete": "open",
+                "design_data_ownership": "passed",
+                "technical_design_quality": "passed",
+            }
     finally:
         app.dependency_overrides.clear()
         jobs.runner.inline = False
@@ -169,7 +182,9 @@ def test_all_relevant_refs_inlined_no_truncation(monkeypatch):
         captured["contexts"] = kw.get("contexts")
         return asyncio.sleep(0, result=EnrichmentResult(payload={"services": [
             {"name": "posting-service", "bounded_context": "Posting",
-             "deployment": "module"}]}, ok=True, cause=None))
+             "deployment": "microservice",
+             "api_contracts": [{"name": "post", "method": "POST", "path": "/api/posting"}],
+             "story_ids": ["US-1"]}]}, ok=True, cause=None))
 
     eng = create_engine("sqlite://", connect_args={"check_same_thread": False},
                         poolclass=StaticPool)

@@ -13,7 +13,7 @@ export function IncrementPlanner({ workspaceId }: { workspaceId: string }) {
   const [busy, setBusy] = useState(false);
 
   const enrich = useJob<PlanEnrichResult>(
-    () => api.startPlanEnrich(workspaceId),
+    () => api.startPlanEnrich(workspaceId, true),
     () => api.getPlanEnrichment(workspaceId),
   );
 
@@ -65,7 +65,7 @@ export function IncrementPlanner({ workspaceId }: { workspaceId: string }) {
       <div className="flex items-center gap-2">
         <button onClick={run} disabled={busy}
           className="inline-flex items-center gap-2 px-4 py-2 text-sm rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40">
-          <Play className="w-4 h-4" />{busy ? "Planning…" : "Build plan"}
+          <Play className="w-4 h-4" />{busy ? "Planning…" : plan ? "Rebuild plan" : "Build plan"}
         </button>
         {plan && (
           <button onClick={enrich.run} disabled={enrich.busy}
@@ -96,6 +96,11 @@ export function IncrementPlanner({ workspaceId }: { workspaceId: string }) {
               ? <span className="flex items-center gap-1 text-emerald-400"><CheckCircle2 className="w-3.5 h-3.5" />acyclic</span>
               : <span className="text-red-400">cycle detected</span>}
             <span className="text-zinc-500">· {plan.stories.length} stories</span>
+            {typeof plan.quality_passed === "boolean" && (
+              <span className={plan.quality_passed ? "text-emerald-400" : "text-amber-400"}>
+                · {plan.quality_passed ? "quality passed" : "quality needs review"}
+              </span>
+            )}
           </div>
 
           {waves ? (

@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 _ACCESS_PATTERNS = {"legacy-mimic", "repository", "event-sourced", "read-replica"}
 _STYLES = {"sync", "async", "batch"}
 _DEPLOYMENTS = {"module", "microservice"}
+SPRING_BOOT_VERSION = "4.0.6"
+JAVA_VERSION = "25"
+BUILD_TOOL = "maven"
 
 TECHNICAL_DESIGN_SCHEMA = {
     "type": "object",
@@ -113,8 +116,216 @@ def _slug(value: Any, *, fallback: str = "service") -> str:
     return text or fallback
 
 
+def _pkg(value: Any, *, fallback: str = "app") -> str:
+    text = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+    return text or fallback
+
+
+def _java_type(value: Any, *, fallback: str = "Generated") -> str:
+    parts = [p for p in re.split(r"[^A-Za-z0-9]+", str(value or "")) if p]
+    out = "".join(p[:1].upper() + p[1:] for p in parts)
+    if not out:
+        out = fallback
+    if out[0].isdigit():
+        out = "N" + out
+    return out
+
+
+def _base_package(repo_slug: str) -> str:
+    return f"com.cobolmodernizer.{_pkg(repo_slug.split('/')[-1])}"
+
+
+def _service_package(base_package: str, service_name: str) -> str:
+    leaf = service_name[:-8] if service_name.endswith("-service") else service_name
+    return f"{base_package}.{_pkg(leaf, fallback='service')}"
+
+
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _story_matches_context(story: dict[str, Any], ctx_name: str,
+                           evidence_refs: list[str], *, single_context: bool) -> bool:
+    story_ctx = story.get("context") or story.get("bounded_context")
+    if story_ctx == ctx_name:
+        return True
+    story_refs = {r for r in _as_list(story.get("evidence_refs")) if isinstance(r, str)}
+    if story_refs and story_refs.intersection(evidence_refs):
+        return True
+    return bool(single_context and not story_ctx)
+
+
+def _api_from_story(ctx_name: str, story: dict[str, Any]) -> dict[str, str]:
+    title = str(story.get("title") or story.get("name") or story.get("id") or "command")
+    action = _slug(title, fallback="command")
+    ctx = _slug(ctx_name)
+    type_name = _java_type(title, fallback=f"{_java_type(ctx_name)}Command")
+    return {
+        "name": action,
+        "method": "POST",
+        "path": f"/api/{ctx}/{action}",
+        "request_model": f"{type_name}Request",
+        "response_model": f"{type_name}Response",
+        "details": f"Spring MVC command endpoint for backlog story {story.get('id', '')}.",
+    }
+
+
+def _default_api(ctx_name: str) -> dict[str, str]:
+    ctx = _slug(ctx_name)
+    type_name = _java_type(ctx_name)
+    return {
+        "name": f"{ctx}-command",
+        "method": "POST",
+        "path": f"/api/{ctx}/commands",
+        "request_model": f"{type_name}CommandRequest",
+        "response_model": f"{type_name}CommandResponse",
+        "details": "Spring MVC command endpoint generated from the bounded-context boundary.",
+    }
+
+
+def _target_platform(repo_slug: str) -> dict[str, str]:
+    return {
+        "language": "Java",
+        "java_version": JAVA_VERSION,
+        "framework": "Spring Boot",
+        "spring_boot_version": SPRING_BOOT_VERSION,
+        "build_tool": BUILD_TOOL,
+        "base_package": _base_package(repo_slug),
+        "architecture_style": "DDD microservices",
+    }
+
+
+def _package_structure(repo_slug: str, services: list[dict[str, Any]]) -> list[str]:
+    base = _base_package(repo_slug)
+    packages = [base]
+    for svc in services:
+        root = _service_package(base, str(svc.get("name", "service")))
+        packages.extend([
+            root,
+            f"{root}.api",
+            f"{root}.application",
+            f"{root}.domain",
+            f"{root}.infrastructure.persistence",
+            f"{root}.integration",
+            f"{root}.config",
+        ])
+    return sorted(dict.fromkeys(packages))
+
+
+def _database_design(services: list[dict[str, Any]]) -> list[dict[str, object]]:
+    designs: list[dict[str, object]] = []
+    for svc in services:
+        svc_name = str(svc.get("name") or "service")
+        schema_name = _pkg(svc_name.replace("-service", ""), fallback="app")
+        tables: list[dict[str, str]] = []
+        for p in _as_list(svc.get("persistence")):
+            if not isinstance(p, dict) or not p.get("resource"):
+                continue
+            resource = str(p["resource"])
+            table_name = _slug(resource, fallback="resource").replace("-", "_")
+            entity = _java_type(resource)
+            tables.append({
+                "legacy_resource": resource,
+                "table": table_name,
+                "entity": entity,
+                "repository": f"{entity}Repository",
+                "access_pattern": str(p.get("access_pattern") or "repository"),
+                "owner_service": svc_name,
+                "details": str(p.get("details") or "Derived from COBOL owned resource."),
+                "columns": [
+                    {"name": "id", "type": "BIGINT", "nullable": False,
+                     "primary_key": True, "description": "Surrogate technical primary key."},
+                    {"name": "legacy_record_key", "type": "VARCHAR(128)", "nullable": False,
+                     "unique": True, "description": "Natural key from the COBOL record/file."},
+                    {"name": "legacy_payload", "type": "JSON", "nullable": False,
+                     "description": "Lossless legacy record payload until field-level copybook mapping is expanded."},
+                    {"name": "created_at", "type": "TIMESTAMP WITH TIME ZONE", "nullable": False,
+                     "description": "Insert timestamp managed by the Spring Boot service."},
+                    {"name": "updated_at", "type": "TIMESTAMP WITH TIME ZONE", "nullable": False,
+                     "description": "Last update timestamp managed by the Spring Boot service."},
+                ],
+                "indexes": [
+                    {"name": f"ux_{table_name}_legacy_record_key",
+                     "columns": ["legacy_record_key"], "unique": True},
+                ],
+            })
+        designs.append({
+            "service": svc_name,
+            "schema": schema_name,
+            "migration_tool": "Flyway",
+            "migration_location": f"src/main/resources/db/migration/{schema_name}",
+            "transaction_boundary": "service method per backlog command; database writes stay inside the owning microservice",
+            "cross_service_data_access": "No direct table sharing; expose APIs or integration events for other services.",
+            "tables": tables,
+        })
+    return designs
+
+
+def _mermaid_id(value: str, *, fallback: str = "node") -> str:
+    text = re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_")
+    if not text:
+        text = fallback
+    if text[0].isdigit():
+        text = "n_" + text
+    return text
+
+
+def _mermaid_component_diagram(services: list[dict[str, Any]]) -> str:
+    lines = [
+        "flowchart LR",
+        "  client[External clients]",
+    ]
+    api_ids: dict[str, str] = {}
+    for svc in services:
+        svc_name = str(svc.get("name") or "service")
+        ctx_name = str(svc.get("bounded_context") or svc_name)
+        sid = _mermaid_id(svc_name)
+        api = f"{sid}_api"
+        app = f"{sid}_app"
+        dom = f"{sid}_domain"
+        db = f"{sid}_db"
+        api_ids[ctx_name] = api
+        lines.extend([
+            f"  subgraph {sid}[\"{svc_name}<br/>{ctx_name}\"]",
+            f"    {api}[REST controllers]",
+            f"    {app}[Application services]",
+            f"    {dom}[Domain model]",
+            f"    {db}[(Owned database schema)]",
+            f"    {api} --> {app}",
+            f"    {app} --> {dom}",
+            f"    {app} --> {db}",
+            "  end",
+            f"  client --> {api}",
+        ])
+        for p in _as_list(svc.get("persistence")):
+            if isinstance(p, dict) and p.get("resource"):
+                rid = f"{sid}_{_mermaid_id(str(p['resource']))}"
+                lines.extend([
+                    f"  {rid}[(\"{p['resource']}\")]",
+                    f"  {db} --> {rid}",
+                ])
+    for svc in services:
+        source = api_ids.get(str(svc.get("bounded_context") or ""))
+        if not source:
+            continue
+        for integ in _as_list(svc.get("integrations")):
+            if not isinstance(integ, dict):
+                continue
+            target = str(integ.get("target") or "")
+            target_api = api_ids.get(target)
+            if target_api:
+                label = str(integ.get("style") or "sync")
+                lines.append(f"  {source} -. {label} .-> {target_api}")
+    return "\n".join(lines)
+
+
+def enrich_technical_design_metadata(design: TechnicalDesign) -> TechnicalDesign:
+    services = [s.model_dump(mode="json") for s in design.services]
+    design.target_platform = _target_platform(design.repo_slug)
+    design.package_structure = _package_structure(design.repo_slug, services)
+    design.database_design = _database_design(services)
+    design.mermaid_component_diagram = _mermaid_component_diagram(services)
+    return design
 
 
 def fallback_technical_design_payload(*, contexts: list[dict[str, Any]],
@@ -156,10 +367,7 @@ def fallback_technical_design_payload(*, contexts: list[dict[str, Any]],
             elif single_context and not story_ctx:
                 story_ids.append(str(story["id"]))
 
-        topology = ctx.get("topology") if isinstance(ctx.get("topology"), dict) else {}
-        deployment = topology.get("deployment") or ctx.get("deployment") or "module"
-        if deployment not in _DEPLOYMENTS:
-            deployment = "module"
+        deployment = "microservice"
 
         resources = [r for r in _as_list(ctx.get("owned_resources")) if isinstance(r, str)]
         persistence = [
@@ -167,14 +375,11 @@ def fallback_technical_design_payload(*, contexts: list[dict[str, Any]],
             for resource in resources
         ]
 
-        api_contracts = [{
-            "name": f"{_slug(ctx_name)}-command",
-            "method": "POST",
-            "path": f"/api/{_slug(ctx_name)}",
-            "request_model": f"{re.sub(r'[^A-Za-z0-9]', '', ctx_name)}Request",
-            "response_model": f"{re.sub(r'[^A-Za-z0-9]', '', ctx_name)}Response",
-            "details": "Command endpoint generated from the bounded-context boundary.",
-        }]
+        api_contracts = [_api_from_story(ctx_name, story) for story in stories
+                         if isinstance(story, dict) and _story_matches_context(
+                             story, ctx_name, evidence_refs, single_context=single_context)]
+        if not api_contracts:
+            api_contracts = [_default_api(ctx_name)]
 
         integrations: list[dict[str, str]] = []
         for dep in _as_list(ctx.get("depends_on")):
@@ -276,7 +481,8 @@ def parse_technical_design_payload(raw: dict, *, repo_slug: str, known_refs: set
             api_contracts=apis, persistence=persistence, integrations=integrations,
             evidence_refs=_ground(item.get("evidence_refs"), known_refs)))
     evidence_map = {s.name: s.evidence_refs for s in services}
-    return TechnicalDesign(repo_slug=repo_slug, services=services, evidence_map=evidence_map)
+    return enrich_technical_design_metadata(
+        TechnicalDesign(repo_slug=repo_slug, services=services, evidence_map=evidence_map))
 
 
 async def generate_technical_design_payload(*, runner, model: str, timeout_s: float,

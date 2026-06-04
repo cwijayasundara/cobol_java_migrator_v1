@@ -16,7 +16,7 @@ import { StoryBuildLab } from "@/components/screens/StoryBuildLab";
 // Build stage stays a single screen): the legacy single-slice codegen, and the
 // per-story codegen loop (StoryBuildLab) over the deterministic story DAG.
 export function BuildLab({ workspaceId }: { workspaceId: string }) {
-  const [mode, setMode] = useState<"slice" | "story">("slice");
+  const [mode, setMode] = useState<"slice" | "story">("story");
 
   const { result, error, busy, run } = useJob<BuildResult>(
     () => api.startBuild(workspaceId),

@@ -59,8 +59,11 @@ class StoryContextPack(BaseModel):
     service_name: str = ""
     api_lines: list[str] = Field(default_factory=list)
     persistence_lines: list[str] = Field(default_factory=list)
+    package_lines: list[str] = Field(default_factory=list)
+    database_lines: list[str] = Field(default_factory=list)
 
     brd_requirements: list[str] = Field(default_factory=list)
+    behavior_model: dict[str, object] = Field(default_factory=dict)
     source_pack: str = ""
 
     context_hash: str = ""
@@ -145,6 +148,9 @@ def build_story_context(
     brd_requirements: list[str],
     completed_summaries: list[str],
     source_pack: str,
+    package_lines: list[str] | None = None,
+    database_lines: list[str] | None = None,
+    behavior_model: dict[str, object] | None = None,
     max_chars: int | None = None,
     source_max_chars: int | None = None,
 ) -> StoryContextPack:
@@ -178,8 +184,11 @@ def build_story_context(
     service_name = service.name if service else ""
     api_lines = _api_lines(service) if service else []
     persistence_lines = _persistence_lines(service) if service else []
+    packages = list(package_lines or [])
+    database = list(database_lines or [])
 
     brd = list(brd_requirements)
+    behavior = dict(behavior_model or {})
     summaries = list(completed_summaries)
 
     context_hash = _hash_inputs(
@@ -193,7 +202,10 @@ def build_story_context(
         service_name=service_name,
         api_lines=api_lines,
         persistence_lines=persistence_lines,
+        package_lines=packages,
+        database_lines=database,
         brd_requirements=brd,
+        behavior_model=behavior,
         source_pack=source_pack,
     )
 
@@ -209,7 +221,10 @@ def build_story_context(
         service_name=service_name,
         api_lines=api_lines,
         persistence_lines=persistence_lines,
+        package_lines=packages,
+        database_lines=database,
         brd_requirements=brd,
+        behavior_model=behavior,
         source_pack=source_pack,
         context_hash=context_hash,
         max_chars=max_chars,
@@ -266,13 +281,50 @@ def _render_text(
             lines += [f"- {p}" for p in pack.persistence_lines]
         sections.append("\n".join(lines))
 
+    if pack.package_lines:
+        lines = ["## Java / Spring Boot Package Targets"]
+        lines += [f"- {p}" for p in pack.package_lines]
+        sections.append("\n".join(lines))
+
+    if pack.database_lines:
+        lines = ["## Database Schema Targets"]
+        lines += [f"- {d}" for d in pack.database_lines]
+        sections.append("\n".join(lines))
+
     if pack.brd_requirements:
         lines = ["## BRD Requirements"]
         lines += [f"- {r}" for r in pack.brd_requirements]
         sections.append("\n".join(lines))
+
+    if pack.behavior_model:
+        sections.append(_render_behavior_model(pack.behavior_model))
 
     if pack.source_pack:
         source = _truncate(pack.source_pack, source_max_chars)
         sections.append("## COBOL Source\n" + source)
 
     return _truncate("\n\n".join(sections), max_chars)
+
+
+def _render_behavior_model(model: dict[str, object]) -> str:
+    lines = ["## COBOL Behavior Model"]
+    order = [
+        "conditions",
+        "field_moves",
+        "calculations",
+        "io_operations",
+        "status_rules",
+        "cics_operations",
+        "calls",
+    ]
+    for key in order:
+        value = model.get(key)
+        if not isinstance(value, list) or not value:
+            continue
+        title = key.replace("_", " ").title()
+        lines.append(f"{title}:")
+        lines += [f"- {item}" for item in value]
+    count = model.get("raw_signals_count")
+    if isinstance(count, int):
+        lines.append(f"Raw signals count: {count}")
+    return "\n".join(lines)

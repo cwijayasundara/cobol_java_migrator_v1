@@ -13,6 +13,7 @@ with defects marks it failed (this is a real gate, not a checkbox)."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from cobol_modernizer.equivalence.golden import InMemoryGoldenStore
 from cobol_modernizer.equivalence.lab import EquivalenceLab, split_by_subslice
 from cobol_modernizer.equivalence.seam_link import resolve_source_seam
 from cobol_modernizer.equivalence.tolerance import load_ruleset
+from cobol_modernizer.persistence.repo import PgRepo
 from cobol_modernizer.persistence.tables import Artifact, Gate, JourneyStage, Workspace
 from cobol_modernizer.slice.gates import story_behavior_gate
 
@@ -162,6 +164,48 @@ def _serialize_defect(d) -> dict:
     }
 
 
+def _verify_input_hash(*, req: VerifyRequest, slice_name: str,
+                       story_id: str | None = None,
+                       subslice: str | None = None,
+                       candidate_records: list[dict] | None = None,
+                       golden_records: list[dict] | None = None) -> str:
+    payload = {
+        "program": req.program,
+        "record": req.record,
+        "record_key": req.record_key,
+        "slice_name": slice_name,
+        "story_id": story_id,
+        "subslice": subslice,
+        "candidate_records": candidate_records if candidate_records is not None else req.candidate_records,
+        "golden_records": golden_records if golden_records is not None else req.golden_records,
+        "tolerance_yaml": req.tolerance_yaml,
+        "dialect": req.dialect,
+        "online_uses_recorded_fixtures": req.online_uses_recorded_fixtures,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _mark_equivalence_unit(ledger: PgRepo | None, unit, sub: dict[str, Any]) -> None:
+    if ledger is None or unit is None:
+        return
+    payload = {
+        "slice_name": sub.get("slice_name") or sub.get("subslice"),
+        "story_id": sub.get("story_id"),
+        "verdict": sub.get("verdict"),
+        "ok": sub.get("ok"),
+        "reason": sub.get("reason", ""),
+        "defect_count": sub.get("defect_count", 0),
+        "partial": sub.get("partial", False),
+    }
+    if sub.get("ok"):
+        ledger.mark_work_unit_succeeded(unit.id, payload=payload)
+    else:
+        ledger.mark_work_unit_failed(
+            unit.id, error_cause=sub.get("reason", "equivalence failed"),
+            payload=payload)
+
+
 def _load_stories(neo4j, repo_slug: str) -> list[dict]:
     """The latest backlog's stories for this repo, or [] when there is no backlog."""
     try:
@@ -182,11 +226,23 @@ def _load_stories(neo4j, repo_slug: str) -> list[dict]:
 async def _run_one_story(lab: EquivalenceLab, *, workspace_id: str, slice_name: str,
                          program: str, candidate_records: list[dict], record_key: str,
                          online_uses_recorded_fixtures: bool,
-                         sem: asyncio.Semaphore, timeout_s: float) -> dict[str, Any]:
+                         sem: asyncio.Semaphore, timeout_s: float,
+                         ledger: PgRepo | None = None, repo_slug: str = "",
+                         agent_run_id: str | None = None,
+                         input_hash: str | None = None) -> dict[str, Any]:
     """Run ONE story's equivalence under a SOFT per-story wall. On overrun (or any
     error) return a PARTIAL sub-verdict (ok=False) — never a hard kill / raise — so
     the workspace verdict still synthesizes (loop-until-done). On success the verdict
     + defects are the real deterministic equivalence result."""
+    unit = None
+    if ledger is not None:
+        unit = ledger.create_work_unit(
+            workspace_id=workspace_id, repo_slug=repo_slug, stage="verify",
+            unit_type="story-equivalence", unit_key=slice_name,
+            input_hash=input_hash or slice_name, agent_run_id=agent_run_id,
+            model="deterministic-equivalence", timeout_s=timeout_s)
+        ledger.mark_work_unit_running(
+            unit.id, model="deterministic-equivalence", timeout_s=timeout_s)
     async with sem:
         try:
             coro = lab.run_equivalence_async(
@@ -195,15 +251,19 @@ async def _run_one_story(lab: EquivalenceLab, *, workspace_id: str, slice_name: 
                 online_uses_recorded_fixtures=online_uses_recorded_fixtures)
             result = await asyncio.wait_for(coro, timeout=timeout_s) if timeout_s > 0 else await coro
         except asyncio.TimeoutError:
-            return {"slice_name": slice_name, "ok": False, "reason": "timeout",
-                    "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+            sub = {"slice_name": slice_name, "ok": False, "reason": "timeout",
+                   "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+            _mark_equivalence_unit(ledger, unit, sub)
+            return sub
         except Exception as exc:  # noqa: BLE001 — partial sub-verdict, never crash the fan-out
             logger.warning("verify: per-story equivalence failed for %s; partial sub-verdict",
                            slice_name, exc_info=True)
-            return {"slice_name": slice_name, "ok": False, "reason": f"error: {exc}",
-                    "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+            sub = {"slice_name": slice_name, "ok": False, "reason": f"error: {exc}",
+                   "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+            _mark_equivalence_unit(ledger, unit, sub)
+            return sub
     ok = result.report.verdict == "pass"
-    return {
+    sub = {
         "slice_name": slice_name, "ok": ok,
         "reason": "equivalence passed" if ok else "equivalence failed",
         "verdict": result.report.verdict,
@@ -213,10 +273,14 @@ async def _run_one_story(lab: EquivalenceLab, *, workspace_id: str, slice_name: 
         "defects": [_serialize_defect(d) for d in result.defects],
         "partial": False,
     }
+    _mark_equivalence_unit(ledger, unit, sub)
+    return sub
 
 
 def _fan_out_per_story(lab: EquivalenceLab, *, workspace_id: str, req: VerifyRequest,
-                       stories: list[dict]) -> list[dict[str, Any]]:
+                       stories: list[dict], ledger: PgRepo | None = None,
+                       repo_slug: str = "", agent_run_id: str | None = None,
+                       ) -> list[dict[str, Any]]:
     """Register each story's golden then run all stories concurrently (bounded by
     VERIFY_MAX_CONCURRENCY) under a soft per-story timeout. Returns one sub-verdict
     per story, in story order. Golden registration is done up-front (synchronously)
@@ -236,7 +300,9 @@ def _fan_out_per_story(lab: EquivalenceLab, *, workspace_id: str, req: VerifyReq
                 lab, workspace_id=workspace_id, slice_name=sid, program=req.program,
                 candidate_records=req.candidate_records, record_key=req.record_key,
                 online_uses_recorded_fixtures=req.online_uses_recorded_fixtures,
-                sem=sem, timeout_s=timeout_s)
+                sem=sem, timeout_s=timeout_s, ledger=ledger, repo_slug=repo_slug,
+                agent_run_id=agent_run_id,
+                input_hash=_verify_input_hash(req=req, slice_name=sid, story_id=sid))
             for sid in slice_names
         ]
         return list(await asyncio.gather(*tasks))
@@ -251,7 +317,9 @@ def _subslice_verdict(lab: EquivalenceLab, *, workspace_id: str, slice_name: str
                       subslice: str, program: str, golden: list[dict],
                       candidate: list[dict], record: str, record_key: str,
                       online_uses_recorded_fixtures: bool,
-                      timeout_s: float) -> dict[str, Any]:
+                      timeout_s: float, req: VerifyRequest,
+                      ledger: PgRepo | None = None, repo_slug: str = "",
+                      agent_run_id: str | None = None) -> dict[str, Any]:
     """Run equivalence on ONE narrower sub-slice (program/COBOL-context) under the
     SAME soft-timeout philosophy as the per-story fan-out: an overrun (or any
     error) yields a PARTIAL sub-verdict (ok=False), never a hard kill. Registers a
@@ -260,6 +328,19 @@ def _subslice_verdict(lab: EquivalenceLab, *, workspace_id: str, slice_name: str
     sub_name = f"{slice_name}::{subslice}"
     lab.register_golden(workspace_id=workspace_id, slice_name=sub_name,
                         record=record, records=golden)
+    unit = None
+    if ledger is not None:
+        unit = ledger.create_work_unit(
+            workspace_id=workspace_id, repo_slug=repo_slug, stage="verify",
+            unit_type="subslice-equivalence", unit_key=sub_name,
+            input_hash=_verify_input_hash(
+                req=req, slice_name=slice_name, story_id=slice_name,
+                subslice=subslice, candidate_records=candidate,
+                golden_records=golden),
+            agent_run_id=agent_run_id, model="deterministic-equivalence",
+            timeout_s=timeout_s)
+        ledger.mark_work_unit_running(
+            unit.id, model="deterministic-equivalence", timeout_s=timeout_s)
 
     async def _go():
         coro = lab.run_equivalence_async(
@@ -272,15 +353,19 @@ def _subslice_verdict(lab: EquivalenceLab, *, workspace_id: str, slice_name: str
     try:
         result = asyncio.run(_go())
     except asyncio.TimeoutError:
-        return {"subslice": subslice, "ok": False, "reason": "timeout",
-                "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+        sub = {"subslice": subslice, "ok": False, "reason": "timeout",
+               "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+        _mark_equivalence_unit(ledger, unit, sub)
+        return sub
     except Exception as exc:  # noqa: BLE001 — partial sub-verdict, never crash decompose
         logger.warning("verify: sub-slice equivalence failed for %s; partial sub-verdict",
                        sub_name, exc_info=True)
-        return {"subslice": subslice, "ok": False, "reason": f"error: {exc}",
-                "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+        sub = {"subslice": subslice, "ok": False, "reason": f"error: {exc}",
+               "verdict": "fail", "defect_count": 0, "defects": [], "partial": True}
+        _mark_equivalence_unit(ledger, unit, sub)
+        return sub
     ok = result.report.verdict == "pass"
-    return {
+    sub = {
         "subslice": subslice, "ok": ok,
         "reason": "equivalence passed" if ok else "equivalence failed",
         "verdict": result.report.verdict,
@@ -290,10 +375,14 @@ def _subslice_verdict(lab: EquivalenceLab, *, workspace_id: str, slice_name: str
         "defects": [_serialize_defect(d) for d in result.defects],
         "partial": False,
     }
+    _mark_equivalence_unit(ledger, unit, sub)
+    return sub
 
 
 def _decompose_story(lab: EquivalenceLab, *, workspace_id: str, req: VerifyRequest,
-                     slice_name: str) -> list[dict[str, Any]] | None:
+                     slice_name: str, ledger: PgRepo | None = None,
+                     repo_slug: str = "", agent_run_id: str | None = None,
+                     ) -> list[dict[str, Any]] | None:
     """DECOMPOSE-FURTHER repeat-until-done: split a FAILING story's records per
     program/COBOL-context and re-run equivalence on each narrower sub-slice to
     LOCALIZE which sub-slice actually fails. Returns the leaf sub-slice verdicts,
@@ -322,7 +411,8 @@ def _decompose_story(lab: EquivalenceLab, *, workspace_id: str, req: VerifyReque
                 program=req.program, golden=golden, candidate=cand,
                 record=req.record, record_key=req.record_key,
                 online_uses_recorded_fixtures=req.online_uses_recorded_fixtures,
-                timeout_s=timeout_s)
+                timeout_s=timeout_s, req=req, ledger=ledger,
+                repo_slug=repo_slug, agent_run_id=agent_run_id)
             if sub["ok"]:
                 leaves.append(sub)
                 continue
@@ -345,7 +435,8 @@ def _decompose_story(lab: EquivalenceLab, *, workspace_id: str, req: VerifyReque
             program=req.program, golden=golden, candidate=cand,
             record=req.record, record_key=req.record_key,
             online_uses_recorded_fixtures=req.online_uses_recorded_fixtures,
-            timeout_s=timeout_s)
+            timeout_s=timeout_s, req=req, ledger=ledger,
+            repo_slug=repo_slug, agent_run_id=agent_run_id)
         leaves.append(sub)
     return leaves
 
@@ -371,21 +462,39 @@ def run_verify(*, session: Session, neo4j, workspace: Workspace,
             detail="no golden master supplied — capture the COBOL oracle output "
                    "for this slice first, then re-run Verify with it.")
 
+    ledger = PgRepo(session)
+    agent_run = ledger.start_run(
+        workspace_id=workspace.id, stage_id=None, role="verify",
+        model="deterministic-equivalence", started_by="system")
+    session.flush()
     lab = _make_lab(neo4j, repo_slug=workspace.repo_slug, req=req)
     stories = _load_stories(neo4j, workspace.repo_slug)
 
     if stories:
         return _run_verify_fanout(session=session, neo4j=neo4j, workspace=workspace,
-                                  req=req, lab=lab, stories=stories)
+                                  req=req, lab=lab, stories=stories,
+                                  ledger=ledger, agent_run_id=agent_run.id)
     return _run_verify_single(session=session, neo4j=neo4j, workspace=workspace,
-                              req=req, lab=lab)
+                              req=req, lab=lab, ledger=ledger,
+                              agent_run_id=agent_run.id)
 
 
 def _run_verify_single(*, session: Session, neo4j, workspace: Workspace,
-                       req: VerifyRequest, lab: EquivalenceLab) -> dict[str, Any]:
+                       req: VerifyRequest, lab: EquivalenceLab,
+                       ledger: PgRepo | None = None,
+                       agent_run_id: str | None = None) -> dict[str, Any]:
     """Today's behavior: no backlog -> one slice, one verify_report."""
     lab.register_golden(workspace_id=workspace.id, slice_name=req.slice_name,
                         record=req.record, records=req.golden_records)
+    unit = None
+    if ledger is not None:
+        unit = ledger.create_work_unit(
+            workspace_id=workspace.id, repo_slug=workspace.repo_slug,
+            stage="verify", unit_type="slice-equivalence",
+            unit_key=req.slice_name,
+            input_hash=_verify_input_hash(req=req, slice_name=req.slice_name),
+            agent_run_id=agent_run_id, model="deterministic-equivalence")
+        ledger.mark_work_unit_running(unit.id, model="deterministic-equivalence")
     result = lab.run_equivalence(
         workspace_id=workspace.id, slice_name=req.slice_name, program=req.program,
         candidate_records=req.candidate_records, record_key=req.record_key,
@@ -402,6 +511,13 @@ def _run_verify_single(*, session: Session, neo4j, workspace: Workspace,
         "open_questions": result.report.open_questions,
         "defects": [_serialize_defect(d) for d in result.defects],
     }
+    _mark_equivalence_unit(
+        ledger, unit,
+        {"slice_name": req.slice_name, "ok": result.report.verdict == "pass",
+         "reason": "equivalence passed" if result.report.verdict == "pass" else "equivalence failed",
+         "verdict": result.report.verdict,
+         "defect_count": result.report.defect_count,
+         "partial": False})
 
     # Durable, versioned record of this verify run (max(prev)+1) so the verdict
     # survives a refresh and GET /verify/status can replay it. Mirrors build's
@@ -415,11 +531,14 @@ def _run_verify_single(*, session: Session, neo4j, workspace: Workspace,
 
 def _run_verify_fanout(*, session: Session, neo4j, workspace: Workspace,
                        req: VerifyRequest, lab: EquivalenceLab,
-                       stories: list[dict]) -> dict[str, Any]:
+                       stories: list[dict], ledger: PgRepo | None = None,
+                       agent_run_id: str | None = None) -> dict[str, Any]:
     """Fan-Out-and-Synthesize: one equivalence check PER story (each story's ACs cite
     different COBOL seams), bounded concurrency + soft per-story timeout. The workspace
     passes iff EVERY story passes equivalence AND story_behavior."""
-    subs = _fan_out_per_story(lab, workspace_id=workspace.id, req=req, stories=stories)
+    subs = _fan_out_per_story(
+        lab, workspace_id=workspace.id, req=req, stories=stories,
+        ledger=ledger, repo_slug=workspace.repo_slug, agent_run_id=agent_run_id)
 
     # DECOMPOSE-FURTHER (defect localization): for each FAILING story, split its
     # records per program/COBOL-context and re-run to pin WHICH sub-slice fails.
@@ -431,7 +550,9 @@ def _run_verify_fanout(*, session: Session, neo4j, workspace: Workspace,
             if sub["ok"]:
                 continue
             leaves = _decompose_story(lab, workspace_id=workspace.id, req=req,
-                                      slice_name=sub["slice_name"])
+                                      slice_name=sub["slice_name"], ledger=ledger,
+                                      repo_slug=workspace.repo_slug,
+                                      agent_run_id=agent_run_id)
             if not leaves:
                 continue
             sub["subslices"] = leaves

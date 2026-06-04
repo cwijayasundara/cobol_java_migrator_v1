@@ -237,3 +237,45 @@ class AgentRunEvent(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "seq", name="uq_agent_run_event_seq"),
     )
+
+
+class WorkUnit(Base):
+    """Durable progress/cache record for one bounded unit of LLM or verification work.
+
+    Stages such as BRD, backlog, domain design, technical design, codegen, and verify
+    should record every expensive unit here rather than hiding progress inside one
+    opaque background job. The cache key is the stage/unit identity plus the input
+    hash; a succeeded/cached row with the same hash can be reused on a later run.
+    """
+    __tablename__ = "work_unit"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "stage", "unit_type", "unit_key", "input_hash",
+            name="uq_work_unit_cache_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False)
+    agent_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_run.id", ondelete="SET NULL"), nullable=True)
+    artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifact.id", ondelete="SET NULL"), nullable=True)
+    repo_slug: Mapped[str] = mapped_column(String, nullable=False)
+    stage: Mapped[str] = mapped_column(String, nullable=False)
+    unit_type: Mapped[str] = mapped_column(String, nullable=False)
+    unit_key: Mapped[str] = mapped_column(String, nullable=False)
+    input_hash: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    timeout_s: Mapped[float | None] = mapped_column(Numeric(12, 3), nullable=True)
+    max_turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    token_usage: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error_cause: Mapped[str | None] = mapped_column(String, nullable=True)
+    parent_unit_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

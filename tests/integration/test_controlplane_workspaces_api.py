@@ -21,6 +21,30 @@ def test_stages_gates_artifacts_runs_budget(cp_client):
     assert budget["cap_usd"] == 50.0 and budget["spent_usd"] == 18.42
 
 
+def test_work_units_progress_filters_and_counts(cp_client):
+    all_units = cp_client.get("/api/workspaces/ws-1/work-units").json()
+    assert all_units["total"] == 3
+    assert all_units["counts"] == {"succeeded": 1, "running": 1, "failed": 1}
+    assert all_units["by_stage"]["domain-design"] == {"succeeded": 1, "running": 1}
+    assert all_units["by_stage"]["technical-design"] == {"failed": 1}
+
+    domain = cp_client.get("/api/workspaces/ws-1/work-units",
+                           params={"stage": "domain-design"}).json()
+    assert domain["total"] == 2
+    assert {u["unit_type"] for u in domain["units"]} == {
+        "decomposition", "tactical-aggregate"}
+
+    running = cp_client.get("/api/workspaces/ws-1/work-units",
+                            params={"status": "running"}).json()
+    assert running["total"] == 1
+    assert running["units"][0]["id"] == "wu-domain-aggregate"
+    assert running["units"][0]["timeout_s"] == 300.0
+
+
+def test_work_units_unknown_workspace_404(cp_client):
+    assert cp_client.get("/api/workspaces/nope/work-units").status_code == 404
+
+
 def test_create_workspace_seeds_stages_and_budget(cp_client):
     created = cp_client.post("/api/workspaces", json={
         "name": "Loans", "repo_slug": "aws-mf-loans", "created_by": "lead@biz2bricks.ai",

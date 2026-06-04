@@ -89,6 +89,16 @@ def _build(**overrides):
         brd_requirements=["BR-1: Transactions must update balances."],
         completed_summaries=["US-0: account opened, balance initialized."],
         source_pack="COTRN02C.cbl\nMOVE WS-AMT TO WS-BAL.\n",
+        package_lines=[
+            "com.cobolmodernizer.carddemomini.posting.api",
+            "com.cobolmodernizer.carddemomini.posting.application",
+            "com.cobolmodernizer.carddemomini.posting.infrastructure.persistence",
+        ],
+        database_lines=[
+            "schema=posting migration=src/main/resources/db/migration/posting",
+            "table=transact legacy_resource=TRANSACT entity=Transact "
+            "columns=[id BIGINT, legacy_record_key VARCHAR(128), legacy_payload JSON]",
+        ],
     )
     kwargs.update(overrides)
     return build_story_context(**kwargs)
@@ -134,10 +144,39 @@ def test_pack_includes_technical_service_api_and_persistence():
     assert "TRANSACT" in text
 
 
+def test_pack_includes_package_and_database_schema_targets():
+    pack = _build()
+    text = pack.render()
+    assert "Java / Spring Boot Package Targets" in text
+    assert "com.cobolmodernizer.carddemomini.posting.api" in text
+    assert "Database Schema Targets" in text
+    assert "table=transact" in text
+    assert "legacy_payload JSON" in text
+
+
 def test_pack_includes_brd_requirements():
     pack = _build()
     text = pack.render()
     assert "Transactions must update balances." in text
+
+
+def test_pack_includes_cobol_behavior_model():
+    pack = _build(behavior_model={
+        "conditions": ["IF WS-AMOUNT > WS-CREDIT-LIMIT"],
+        "field_moves": ["WS-AMOUNT -> TRN-AMOUNT"],
+        "calculations": ["WS-BALANCE = WS-BALANCE + WS-AMOUNT"],
+        "io_operations": ["WRITE TRANSACT-REC"],
+        "status_rules": ["INVALID KEY MOVE 'NF' TO WS-STATUS"],
+        "cics_operations": ["EXEC CICS SEND MAP('TRNMAP') END-EXEC"],
+        "calls": ["ABEND-HANDLER"],
+        "raw_signals_count": 7,
+    })
+    text = pack.render()
+    assert "COBOL Behavior Model" in text
+    assert "IF WS-AMOUNT > WS-CREDIT-LIMIT" in text
+    assert "WS-AMOUNT -> TRN-AMOUNT" in text
+    assert "WRITE TRANSACT-REC" in text
+    assert "Raw signals count: 7" in text
 
 
 def test_pack_includes_cobol_source_snippets():
@@ -261,9 +300,26 @@ def test_changing_service_changes_hash():
     assert _build(service=other).context_hash != base
 
 
+def test_changing_package_or_database_targets_changes_hash():
+    base = _build().context_hash
+    assert _build(package_lines=["com.example.other"]).context_hash != base
+    assert _build(database_lines=["table=other columns=[id BIGINT]"]).context_hash != base
+
+
 def test_changing_brd_changes_hash():
     base = _build().context_hash
     assert _build(brd_requirements=["BR-1: changed text."]).context_hash != base
+
+
+def test_changing_behavior_model_changes_hash():
+    base = _build(behavior_model={
+        "conditions": ["IF A = B"],
+        "raw_signals_count": 1,
+    }).context_hash
+    assert _build(behavior_model={
+        "conditions": ["IF A = C"],
+        "raw_signals_count": 1,
+    }).context_hash != base
 
 
 def test_changing_source_changes_hash():

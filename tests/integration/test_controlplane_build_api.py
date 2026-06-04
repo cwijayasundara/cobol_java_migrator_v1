@@ -292,6 +292,8 @@ def test_story_mode_passes_with_deferred_and_surfaces_counts(monkeypatch, tmp_pa
         counts = body["result"]["story_counts"]
         assert counts["pass_count"] == 1
         assert counts["deferred_count"] == 1
+        assert counts["rebuilt_count"] == 2
+        assert counts["cache_hit_count"] == 0
         with Session(eng) as s:
             assert s.execute(select(JourneyStage.status).where(
                 JourneyStage.stage_key == "build")).scalar_one() == "passed"

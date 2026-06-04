@@ -1,5 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { api } from "@/lib/api";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("enrichment api", () => {
   it("exposes enrich + enrichment helpers per stage", () => {
@@ -9,6 +13,23 @@ describe("enrichment api", () => {
     expect(typeof api.getPlanEnrichment).toBe("function");
     expect(typeof api.startDesignEnrich).toBe("function");
     expect(typeof api.getDesignEnrichment).toBe("function");
+  });
+
+  it("can force-refresh seams and plan enrichment jobs", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "running", result: null, error: null }),
+    } as Response);
+
+    await api.startSeamsEnrich("ws-1", true);
+    await api.startPlanEnrich("ws-1", true);
+
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      1, "/api/workspaces/ws-1/seams/enrich?refresh=true",
+      { method: "POST" });
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      2, "/api/workspaces/ws-1/plan/enrich?refresh=true",
+      { method: "POST" });
   });
 });
 

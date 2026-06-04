@@ -137,6 +137,8 @@ def test_backlog_post_generates_persists_and_creates_gate(monkeypatch):
                      s.execute(select(Gate).where(Gate.workspace_id == "ws-1")).scalars().all()}
             assert "backlog_coverage" in gates
             assert "brd_logic_coverage" in gates
+            assert "backlog_readiness" in gates
+            assert gates["backlog_readiness"].status == "passed"
     finally:
         app.dependency_overrides.clear()
         jobs.runner.inline = False
@@ -164,6 +166,7 @@ def test_backlog_post_decomposed_multi_epic_persists_and_creates_gate(monkeypatc
                      s.execute(select(Gate).where(Gate.workspace_id == "ws-1")).scalars().all()}
             assert "backlog_coverage" in gates
             assert "brd_logic_coverage" in gates
+            assert "backlog_readiness" in gates
     finally:
         app.dependency_overrides.clear()
         jobs.runner.inline = False

@@ -71,7 +71,16 @@ export interface SeamCandidate {
   identity_drift_writer: boolean;
   evidence_map: Record<string, string[]>;
 }
-export interface SeamsResult { repo_slug: string; count: number; candidates: SeamCandidate[] }
+export interface AnalysisQuality {
+  [key: string]: unknown;
+}
+export interface SeamsResult {
+  repo_slug: string;
+  count: number;
+  candidates: SeamCandidate[];
+  quality?: AnalysisQuality;
+  quality_passed?: boolean;
+}
 
 // Story DAG from POST .../plan.
 export interface PlanStory {
@@ -81,6 +90,8 @@ export interface PlanStory {
 export interface PlanResult {
   repo_slug: string; acyclic: boolean; topo_order: string[]; stories: PlanStory[];
   delivery_waves?: string[][];
+  quality?: AnalysisQuality;
+  quality_passed?: boolean;
 }
 
 // Domain Design (DDD bounded contexts + aggregates) types.
@@ -255,6 +266,55 @@ export interface TechnicalDesignResultSummary {
   repo_slug: string;
   version: number;
   services: number;
+  services_detail?: {
+    name: string;
+    bounded_context: string;
+    deployment: "module" | "microservice";
+    story_ids?: string[];
+    api_contracts?: { name: string; method: string; path: string; details?: string }[];
+    persistence?: { resource: string; access_pattern: string; owner_service?: string; details?: string }[];
+    integrations?: { name: string; style: string; target: string; payload?: string }[];
+    evidence_refs?: string[];
+  }[];
+  target_platform?: Record<string, string>;
+  package_structure?: string[];
+  database_design?: {
+    service?: string;
+    schema?: string;
+    migration_tool?: string;
+    migration_location?: string;
+    transaction_boundary?: string;
+    cross_service_data_access?: string;
+    tables?: {
+      legacy_resource?: string;
+      table?: string;
+      entity?: string;
+      repository?: string;
+      access_pattern?: string;
+      owner_service?: string;
+      details?: string;
+      columns?: {
+        name?: string;
+        type?: string;
+        nullable?: boolean;
+        primary_key?: boolean;
+        unique?: boolean;
+        description?: string;
+      }[];
+      indexes?: {
+        name?: string;
+        columns?: string[];
+        unique?: boolean;
+      }[];
+    }[];
+  }[];
+  mermaid_component_diagram?: string;
+  quality?: AnalysisQuality;
+  quality_passed?: boolean | null;
+  quality_threshold?: AnalysisQuality;
+  stage_status?: string;
+  generation_mode?: string;
+  generation_cause?: string | null;
 }
 export interface TechnicalDesignJob {
   status: JobStatus;
@@ -282,16 +342,31 @@ export interface StoryCodegenPlan {
 // best-effort from the backend, so every field is optional and rendered defensively.
 export interface StoryStatusRecord {
   status?: string;
+  phase?: string;
+  phase_label?: string;
   wall_time_s?: number;
   model?: string;
   token_usage?: Record<string, number>;
   cost_usd?: number;
   attempts?: number;
   changed_files?: string[];
-  test_result?: string;
+  test_result?: string | { status?: string | null; failing_tests?: string[] };
   context_hash?: string;
   ac_covered?: string[];
   ac_missing?: string[];
+  resume?: {
+    skip?: boolean;
+    cache_hit?: boolean;
+    reason?: string;
+    context_hash?: string;
+  };
+  quality_gate?: {
+    passed?: boolean;
+    score?: number;
+    checks?: Record<string, boolean>;
+    failures?: string[];
+    warnings?: string[];
+  };
   rationale?: string;
 }
 // Progress counts surfaced by the build gate (Task 7, pass-with-deferred). The
@@ -302,6 +377,8 @@ export interface StoryBuildCounts {
   story_count?: number;
   pass_count?: number;
   skipped_count?: number;
+  cache_hit_count?: number;
+  rebuilt_count?: number;
   deferred_count?: number;
   pending?: number;
 }
@@ -405,12 +482,16 @@ export const api = {
     json<BuildJob>(`/api/workspaces/${workspaceId}/build`),
 
   // ---- enrichment: LLM narrative layer over seams/plan/design (POST → 202; GET → poll) ----
-  startSeamsEnrich: (id: string) =>
-    json<EnrichJob<SeamsEnrichResult>>(`/api/workspaces/${id}/seams/enrich`, { method: "POST" }),
+  startSeamsEnrich: (id: string, refresh = false) =>
+    json<EnrichJob<SeamsEnrichResult>>(
+      `/api/workspaces/${id}/seams/enrich${refresh ? "?refresh=true" : ""}`,
+      { method: "POST" }),
   getSeamsEnrichment: (id: string) =>
     json<EnrichJob<SeamsEnrichResult>>(`/api/workspaces/${id}/seams/enrichment`),
-  startPlanEnrich: (id: string) =>
-    json<EnrichJob<PlanEnrichResult>>(`/api/workspaces/${id}/plan/enrich`, { method: "POST" }),
+  startPlanEnrich: (id: string, refresh = false) =>
+    json<EnrichJob<PlanEnrichResult>>(
+      `/api/workspaces/${id}/plan/enrich${refresh ? "?refresh=true" : ""}`,
+      { method: "POST" }),
   getPlanEnrichment: (id: string) =>
     json<EnrichJob<PlanEnrichResult>>(`/api/workspaces/${id}/plan/enrichment`),
   startDesignEnrich: (id: string) =>

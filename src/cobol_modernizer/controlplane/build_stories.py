@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -50,6 +51,7 @@ from cobol_modernizer.controlplane.build import (
 from cobol_modernizer.controlplane.deps import get_neo4j, get_session
 from cobol_modernizer.controlplane.domain import DomainDesignStorage
 from cobol_modernizer.domain.schema import Aggregate, DomainDesign
+from cobol_modernizer.persistence.repo import PgRepo
 from cobol_modernizer.persistence.tables import Workspace
 from cobol_modernizer.technical_design.schema import TechnicalDesign, TechnicalService
 from cobol_modernizer.technical_design.storage import TechnicalDesignStorage
@@ -188,6 +190,59 @@ def _service_for_item(technical: TechnicalDesign,
     return None
 
 
+def _package_lines_for_item(technical: TechnicalDesign,
+                            item: StoryCodegenItem) -> list[str]:
+    """Service-scoped Spring package paths for the story prompt."""
+    needle = item.service_name.replace("-service", "").replace("-", "").lower()
+    out: list[str] = []
+    for pkg in technical.package_structure:
+        compact = pkg.replace(".", "").replace("-", "").lower()
+        if needle and needle in compact:
+            out.append(pkg)
+    if out:
+        return out
+
+    # Generic fallback: some technical-design artifacts predate package_structure or
+    # use service names that do not appear verbatim in it. The scaffold still derives
+    # service packages from repo_slug + service.name, so mirror that convention here.
+    from cobol_modernizer.codegen.scaffold_from_design import base_package_for
+
+    base = base_package_for(technical.repo_slug)
+    service_leaf = item.service_name[:-8] if item.service_name.endswith("-service") else item.service_name
+    service_pkg = re.sub(r"[^a-z0-9]+", "", service_leaf.lower()) or "service"
+    root = f"{base}.{service_pkg}"
+    return [
+        f"{root}.api",
+        f"{root}.application",
+        f"{root}.domain",
+        f"{root}.infrastructure",
+    ]
+
+
+def _database_lines_for_item(technical: TechnicalDesign,
+                             item: StoryCodegenItem) -> list[str]:
+    """Service-scoped database schema/table/column lines for the story prompt."""
+    out: list[str] = []
+    for db in technical.database_design:
+        if not isinstance(db, dict) or db.get("service") != item.service_name:
+            continue
+        schema = db.get("schema", "")
+        migration = db.get("migration_location", "")
+        out.append(f"schema={schema} migration={migration}".strip())
+        tables = db.get("tables") if isinstance(db.get("tables"), list) else []
+        for table in tables:
+            if not isinstance(table, dict):
+                continue
+            columns = table.get("columns") if isinstance(table.get("columns"), list) else []
+            col_text = ", ".join(
+                f"{c.get('name')} {c.get('type')}"
+                for c in columns if isinstance(c, dict) and c.get("name"))
+            out.append(
+                f"table={table.get('table')} legacy_resource={table.get('legacy_resource')} "
+                f"entity={table.get('entity')} columns=[{col_text}]")
+    return out
+
+
 def _brd_req_strings(brd_node: dict | None) -> list[str]:
     """The BRD requirement sections rendered as short strings for the story context
     (`title — body_markdown`, matching `BRDSection`). Empty when no structured BRD
@@ -232,6 +287,7 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
 
     from cobol_modernizer.agent.deps import GraphDeps
     from cobol_modernizer.agent.harness import SdkAgentRunner
+    from cobol_modernizer.codegen.behavior_model import build_behavior_model
     from cobol_modernizer.codegen.budget import build_budget_from_env
     from cobol_modernizer.codegen.scaffold_from_design import scaffold_from_design
     from cobol_modernizer.codegen.story_context import build_story_context
@@ -272,10 +328,22 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
                 {"cobol_ref": r} for r in item.cobol_refs]}]}},
             max_units=int(os.environ.get("CODEGEN_PACK_MAX_UNITS", "200")),
             max_chars=int(os.environ.get("CODEGEN_PACK_MAX_CHARS", "60000")))
+        behavior_model = build_behavior_model(item, pack)
+        package_lines = _package_lines_for_item(technical, item)
+        database_lines = _database_lines_for_item(technical, item)
+        logger.info(
+            "build-stories: context pack story=%s refs=%d source_chars=%d "
+            "behavior_signals=%d package_lines=%d database_lines=%d",
+            item.story_id, len(item.cobol_refs), len(pack or ""),
+            sum(len(v) for v in behavior_model.values() if isinstance(v, list)),
+            len(package_lines), len(database_lines))
         return build_story_context(
             item, story=story, service=service, aggregate=aggregate,
             brd_requirements=brd_reqs, completed_summaries=list(completed_summaries),
-            source_pack=pack)
+            source_pack=pack,
+            behavior_model=behavior_model,
+            package_lines=package_lines,
+            database_lines=database_lines)
 
     # Repeat-until-done OUTER loop (Task 6 wrapper): `run_story_plan_until_done` runs the
     # whole plan, then re-runs ONLY the still-`failed` stories until they pass, the pooled
@@ -286,12 +354,19 @@ def _real_story_build_step(*, session: Session, neo4j, workspace: Workspace,
     # concurrent story still gets its OWN runner (SdkAgentRunner factory) so per-story
     # token/cost telemetry is not crosstalked.
     runner = SdkAgentRunner()
+    ledger = PgRepo(session)
+    agent_run = ledger.start_run(
+        workspace_id=workspace.id, stage_id=None, role="story-codegen",
+        model=os.environ.get("STORY_CODEGEN_MODEL", "sonnet"), started_by="system")
+    session.flush()
     results = asyncio.run(run_story_plan_until_done(
         items, session=session, workspace_id=workspace.id, module_dir=module_dir,
         context_pack_for=_context_pack_for, runner=runner,
         runner_factory=SdkAgentRunner,
         build_budget=build_budget_from_env(len(items)),
-        project_index=_module_file_index(module_dir)))
+        project_index=_module_file_index(module_dir), ledger=ledger,
+        repo_slug=slug, agent_run_id=agent_run.id,
+        model=os.environ.get("STORY_CODEGEN_MODEL", "sonnet")))
     return {
         "repo_slug": slug, "module_dir": str(module_dir),
         "story_id": story_id, "story_count": len(items),
@@ -322,7 +397,7 @@ _DEFERRED_STATUS = StoryCodegenStatus.deferred.value
 _GATE_TOLERATED = frozenset(_ACCEPTABLE_STATUSES) | {_DEFERRED_STATUS}
 
 
-def _gate_stage(result: dict) -> dict[str, int]:
+def _gate_stage(result: dict, *, targeted_story: bool = False) -> dict[str, int]:
     """Decide whether the `build` stage may be marked passed from the step's per-story
     results, PASS-WITH-DEFERRED. Returns a small progress-count summary
     (`pass_count`/`deferred_count`/`pending`/`story_count`) the caller surfaces so the
@@ -358,7 +433,7 @@ def _gate_stage(result: dict) -> dict[str, int]:
     deferred_count = sum(1 for s in statuses if s == _DEFERRED_STATUS)
     # GENUINELY built = passed or generated-unverified (NOT skipped, NOT deferred). At
     # least one is required so an all-deferred / all-skipped run cannot pass the gate.
-    if pass_count == 0:
+    if pass_count == 0 and not targeted_story:
         raise RuntimeError(
             "story build produced no genuinely-built stories "
             f"(deferred={deferred_count}, skipped={skipped_count}) — build did not pass")
@@ -366,6 +441,8 @@ def _gate_stage(result: dict) -> dict[str, int]:
         "story_count": len(statuses),
         "pass_count": pass_count,
         "skipped_count": skipped_count,
+        "cache_hit_count": skipped_count,
+        "rebuilt_count": pass_count + deferred_count,
         "deferred_count": deferred_count,
         # `pending` = anything tolerated-but-not-yet-a-genuine-pass (deferred + skipped):
         # what the operator still has outstanding from a clean rebuild.
@@ -411,7 +488,15 @@ def _reset_prior_story_status(session: Session, workspace: Workspace,
         # Re-stamp to `pending` (a non-accepted status) so the resume policy re-runs the
         # story. We write rather than hard-delete to preserve the artifact version chain.
         record_story_status(session, workspace_id=workspace.id, story_id=sid,
-                            payload={"status": StoryCodegenStatus.pending.value})
+                            payload={
+                                "status": StoryCodegenStatus.pending.value,
+                                "phase": "queued",
+                                "phase_label": "Queued for rebuild",
+                                "resume": {"skip": False, "cache_hit": False,
+                                           "reason": "restart-fresh rebuild"},
+                            })
+    if stale:
+        session.commit()
     if stale:
         logger.info("build-stories: restart-fresh reset %d prior story record(s) "
                     "for repo=%s", len(stale), workspace.repo_slug)
@@ -454,8 +539,10 @@ def run_story_build(*, session: Session, neo4j, workspace: Workspace,
     result = step(session=session, neo4j=neo4j, workspace=workspace,
                   source_root=source_root, output_root=output_root,
                   plan=plan, story_id=story_id)
+    if isinstance(result, dict) and story_id is not None:
+        result.setdefault("story_id", story_id)
 
-    counts = _gate_stage(result)
+    counts = _gate_stage(result, targeted_story=story_id is not None)
     # Surface the gate's progress counts (pass/deferred/pending) on the step's result so
     # the operator sees real progress — pass-with-deferred can read as `done` even with
     # deferred stories, so the counts are how the cockpit shows what was deferred.
@@ -564,4 +651,16 @@ def story_status(wid: str, session: Session = Depends(get_session),
     job_view = _job_view(job) if job else {
         "status": "idle", "result": None, "error": None,
         "started_at": None, "finished_at": None}
-    return {"stories": get_status_map(session, wid), "job": job_view}
+    stories = get_status_map(session, wid)
+    if job_view["status"] != "running":
+        stories = {
+            sid: (
+                {**rec, "status": StoryCodegenStatus.pending.value,
+                 "phase": "stale-running",
+                 "phase_label": "Previous run stopped before terminal status"}
+                if isinstance(rec, dict) and rec.get("status") == "running"
+                else rec
+            )
+            for sid, rec in stories.items()
+        }
+    return {"stories": stories, "job": job_view}

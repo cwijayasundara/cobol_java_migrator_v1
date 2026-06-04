@@ -476,6 +476,8 @@ def _story_build_summary(*, session: Session, neo4j, workspace: Workspace,
             "pass_count": inner.get("pass_count"),
             "deferred_count": inner.get("deferred_count"),
             "skipped_count": inner.get("skipped_count"),
+            "cache_hit_count": inner.get("cache_hit_count"),
+            "rebuilt_count": inner.get("rebuilt_count"),
             "pending": inner.get("pending"),
         },
     }

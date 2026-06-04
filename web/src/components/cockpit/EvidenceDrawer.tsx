@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { FileSearch } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Artifact } from "@/lib/types";
+import { evidenceRefs } from "@/lib/evidence";
 
 export function EvidenceDrawer({ workspaceId }: { workspaceId: string }) {
   const [artifact, setArtifact] = useState<Artifact | null>(null);
@@ -31,7 +32,7 @@ export function EvidenceDrawer({ workspaceId }: { workspaceId: string }) {
             <div key={req}>
               <div className="text-xs font-medium text-zinc-300">{req}</div>
               <ul className="mt-1 space-y-0.5">
-                {refs.map((ref) => (
+                {evidenceRefs(refs).map((ref) => (
                   <li key={ref} className="text-xs font-mono text-sky-400">{ref}</li>
                 ))}
               </ul>

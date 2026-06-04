@@ -15,6 +15,10 @@ OPTIONAL MATCH (r)-[:HAS_TECHNICAL_DESIGN]->(prev:TechnicalDesign)
 WITH r, coalesce(max(prev.version), 0) + 1 AS version
 CREATE (t:TechnicalDesign {
     id: $id, repo_slug: $repo_slug, version: version,
+    target_platform_json: $target_platform_json,
+    package_structure_json: $package_structure_json,
+    database_design_json: $database_design_json,
+    mermaid_component_diagram: $mermaid_component_diagram,
     services_json: $services_json, evidence_map: $evidence_map,
     html: $html, model: $model, token_usage: $token_usage, created_at: $created_at
 })
@@ -38,6 +42,10 @@ class TechnicalDesignStorage:
         created = datetime.now(timezone.utc).isoformat()
         rows = self.client.run(
             _SAVE, id=tid, repo_slug=design.repo_slug,
+            target_platform_json=json.dumps(design.target_platform),
+            package_structure_json=json.dumps(design.package_structure),
+            database_design_json=json.dumps(design.database_design),
+            mermaid_component_diagram=design.mermaid_component_diagram,
             services_json=json.dumps([s.model_dump(mode="json") for s in design.services]),
             evidence_map=json.dumps(design.evidence_map), html=html, model=model,
             token_usage=json.dumps(token_usage or {}), created_at=created)

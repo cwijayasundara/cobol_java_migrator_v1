@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any
 
 from cobol_modernizer.domain.schema import (
     CONTEXT_DESIGN_SCHEMA, Aggregate, BoundedContextDecl, CobolMapping, ContextDesign,
 )
 from cobol_modernizer.enrichment.base import ground_refs, run_batched
+from cobol_modernizer.enrichment.base import run_batched_result
 
 TACTICAL_SYSTEM = (
     "You design the OO domain model for ONE bounded context of a Spring Boot system rebuilt "
@@ -27,6 +29,60 @@ TACTICAL_SYSTEM = (
     '"repositories":[str],"domain_events":[str],"api_surface","cobol_mapping":[{"cobol_ref",'
     '"maps_to","note"}],"cited_refs":[str]}.'
 )
+
+AGGREGATE_SYSTEM = (
+    "You design ONLY the aggregate model for ONE bounded context of a Spring Boot "
+    "system rebuilt from legacy COBOL. Produce rich aggregate roots, entities, value "
+    "objects, invariants, methods, and domain services. Do not design repositories, "
+    "events, APIs, or COBOL mappings in this unit. Ground everything in the provided "
+    "context refs; invent no identifiers."
+)
+
+CONTRACT_SYSTEM = (
+    "You design ONLY the tactical contracts for ONE bounded context: repository "
+    "interfaces, domain events, and REST/command API surface. Use the provided "
+    "aggregate model as context. Do not emit aggregates or COBOL mappings. Ground "
+    "everything in the provided context refs; invent no identifiers."
+)
+
+MAPPING_SYSTEM = (
+    "You design ONLY the COBOL-to-domain mapping for ONE bounded context. Map COBOL "
+    "copybook/record/paragraph qualified-names to aggregate methods, value objects, "
+    "repositories, or API operations from the provided aggregate/contract design. "
+    "Do not emit aggregates or APIs. Ground every mapping in known context refs; "
+    "invent no identifiers."
+)
+
+AGGREGATE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "aggregates": CONTEXT_DESIGN_SCHEMA["properties"]["aggregates"],
+        "value_objects": CONTEXT_DESIGN_SCHEMA["properties"]["value_objects"],
+        "domain_services": CONTEXT_DESIGN_SCHEMA["properties"]["domain_services"],
+        "cited_refs": CONTEXT_DESIGN_SCHEMA["properties"]["cited_refs"],
+    },
+    "required": ["aggregates"],
+}
+
+CONTRACT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "repositories": CONTEXT_DESIGN_SCHEMA["properties"]["repositories"],
+        "domain_events": CONTEXT_DESIGN_SCHEMA["properties"]["domain_events"],
+        "api_surface": CONTEXT_DESIGN_SCHEMA["properties"]["api_surface"],
+        "cited_refs": CONTEXT_DESIGN_SCHEMA["properties"]["cited_refs"],
+    },
+    "required": ["repositories"],
+}
+
+MAPPING_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cobol_mapping": CONTEXT_DESIGN_SCHEMA["properties"]["cobol_mapping"],
+        "cited_refs": CONTEXT_DESIGN_SCHEMA["properties"]["cited_refs"],
+    },
+    "required": ["cobol_mapping"],
+}
 
 
 def _parse(raw: dict, ctx: BoundedContextDecl, known_refs: set[str]) -> ContextDesign:
@@ -61,6 +117,122 @@ async def design_context(ctx: BoundedContextDecl, *, known_refs: set[str], runne
     raw = await run_batched(runner=runner, system=TACTICAL_SYSTEM, prompt=prompt,
                             schema=CONTEXT_DESIGN_SCHEMA, model=model, timeout_s=timeout_s,
                             label=f"domain-tactical:{ctx.name}")
+    return _parse(raw, ctx, known_refs)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _merge_raw_parts(*, aggregate: dict, contract: dict, mapping: dict) -> dict:
+    cited: list[str] = []
+    for part in (aggregate, contract, mapping):
+        for ref in part.get("cited_refs", []) or []:
+            if isinstance(ref, str) and ref not in cited:
+                cited.append(ref)
+    return {
+        "aggregates": aggregate.get("aggregates", []),
+        "value_objects": aggregate.get("value_objects", []),
+        "domain_services": aggregate.get("domain_services", []),
+        "repositories": contract.get("repositories", []),
+        "domain_events": contract.get("domain_events", []),
+        "api_surface": contract.get("api_surface", ""),
+        "cobol_mapping": mapping.get("cobol_mapping", []),
+        "cited_refs": cited,
+    }
+
+
+async def generate_aggregate_payload(ctx: BoundedContextDecl, *, runner: Any,
+                                     model: str, timeout_s: float,
+                                     attempts: int | None = None,
+                                     max_turns: int | None = None) -> dict:
+    attempts = max(1, attempts if attempts is not None
+                   else _env_int("DOMAIN_TACTICAL_UNIT_ATTEMPTS", 2))
+    max_turns = max(1, max_turns if max_turns is not None
+                    else _env_int("DOMAIN_TACTICAL_UNIT_MAX_TURNS", 4))
+    ctx_json = json.dumps(ctx.model_dump(mode="json"))
+    prompt = (
+        "## Bounded context\n```json\n" + ctx_json + "\n```\n"
+        "Design only the aggregate model for this context.")
+    result = await run_batched_result(
+        runner=runner, system=AGGREGATE_SYSTEM, prompt=prompt,
+        schema=AGGREGATE_SCHEMA, model=model, timeout_s=timeout_s,
+        label=f"domain-aggregate:{ctx.name}", max_turns=max_turns,
+        attempts=attempts, escalate=True)
+    if not result.ok:
+        raise ValueError(f"domain aggregate {ctx.name}: {result.cause}")
+    return result.payload
+
+
+async def generate_contract_payload(ctx: BoundedContextDecl, *, aggregate_payload: dict,
+                                    runner: Any, model: str, timeout_s: float,
+                                    attempts: int | None = None,
+                                    max_turns: int | None = None) -> dict:
+    attempts = max(1, attempts if attempts is not None
+                   else _env_int("DOMAIN_TACTICAL_UNIT_ATTEMPTS", 2))
+    max_turns = max(1, max_turns if max_turns is not None
+                    else _env_int("DOMAIN_TACTICAL_UNIT_MAX_TURNS", 4))
+    ctx_json = json.dumps(ctx.model_dump(mode="json"))
+    prompt = (
+        "## Bounded context\n```json\n" + ctx_json + "\n```\n"
+        "## Aggregate model\n```json\n" + json.dumps(aggregate_payload) + "\n```\n"
+        "Design only repositories, domain events, and API surface for this context.")
+    result = await run_batched_result(
+        runner=runner, system=CONTRACT_SYSTEM, prompt=prompt,
+        schema=CONTRACT_SCHEMA, model=model, timeout_s=timeout_s,
+        label=f"domain-contract:{ctx.name}", max_turns=max_turns,
+        attempts=attempts, escalate=True)
+    if not result.ok:
+        raise ValueError(f"domain contract {ctx.name}: {result.cause}")
+    return result.payload
+
+
+async def generate_mapping_payload(ctx: BoundedContextDecl, *,
+                                   aggregate_payload: dict, contract_payload: dict,
+                                   runner: Any, model: str, timeout_s: float,
+                                   attempts: int | None = None,
+                                   max_turns: int | None = None) -> dict:
+    attempts = max(1, attempts if attempts is not None
+                   else _env_int("DOMAIN_TACTICAL_UNIT_ATTEMPTS", 2))
+    max_turns = max(1, max_turns if max_turns is not None
+                    else _env_int("DOMAIN_TACTICAL_UNIT_MAX_TURNS", 4))
+    ctx_json = json.dumps(ctx.model_dump(mode="json"))
+    prompt = (
+        "## Bounded context\n```json\n" + ctx_json + "\n```\n"
+        "## Aggregate model\n```json\n" + json.dumps(aggregate_payload) + "\n```\n"
+        "## Tactical contracts\n```json\n" + json.dumps(contract_payload) + "\n```\n"
+        "Design only the COBOL-to-domain mapping for this context.")
+    result = await run_batched_result(
+        runner=runner, system=MAPPING_SYSTEM, prompt=prompt,
+        schema=MAPPING_SCHEMA, model=model, timeout_s=timeout_s,
+        label=f"domain-mapping:{ctx.name}", max_turns=max_turns,
+        attempts=attempts, escalate=True)
+    if not result.ok:
+        raise ValueError(f"domain mapping {ctx.name}: {result.cause}")
+    return result.payload
+
+
+async def design_context_decomposed(ctx: BoundedContextDecl, *, known_refs: set[str],
+                                    runner: Any, model: str,
+                                    timeout_s: float) -> ContextDesign:
+    """Generate one context design as three smaller structured units.
+
+    This is the production path for ledger-backed Domain Design runs. It keeps the
+    public `ContextDesign` output unchanged while avoiding one broad tactical prompt
+    that has to produce aggregates, contracts, API, events, and COBOL mapping at once.
+    """
+    aggregate = await generate_aggregate_payload(ctx, runner=runner, model=model,
+                                                 timeout_s=timeout_s)
+    contract = await generate_contract_payload(
+        ctx, aggregate_payload=aggregate, runner=runner, model=model,
+        timeout_s=timeout_s)
+    mapping = await generate_mapping_payload(
+        ctx, aggregate_payload=aggregate, contract_payload=contract,
+        runner=runner, model=model, timeout_s=timeout_s)
+    raw = _merge_raw_parts(aggregate=aggregate, contract=contract, mapping=mapping)
     return _parse(raw, ctx, known_refs)
 
 

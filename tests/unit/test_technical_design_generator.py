@@ -114,10 +114,21 @@ def test_fallback_payload_builds_one_service_per_context_from_grounded_inputs():
     svc = raw["services"][0]
     assert svc["name"] == "posting-service"
     assert svc["bounded_context"] == "Posting"
+    assert svc["deployment"] == "microservice"
     assert svc["story_ids"] == ["US-1"]
     assert svc["evidence_refs"] == ["CBPOST1M"]
     assert svc["persistence"][0]["owner_service"] == "posting-service"
     assert svc["integrations"][0]["style"] == "async"
+    design = parse_technical_design_payload(
+        raw, repo_slug="carddemo-mini", known_refs={"CBPOST1M"},
+        known_story_ids={"US-1"}, known_contexts={"Posting"})
+    assert design.target_platform["spring_boot_version"].startswith("4.")
+    assert "com.cobolmodernizer.carddemomini.posting.api" in design.package_structure
+    assert design.database_design[0]["tables"][0]["table"] == "acctfile"
+    columns = design.database_design[0]["tables"][0]["columns"]
+    assert columns[0]["name"] == "id"
+    assert any(c["name"] == "legacy_payload" for c in columns)
+    assert "flowchart LR" in design.mermaid_component_diagram
 
 
 class RecordingRunner:

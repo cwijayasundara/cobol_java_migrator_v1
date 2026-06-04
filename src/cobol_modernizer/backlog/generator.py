@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from cobol_modernizer.backlog.schema import (
@@ -374,6 +375,145 @@ def _covered_requirements(stories: list[dict]) -> set[str]:
             if rid:
                 covered.add(str(rid))
     return covered
+
+
+def _story_id_part(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "-", value.strip()).strip("-").upper()
+    return cleaned or fallback
+
+
+def _req_text(req: dict, rid: str) -> str:
+    for key in ("text", "statement", "description", "summary", "title"):
+        value = req.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return rid
+
+
+def _req_refs(req: dict, section: dict, rid: str,
+              brd_evidence_map: dict[str, list[str]],
+              known_refs: list[str]) -> list[str]:
+    allowed = set(known_refs)
+    candidates: list[str] = []
+    candidates.extend(brd_evidence_map.get(rid, []) or [])
+    for source in (req, section):
+        for key in ("evidence_refs", "refs", "cited_refs"):
+            values = source.get(key) if isinstance(source, dict) else None
+            if isinstance(values, list):
+                candidates.extend(str(v) for v in values)
+    return _ground(candidates, allowed)
+
+
+def _iter_brd_requirements(brd_sections: list[dict],
+                           known_requirement_ids: list[str]) -> list[tuple[dict, dict]]:
+    rows: list[tuple[dict, dict]] = []
+    seen: set[str] = set()
+    for idx, sec in enumerate(brd_sections):
+        if not isinstance(sec, dict):
+            continue
+        reqs = [r for r in sec.get("requirements", []) or [] if isinstance(r, dict)]
+        if not reqs:
+            continue
+        section = dict(sec)
+        section.setdefault("title", f"Capability {idx + 1}")
+        for req in reqs:
+            rid = str(req.get("id", "")).strip()
+            if not rid:
+                continue
+            if rid in seen:
+                continue
+            seen.add(rid)
+            rows.append((section, req))
+    for idx, rid in enumerate(known_requirement_ids):
+        if rid in seen:
+            continue
+        rows.append((
+            {"title": "Coverage top-up", "requirements": []},
+            {"id": rid, "text": rid},
+        ))
+    return rows
+
+
+def generate_deterministic_backlog(
+    *,
+    brd_sections: list[dict],
+    known_refs: list[str],
+    known_requirement_ids: list[str],
+    brd_evidence_map: dict[str, list[str]] | None = None,
+) -> dict[str, list[dict]]:
+    """Build a grounded backlog without an LLM call.
+
+    This is the fast default for the control-plane ledger path. It converts BRD
+    requirement groups into epics and one testable user story per requirement. The
+    result is intentionally conservative: it cites only known requirement ids and
+    known graph refs already present in the BRD evidence map or requirement sections.
+    """
+    evidence_map = brd_evidence_map or {}
+    rows = _iter_brd_requirements(brd_sections, known_requirement_ids)
+    if not rows:
+        return {"epics": [], "stories": []}
+
+    epics_by_title: dict[str, dict] = {}
+    stories: list[dict] = []
+    used_story_ids: set[str] = set()
+    for idx, (section, req) in enumerate(rows, start=1):
+        rid = str(req.get("id", "")).strip()
+        if not rid:
+            continue
+        section_title = str(section.get("title") or "Capability").strip()
+        epic_key = section_title or "Capability"
+        epic = epics_by_title.get(epic_key)
+        if epic is None:
+            epic_id = f"EPIC-{_story_id_part(epic_key, str(len(epics_by_title) + 1))}"
+            epic = {
+                "id": epic_id,
+                "title": section_title,
+                "outcome": f"Deliver the {section_title} business capability.",
+                "brd_requirement_ids": [],
+                "story_ids": [],
+                "evidence_refs": [],
+            }
+            epics_by_title[epic_key] = epic
+
+        text = _req_text(req, rid)
+        refs = _req_refs(req, section, rid, evidence_map, known_refs)
+        story_id = f"US-{_story_id_part(rid, str(idx))}"
+        base_story_id = story_id
+        suffix = 2
+        while story_id in used_story_ids:
+            story_id = f"{base_story_id}-{suffix}"
+            suffix += 1
+        used_story_ids.add(story_id)
+
+        epic["brd_requirement_ids"].append(rid)
+        epic["story_ids"].append(story_id)
+        epic["evidence_refs"] = _ground(epic["evidence_refs"] + refs, set(known_refs))
+        title = text.rstrip(".")
+        actor = str(req.get("actor") or "business user")
+        stories.append({
+            "id": story_id,
+            "epic_id": epic["id"],
+            "title": title[:96] or rid,
+            "actor": actor,
+            "narrative": (
+                f"As a {actor}, I want {title[:160]} so that "
+                f"{section_title.lower()} is supported."
+            ),
+            "brd_requirement_ids": [rid],
+            "acceptance_criteria": [{
+                "id": f"AC-{_story_id_part(rid, str(idx))}-1",
+                "statement": (
+                    f"Given the legacy evidence for {rid}, when the {section_title} "
+                    f"capability is exercised, then {text}"
+                ),
+                "evidence_refs": refs,
+            }],
+            "depends_on": [],
+            "seam_refs": [],
+            "evidence_refs": refs,
+        })
+
+    return {"epics": list(epics_by_title.values()), "stories": stories}
 
 
 def _decompose(brd_sections: list[dict], known_requirement_ids: list[str]) -> bool:

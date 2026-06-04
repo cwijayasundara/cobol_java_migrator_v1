@@ -77,6 +77,48 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_work_unit_benchmark(args: argparse.Namespace) -> int:
+    """Run the safe Phase-7 work-unit benchmark for carddemo-mini."""
+    from cobol_modernizer.benchmark.work_unit_pipeline import (
+        run_carddemo_mini_benchmark,
+        write_report,
+    )
+    from cobol_modernizer.cobol.parser import CobolParser
+
+    repo_root = Path(args.repo).resolve()
+    out_path = Path(args.out).resolve()
+    repo_slug = args.repo_slug
+    if repo_slug == "aws-mf-mod-carddemo" or repo_root.name == "aws-mf-mod-carddemo":
+        logger.error(
+            "aws-mf-mod-carddemo benchmark is intentionally disabled here to avoid "
+            "large-repo token burn; run carddemo-mini only.")
+        return 2
+    if not repo_root.exists():
+        logger.error("repo path does not exist: %s", repo_root)
+        return 1
+
+    parser = CobolParser.from_env(repo_root)
+    parse_fn = lambda root: parser.parse_repo()  # noqa: E731
+    logger.info("Running work-unit benchmark on %s", repo_root)
+    report = run_carddemo_mini_benchmark(
+        repo_root, parse_fn=parse_fn, repo_slug=repo_slug)
+    write_report(report, out_path)
+    logger.info("Report written to %s", out_path)
+    logger.info(
+        "repo=%s wall_seconds=%.3f parse_seconds=%.3f files=%d "
+        "programs=%d copybooks=%d agent_calls=%d cost_usd=%.2f",
+        report.repo_slug,
+        report.wall_seconds,
+        report.parse_seconds,
+        report.files_discovered,
+        report.programs,
+        report.copybooks,
+        report.agent_calls,
+        report.cost_usd,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         prog="cobol_modernizer",
@@ -105,6 +147,30 @@ def build_parser() -> argparse.ArgumentParser:
              "(default: ./benchmark_out/baseline.json)",
     )
     p_base.set_defaults(func=_cmd_baseline)
+
+    p_wu = sub.add_parser(
+        "work-unit-benchmark",
+        help="Run the Phase-7 work-unit modernization benchmark for carddemo-mini",
+    )
+    p_wu.add_argument(
+        "--repo",
+        default=str(_DEFAULT_REPO / "carddemo-mini"),
+        metavar="PATH",
+        help="Root directory of carddemo-mini "
+             "(default: ./source_code_to_analyse/carddemo-mini)",
+    )
+    p_wu.add_argument(
+        "--repo-slug",
+        default="carddemo-mini",
+        help="Repository slug recorded in the benchmark report",
+    )
+    p_wu.add_argument(
+        "--out",
+        default="./benchmark_out/carddemo-mini-work-unit-benchmark.json",
+        metavar="FILE",
+        help="Output path for the JSON benchmark report",
+    )
+    p_wu.set_defaults(func=_cmd_work_unit_benchmark)
 
     return root
 

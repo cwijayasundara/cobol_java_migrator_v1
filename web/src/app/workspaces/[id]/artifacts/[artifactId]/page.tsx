@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import type { Artifact } from "@/lib/types";
+import { evidenceRefs } from "@/lib/evidence";
 
 export default function ArtifactPage(
   { params }: { params: Promise<{ id: string; artifactId: string }> },
@@ -37,7 +38,7 @@ export default function ArtifactPage(
           <div key={req} className="mb-2">
             <div className="text-xs font-medium text-zinc-200">{req}</div>
             <ul className="ml-3 list-disc">
-              {refs.map((r) => (
+              {evidenceRefs(refs).map((r) => (
                 <li key={r} className="text-xs font-mono text-sky-400">{r}</li>
               ))}
             </ul>
